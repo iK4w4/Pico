@@ -12,6 +12,14 @@ manifest, static CRT — just run it.
 
 by MaLENIA ([@iK4w4](https://t.me/iK4w4))
 
+## Screenshots
+
+![Pico's start page — the savings band up top, local-server detection below](screenshots/image_2026-11-02_20-46-36.png)
+
+*The start page: Shield and Lite keep score of the waste they
+prevented (476 requests blocked on the author's machine), and
+dev servers appear underneath as cards the moment they start.*
+
 ## Features
 
 - **Start page that finds your servers** — running localhost
