@@ -67,6 +67,13 @@ dev servers appear underneath as cards the moment they start.*
   Delete the folder for a factory reset. Note: whoever copies
   the folder copies the logins inside it — keep it private.
 
+## Non-goals
+
+By design, Pico has no downloads manager (downloads are
+denied), no bookmarks or history UI, no extensions, and no
+accounts, sync or telemetry. It is a local-development
+browser, not a general-purpose one.
+
 ## Building
 
 You need a Rust toolchain (https://rustup.rs).
