@@ -10,7 +10,7 @@ Built with Rust on tao/wry and the Edge WebView2 runtime
 (included with Windows 11 / recent Windows 10). No embedded
 manifest, static CRT — just run it.
 
-by MaLENIA ([@iK4w4](https://t.me/iK4w4))
+by iK4w4 ([@iK4w4](https://t.me/iK4w4))
 
 ## Screenshots
 
