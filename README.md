@@ -91,4 +91,4 @@ you picked.
 ## License
 
 MIT — see [LICENSE](LICENSE). Copyright (c) 2026
-MaLENIA (@iK4w4).
+iK4w4.
