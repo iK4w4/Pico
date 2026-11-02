@@ -1,0 +1,34 @@
+! Title: Pico synthetic fixture - uBlock filters analogue
+! Every rule in this file is original fixture content,
+! hand-written for Pico's test suites on reserved example /
+! invalid hosts. It is NOT the real list, and no line is
+! copied from any published filter list.
+! ------------------------------------------------------------------
+! Video-site fixture rules, hand-written for Pico's DOM suite.
+! The property names below are the site's own JSON field names
+! (facts of its API shape); the rules themselves are original.
+www.youtube.com##+js(trusted-rpfr, '"adPlacements"', '"no_ads"', player)
+www.youtube.com##+js(trusted-rpfr, '"adSlots"', '"no_ads"', player)
+www.youtube.com##+js(trusted-replace-xhr-response, '"adPlacements"', '"no_ads"', player)
+www.youtube.com##+js(trusted-replace-xhr-response, /\"adSlots\"\s*:\s*\[.{0\,60}\]\s*,?/, , /\/player/)
+m.youtube.com,www.youtube.com,tv.youtube.com##+js(set, ytInitialPlayerResponse.playerAds, undefined)
+m.youtube.com,www.youtube.com,tv.youtube.com##+js(set, ytInitialPlayerResponse.adPlacements, undefined)
+m.youtube.com,www.youtube.com,tv.youtube.com##+js(set, ytInitialPlayerResponse.adSlots, undefined)
+www.youtube.com##+js(set, playerResponse.adPlacements, undefined)
+m.youtube.com,www.youtube.com##+js(json-prune, playerResponse.adPlacements playerResponse.playerAds playerResponse.adSlots adPlacements playerAds adSlots)
+m.youtube.com,www.youtube.com##+js(json-prune-fetch-response, reelWatchSequenceResponse.entries.[-].command.reelWatchEndpoint.adClientParams.isAd entries.[-].command.reelWatchEndpoint.adClientParams.isAd, , url:reel_watch_sequence)
+m.youtube.com,www.youtube.com##+js(json-prune, entries.[-].command.reelWatchEndpoint.adClientParams.isAd)
+tv.youtube.com##+js(trusted-replace-xhr-response, '\"adPlacements\"', '\"no_ads\"', /playlist/)
+m.youtube.com##+js(json-edit-fetch-response, ..itemSectionRenderer.contents.*[?.adSlotRenderer], propsToMatch, /get_watch)
+! ------------------------------------------------------------------
+||ad-delivery.example.net^
+||ads.googlevideo.com^
+||instream.example.org^$media
+||pre-roll.example.net^$xmlhttprequest,domain=video.example
+*_ad_$media,domain=video.example,3p
+||stream.example.net/initplayback$xhr,domain=video.example
+##.video-ad-overlay
+video.example##.preroll-box
+example.org##+js(set, picoFixture.flag, true)
+example.org#@#+js(set, picoFixture.flag)
+example.net##+js(aeld, click)

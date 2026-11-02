@@ -1,0 +1,27 @@
+# Build output
+/target/
+**/target/
+
+# Packages
+/dist/
+
+# Pico runtime data (state, log, profile, downloaded lists)
+data/
+
+# Logs (test battery logs, pico.log copies)
+*.log
+
+# Visual-check scratch (generated pages + screenshots;
+# the gen_*.py scripts are kept, their output is not)
+visual-check/pages/
+visual-check/pages-*/
+visual-check/*.png
+
+# Local verification scratch
+pico*-verify/
+*-verify/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.tmp

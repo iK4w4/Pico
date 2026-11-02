@@ -1,0 +1,129 @@
+/* Pico shared design system — TRUE neumorphism, token-driven.
+   Injected into both the chrome page and the start page in place
+   of the token line. All colors and all shadows live here (or in
+   the generated theme blocks appended after this file at
+   assembly) so the two pages can never drift apart.
+
+   THE DESIGN LANGUAGE (v20, carried unchanged through v27):
+   - ONE material per theme+mode: --bg and --surface are the
+     SAME color. The page, the header slab, and every element
+     are cut from one slab; nothing is a different-colored card
+     sitting on a shelf.
+   - Shape comes ONLY from dual soft shadows: a light shadow
+     toward the light source (top-left) and a dark shadow away
+     from it. Elements are raised (extruded) or inset/pressed
+     (wells) — never outlined. Chrome controls carry NO border.
+   - Every box-shadow in both pages is one of the --neu-*
+     tokens below (geometry x the theme's two shadow tints) or,
+     since v27, a --glow token on the approved glow selector
+     set. A contract test greps both pages: a raw shadow
+     literal cannot come back.
+
+   v27 (AUDIT V27-A): THE THEME SYSTEM. Through v26 this file
+   carried two hand-written [data-theme] blocks for the single
+   violet palette. The user supplied NINE palettes in v27 (SEVEN more in 0.31) and asked
+   for all of them as switchable themes, so the per-theme
+   tokens moved OUT of this file: they are derived from the
+   palette table by core::themes (ONE role mapping, ONE
+   derivation) and appended at assembly as
+   [data-palette="…"][data-theme="…"] blocks. What remains
+   here is everything mode- and palette-independent: the
+   radius scale, the --neu-* shadow GEOMETRY (it only composes
+   the per-theme tint tokens, so one definition serves all
+   thirty-two theme blocks), and the base element styles.
+   Contrast discipline is unchanged and now enforced per
+   palette by the theme tests: --text, --muted, --faint and
+   --accent hold >= 4.5:1 on their material in every theme;
+   --accent-text holds >= 4.5:1 on --accent. Neumorphism's low
+   contrast applies to SHAPES, never to text. */
+
+/* Theme-independent tokens: the radius scale (v24 modern
+   touch: --r-lg / --r-xl grew 2px) and the neumorphic shadow
+   vocabulary — geometry only, built from each theme's
+   --shadow-dark / --shadow-light / --focus-* tints. Raised =
+   extruded from the slab; inset = a well pressed into it;
+   pressed = the active state of a raised control. Focus is a
+   shadow too: a soft accent glow, never an outline. */
+:root {
+  --r-sm: 6px;    /* small controls: tab close, byline, badges */
+  --r-md: 8px;    /* icon buttons, hint, error bar */
+  --r-lg: 14px;   /* tabs, inputs, recent rows */
+  --r-xl: 18px;   /* cards, large surfaces */
+  --r-pill: 999px;
+  --neu-raised: 6px 6px 16px var(--shadow-dark), -6px -6px 16px var(--shadow-light);
+  --neu-raised-sm: 4px 4px 10px var(--shadow-dark), -4px -4px 10px var(--shadow-light);
+  --neu-inset: inset 4px 4px 10px var(--shadow-dark), inset -4px -4px 10px var(--shadow-light);
+  --neu-pressed: inset 3px 3px 8px var(--shadow-dark), inset -3px -3px 8px var(--shadow-light);
+  --neu-focus: 0 0 8px 0 var(--focus-glow);
+  --neu-focus-ring: 0 0 0 2px var(--focus-outline);
+  /* --danger lives in the generated theme blocks: it is a
+     per-palette step (accent-2 where the stack supplies one,
+     a standing red hue otherwise). */
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+/* Keyboard focus: no outline anywhere in the app — focus is a
+   soft accent ring drawn by the shadow system, the only shadow
+   besides --neu-focus that may carry the accent tint. It
+   replaces the element's resting shadow while focused; that
+   trade is the affordance. */
+:focus-visible {
+  outline: none;
+  box-shadow: var(--neu-focus-ring);
+}
+
+/* The neumorphic raised element: extruded from the one
+   material, shaped only by the dual shadow. */
+.raised {
+  background: var(--surface);
+  box-shadow: var(--neu-raised);
+}
+.raised-sm {
+  background: var(--surface);
+  box-shadow: var(--neu-raised-sm);
+}
+
+/* The neumorphic pressed well: inset dual shadow in the slab. */
+.well {
+  background: var(--surface);
+  box-shadow: var(--neu-inset);
+}
+
+svg.ic {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

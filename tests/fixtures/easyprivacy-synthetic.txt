@@ -1,0 +1,40 @@
+[Adblock Plus 2.0]
+! Title: Pico synthetic fixture - EasyPrivacy analogue
+! Every rule in this file is original fixture content,
+! hand-written for Pico's test suites on reserved example /
+! invalid hosts. It is NOT the real list, and no line is
+! copied from any published filter list.
+! ------------------------------------------------------------------
+||analytics.example-corp.invalid^$script,third-party,xmlhttprequest
+||analytics.example-corp.invalid/collect$xmlhttprequest,third-party
+||metrics.example.net^$third-party
+||telemetry.example.org^$ping,xmlhttprequest
+||cdn.example.net/fingerprint.js$script
+||data-collect.example.org^$xmlhttprequest
+||trk-1.example.net^$third-party
+||trk-2.example.net^$third-party
+||trk-3.example.net^$third-party
+||trk-4.example.net^$third-party
+||trk-5.example.net^$third-party
+||trk-6.example.net^$third-party
+||trk-7.example.net^$third-party
+||trk-8.example.net^$third-party
+||trk-9.example.net^$third-party
+||trk-10.example.net^$third-party
+||trk-11.example.net^$third-party
+||trk-12.example.net^$third-party
+||trk-13.example.net^$third-party
+||trk-14.example.net^$third-party
+||trk-15.example.net^$third-party
+||trk-16.example.net^$third-party
+||trk-17.example.net^$third-party
+||trk-18.example.net^$third-party
+||trk-19.example.net^$third-party
+||trk-20.example.net^$third-party
+||trk-21.example.net^$third-party
+||trk-22.example.net^$third-party
+||trk-23.example.net^$third-party
+||trk-24.example.net^$third-party
+||trk-25.example.net^$third-party
+##.tracking-pixel
+telemetry.example.org##.consent-track

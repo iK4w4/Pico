@@ -1,0 +1,73 @@
+[Adblock Plus 2.0]
+! Title: Pico synthetic fixture - EasyList analogue
+! Expires: 1 days
+! Every rule in this file is original fixture content,
+! hand-written for Pico's test suites on reserved example /
+! invalid hosts. It is NOT the real list, and no line is
+! copied from any published filter list.
+! ------------------------------------------------------------------
+||ads.example-corp.invalid^
+||ads.example-corp.invalid^$script,third-party,xmlhttprequest
+@@||ads.example-corp.invalid/lib.js$script,domain=partner.*|shop.example
+||ads.example-corp.invalid^
+||banners.example.org^$image
+||cdn.example.net/ads/*$image
+||popups.example.org^
+||popups.example.org^$badfilter
+||beacon.example.net^$ping
+||video-ads.example.net^$media
+||sponsor.example-corp.invalid^$stylesheet
+||trackers.example.net^$script,important,domain=news.example
+@@||trackers.example.net^$script,xhr,domain=docs.example
+/tracker-\d+\.js/$script
+||ads.example-corp.invalid^$csp=script-src 'self'
+||ad-serve-1.example.net^$third-party
+||ad-serve-2.example.net^$third-party
+||ad-serve-3.example.net^$third-party
+||ad-serve-4.example.net^$third-party
+||ad-serve-5.example.net^$third-party
+||ad-serve-6.example.net^$third-party
+||ad-serve-7.example.net^$third-party
+||ad-serve-8.example.net^$third-party
+||ad-serve-9.example.net^$third-party
+||ad-serve-10.example.net^$third-party
+||ad-serve-11.example.net^$third-party
+||ad-serve-12.example.net^$third-party
+||ad-serve-13.example.net^$third-party
+||ad-serve-14.example.net^$third-party
+||ad-serve-15.example.net^$third-party
+||ad-serve-16.example.net^$third-party
+||ad-serve-17.example.net^$third-party
+||ad-serve-18.example.net^$third-party
+||ad-serve-19.example.net^$third-party
+||ad-serve-20.example.net^$third-party
+||ad-serve-21.example.net^$third-party
+||ad-serve-22.example.net^$third-party
+||ad-serve-23.example.net^$third-party
+||ad-serve-24.example.net^$third-party
+||ad-serve-25.example.net^$third-party
+||ad-serve-26.example.net^$third-party
+||ad-serve-27.example.net^$third-party
+||ad-serve-28.example.net^$third-party
+||ad-serve-29.example.net^$third-party
+||ad-serve-30.example.net^$third-party
+##.ad-banner
+##.ad-slot
+###sponsored-box
+##.promo-strip
+site1.example##.local-ad-1
+site2.example##.local-ad-2
+site3.example##.local-ad-3
+site4.example##.local-ad-4
+site5.example##.local-ad-5
+site6.example##.local-ad-6
+site7.example##.local-ad-7
+site8.example##.local-ad-8
+site9.example##.local-ad-9
+site10.example##.local-ad-10
+site11.example##.local-ad-11
+site12.example##.local-ad-12
+proc.example##.promo:has-text(Sponsored)
+news.example##.inline-promo
+news.example##.keep-me
+news.example#@#.inline-promo

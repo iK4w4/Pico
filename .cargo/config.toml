@@ -1,0 +1,10 @@
+# Cross-build Pico for Windows from this Linux VM:
+#   cargo xwin build --release --target x86_64-pc-windows-msvc
+# Static CRT: no vcruntime DLL dependency ships or is required.
+# The link-arg adds v24's icon-only resource (assets/pico.res,
+# compiled by llvm-rc from scripts/gen_icon.py — see AUDIT
+# V24-1). It contains RT_ICON + RT_GROUP_ICON and NO manifest;
+# gate v2 verifies that on the shipped exe. rust-lld consumes
+# .res inputs natively, like link.exe.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static", "-C", "link-arg=assets/pico.res"]

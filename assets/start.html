@@ -1,0 +1,583 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light" data-palette="forest">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; connect-src 'none'; base-uri 'none'; form-action 'none';">
+<title>Start</title>
+<style>
+/*__SHARED_CSS__*/
+
+body { min-height: 100vh; }
+.page { max-width: 880px; margin: 0 auto; padding: 32px 28px 44px; }
+
+/* v24: the hero is COMPACT — mark, wordmark, one tagline. The
+   byline/social row moved down to the footer zone and the drop
+   hint moved to the file-opening (recents) section it belongs
+   to (AUDIT V24-3). */
+.hero { text-align: center; margin-bottom: 22px; }
+.hero .ring {
+  width: 64px; height: 64px; margin: 0 auto 10px; border-radius: 50%;
+  display: grid; place-items: center;
+  background: var(--surface);
+  box-shadow: var(--neu-raised);
+}
+.hero .ring span {
+  width: 44px; height: 44px; border-radius: 50%;
+  background: var(--accent); color: var(--accent-text);
+  display: grid; place-items: center; font-size: 21px; font-weight: 800;
+}
+.hero h1 { margin: 0 0 4px; font-size: 25px; font-weight: 700; letter-spacing: -0.01em; }
+.hero h1 .v { color: var(--accent); }
+.hero p { margin: 0; color: var(--muted); font-size: 14px; }
+
+/* Branding: a quiet byline in the FOOTER zone (v24 moved it
+   down from the hero) — the author's handle flanked by two
+   neumorphic social chips. Brand colors appear ONLY as the
+   hover tint of each chip's icon; labels stay in the normal
+   text color. The chips are start-page actions: a click posts
+   {action:"social", site:<name>} over IPC (the
+   pico://social/<name> href remains as the no-IPC fallback);
+   Rust maps the enum name to the constant URL and opens it in
+   a NEW tab — no URL string lives in this page. */
+.byline {
+  display: flex; align-items: center; justify-content: center;
+  gap: 12px; margin: 14px 0 10px; flex-wrap: wrap;
+}
+.byline .by-text { font-size: 12.5px; font-weight: 600; color: var(--muted); letter-spacing: 0.02em; }
+.chip {
+  display: inline-flex; align-items: center; gap: 8px; text-decoration: none;
+  border-radius: var(--r-pill); padding: 8px 12px; font-size: 12.5px; font-weight: 650;
+  background: var(--surface); color: var(--text);
+  box-shadow: var(--neu-raised-sm);
+  transition: transform 120ms ease, box-shadow 120ms ease;
+}
+.chip:hover { transform: translateY(-1px); }
+.chip:active { box-shadow: var(--neu-pressed); transform: translateY(0); }
+.chip svg { width: 15px; height: 15px; color: var(--faint); transition: color 120ms ease; }
+.chip:hover svg.tg { color: #229ED9; }
+.chip:hover svg.yt { color: #FF0033; }
+
+/* 0.30: the savings band — two neumorphic tiles (Shield /
+   Lite) under the hero, one combined time-saved line, and a
+   zero state. Resting tiles carry no glow (resting surfaces
+   never glow); the hover lift matches the service cards,
+   glow included — this tile hover is one of the approved
+   glow sites (AUDIT 0.30, census updated). Figures are set
+   with textContent only; the ≈ marks the estimates, the
+   counts are exact (title tooltips carry the method). */
+.stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 560px) { .stats-grid { grid-template-columns: 1fr; } }
+.stat-tile {
+  border-radius: var(--r-xl); padding: 16px 18px;
+  background: var(--surface);
+  box-shadow: var(--neu-raised);
+  transition: transform 130ms ease, box-shadow 130ms ease;
+}
+.stat-tile:hover { transform: translateY(-2px); box-shadow: var(--neu-raised), var(--glow); }
+.stat-name {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 11px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase;
+  color: var(--faint);
+}
+.stat-name svg { width: 15px; height: 15px; color: var(--accent); }
+.stat-big { margin-top: 8px; font-size: 26px; font-weight: 750; letter-spacing: -0.01em; color: var(--accent); }
+.stat-sub { margin-top: 3px; font-size: 12.5px; color: var(--muted); }
+.stat-sub.dim { font-size: 12px; color: var(--faint); }
+.stats-time { margin-top: 12px; text-align: center; font-size: 13px; color: var(--muted); }
+.stats-time b { color: var(--accent); font-weight: 700; }
+
+/* Section headers (v24): one component for every section —
+   letter-spaced small-caps title, a muted meta note, a hairline,
+   and (for Recents) the management tools on the right. */
+.sec-head {
+  display: flex; align-items: center; gap: 12px; margin: 26px 2px 12px;
+}
+.sec-head h2 {
+  font-size: 12px; font-weight: 700; letter-spacing: 0.16em; text-transform: uppercase;
+  color: var(--faint); margin: 0;
+}
+.sec-head .line { flex: 1; height: 1px; background: var(--inset-line); }
+.sec-meta { font-size: 11.5px; color: var(--faint); letter-spacing: 0.04em; white-space: nowrap; }
+.sec-tools { display: inline-flex; gap: 8px; }
+.sec-btn {
+  display: inline-flex; align-items: center; text-decoration: none;
+  font-size: 11px; font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--muted); border-radius: var(--r-md); padding: 4px 8px;
+  background: var(--surface); box-shadow: var(--neu-raised-sm);
+  transition: color 140ms ease, box-shadow 140ms ease;
+}
+.sec-btn:hover { color: var(--accent); }
+.sec-btn:active { box-shadow: var(--neu-pressed); }
+
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
+.card {
+  display: block; text-decoration: none; color: inherit;
+  border-radius: var(--r-xl); padding: 16px;
+  background: var(--surface);
+  box-shadow: var(--neu-raised);
+  transition: transform 130ms ease, box-shadow 130ms ease;
+}
+.card:hover { transform: translateY(-2px); box-shadow: var(--neu-raised), var(--glow); }
+.card:active { transform: translateY(0); }
+.card .top { display: flex; align-items: baseline; gap: 8px; }
+.card .port { font-size: 21px; font-weight: 750; color: var(--accent); }
+.card .scheme {
+  font-size: 10px; font-weight: 750; letter-spacing: 0.08em; text-transform: uppercase;
+  border-radius: var(--r-sm); padding: 2px 6px; color: var(--ok);
+  box-shadow: var(--neu-inset);
+}
+.card .scheme.https { color: var(--accent); }
+.card .name {
+  margin-top: 6px; font-size: 13.5px; font-weight: 600;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.card .proc { margin-top: 2px; font-size: 12px; color: var(--faint); }
+
+.empty {
+  border-radius: var(--r-xl); padding: 24px; text-align: center; color: var(--faint);
+  font-size: 13px; line-height: 1.55;
+  box-shadow: var(--neu-inset);
+}
+.empty b { color: var(--muted); }
+
+.recents { display: flex; flex-direction: column; gap: 8px; }
+/* v24: a recent row is a container — the main anchor (opens the
+   file) plus a small remove (x) anchor that appears on hover /
+   focus-within. Both are plain anchors so the no-IPC legacy
+   transport works for the new actions exactly like the old. */
+.recent {
+  display: flex; align-items: center; gap: 8px;
+  border-radius: var(--r-lg); padding: 6px 8px 6px 6px; background: var(--surface);
+  box-shadow: var(--neu-raised-sm);
+  transition: transform 140ms ease, box-shadow 140ms ease;
+}
+.recent:hover { transform: translateY(-1px); }
+.recent:active { box-shadow: var(--neu-pressed); transform: translateY(0); }
+.recent-main {
+  display: flex; align-items: center; gap: 12px; flex: 1; min-width: 0;
+  text-decoration: none; color: inherit; padding: 6px; border-radius: var(--r-md);
+}
+.recent-x {
+  width: 26px; height: 26px; flex: none; display: grid; place-items: center;
+  border-radius: var(--r-md); color: var(--muted); text-decoration: none;
+  font-size: 15px; line-height: 1; background: var(--surface);
+  box-shadow: var(--neu-raised-sm); opacity: 0;
+  transition: opacity 140ms ease, color 140ms ease, box-shadow 140ms ease;
+}
+.recent:hover .recent-x, .recent:focus-within .recent-x { opacity: 1; }
+.recent-x:hover { color: var(--danger); }
+.recent-x:active { box-shadow: var(--neu-pressed); }
+.recent svg { color: var(--faint); }
+.recent .texts { min-width: 0; }
+.recent .rn { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.recent .rp { font-size: 11.5px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* The file-opening cluster sits attached to the Recents
+   section: the picker button and the drop hint (v24). */
+.actions { display: flex; gap: 12px; margin-top: 16px; flex-wrap: wrap; align-items: center; }
+.actions-hint { font-size: 12px; color: var(--faint); }
+.actions-hint b { color: var(--muted); font-weight: 650; }
+.action {
+  display: inline-flex; align-items: center; gap: 8px; text-decoration: none;
+  border-radius: var(--r-pill); padding: 12px 16px; font-size: 13px; font-weight: 650;
+  background: var(--surface); color: var(--text);
+  box-shadow: var(--neu-raised);
+  transition: transform 120ms ease, box-shadow 120ms ease;
+}
+.action:hover { transform: translateY(-1px); }
+.action:active { box-shadow: var(--neu-pressed); transform: translateY(0); }
+.action.primary { background: var(--accent); color: var(--accent-text); }
+.footer { margin-top: 36px; text-align: center; font-size: 11.5px; color: var(--faint); line-height: 1.7; }
+.footer b { color: var(--muted); font-weight: 650; }
+.others {
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="hero">
+    <div class="ring"><span>P</span></div>
+    <h1>Pico <span class="v">0.31</span></h1>
+    <p>A tiny browser for local development. Your dev servers, files and pages — nothing else.</p>
+  </div>
+
+  <div class="sec-head" id="stats-head">
+    <h2>Prevented waste</h2>
+    <span class="line"></span>
+    <span class="sec-tools">
+      <a class="sec-btn" id="stats-reset" href="pico://stats-reset" title="Zero the savings counters and the calibration data Pico collected">Reset stats</a>
+    </span>
+  </div>
+  <div class="stats-grid" id="stats-grid">
+    <div class="stat-tile" id="stat-shield" title="Requests blocked are counted exactly — every request the Shield refused, once. Data saved is an estimate: each blocked request is credited the average size of real responses of the same type that Pico measured on your connection (built-in averages until 20 of your own responses are measured). Payloads stripped in-page are listed separately — never added to the estimate — as the size of the values the Shield removed, counted once per removal.">
+      <div class="stat-name">
+        <svg viewBox="0 0 24 24" class="ic"><path d="M12 3l7 2.8V11c0 4.6-2.9 7.7-7 9.2C7.9 18.7 5 15.6 5 11V5.8z"/><path d="M9 11.6l2.1 2.1L15.4 9.4"/></svg>
+        Shield · ads &amp; trackers
+      </div>
+      <div class="stat-big" id="stat-shield-bytes">≈ 0 B</div>
+      <div class="stat-sub" id="stat-shield-count">0 requests blocked</div>
+      <div class="stat-sub dim" id="stat-shield-pruned"></div>
+      <div class="stat-sub dim" id="stat-shield-session"></div>
+    </div>
+    <div class="stat-tile" id="stat-lite" title="Requests blocked are counted exactly — every image, font, media file or preview stream Lite refused, once, and never double-counted with the Shield. Data saved is estimated exactly like the Shield's: measured averages from your own traffic, built-in averages until calibrated. The video you chose to watch is never counted — it plays.">
+      <div class="stat-name">
+        <svg viewBox="0 0 24 24" class="ic"><path d="M20.2 3.8c-5.9.4-11.6 3.2-14.3 9L3 19.4l1.9.6 6-2.5c5.6-2.4 9-8 9.3-13.7z"/><path d="M4.5 19.5C7 13 11 8.5 16.5 5.5"/></svg>
+        Lite · heavy resources
+      </div>
+      <div class="stat-big" id="stat-lite-bytes">≈ 0 B</div>
+      <div class="stat-sub" id="stat-lite-count">0 requests blocked</div>
+      <div class="stat-sub dim" id="stat-lite-session"></div>
+    </div>
+  </div>
+  <div class="stats-time" id="stat-time" title="Estimated time saved: each blocked request is credited the average time a real response of the same type took on your connection (built-in averages until 20 of your own responses are measured)."></div>
+  <div class="empty" id="stat-zero" hidden>
+    <b>Nothing blocked yet — happy browsing.</b><br>
+    Browse with the Shield or Lite on and the waste they prevent will be counted here.
+    Requests are counted exactly; the data and time figures are calibrated estimates from your own traffic.
+  </div>
+
+  <div class="sec-head">
+    <h2>Running on this machine</h2>
+    <span class="line"></span>
+  </div>
+  <div class="grid" id="services"></div>
+  <div class="empty" id="services-empty">
+    <b>No local services detected.</b><br>
+    Start a dev server (for example <b>npm run dev</b>, <b>python -m http.server</b>, or <b>php -S localhost:8000</b>)
+    and it will appear here within a few seconds.
+  </div>
+  <div class="others" id="others" hidden></div>
+
+  <div class="sec-head" id="recents-head" hidden>
+    <h2>Recent files</h2>
+    <span class="sec-meta" id="recents-count"></span>
+    <span class="line"></span>
+    <span class="sec-tools">
+      <a class="sec-btn" id="recents-vis" href="pico://recents-visibility/hide">Hide</a>
+      <a class="sec-btn" id="recents-clear" href="pico://recents-clear">Clear all</a>
+    </span>
+  </div>
+  <div class="recents" id="recents"></div>
+
+  <div class="actions">
+    <a class="action primary" id="pick-file" href="pico://pick-file">
+      <svg viewBox="0 0 24 24" class="ic"><path d="M3 8a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+      Open a local HTML file…
+    </a>
+    <span class="actions-hint">or drop an HTML file anywhere on this window — type an address, a <b>localhost port</b>, or a <b>file path</b> in the address bar</span>
+  </div>
+
+  <div class="footer">
+    <b>Ctrl+T</b> new tab &nbsp;·&nbsp; <b>Ctrl+W</b> close tab &nbsp;·&nbsp; <b>Ctrl+Tab</b> switch tab &nbsp;·&nbsp;
+    <b>Ctrl+L</b> address bar &nbsp;·&nbsp; <b>Ctrl+R</b> reload &nbsp;·&nbsp; <b>right-click → Inspect</b> devtools<br>
+    Local files reload automatically when you save them. Downloads are blocked by design — Pico is a viewer, not a downloader.
+    <div class="byline">
+      <a class="chip" href="pico://social/telegram" data-social="telegram" title="Telegram — @iK4w4" aria-label="Open the author's Telegram in a new tab">
+        <svg viewBox="0 0 24 24" class="ic tg"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4z"/></svg>
+        Telegram
+      </a>
+      <span class="by-text">by @iK4w4</span>
+      <a class="chip" href="pico://social/youtube" data-social="youtube" title="YouTube — @iK4w4" aria-label="Open the author's YouTube in a new tab">
+        <svg viewBox="0 0 24 24" class="ic yt"><rect x="2.5" y="5.5" width="19" height="13" rx="4"/><path d="M10.2 9.7v4.6L14.4 12z" fill="currentColor" stroke="none"/></svg>
+        YouTube
+      </a>
+    </div>
+    Pico 0.31 · by @iK4w4
+  </div>
+</div>
+
+<script>
+"use strict";
+/* Pico v24 start page. Initial data is rendered server-side into
+   the INIT object; live updates arrive through the __picoSet*
+   hooks. Every server-supplied string is placed with
+   textContent only.
+   v24: the Recents section is MANAGEABLE from here — a per-row
+   remove (x), Clear all, and a Hide/Show toggle — all posted as
+   actions through the same single dispatch as every other
+   gesture; Rust owns the list and pushes the new state back. */
+var INIT = __PICO_INIT_JSON__ || {};
+
+/* Action transport: every start-page gesture — recent file,
+   file picker, service card, social chip — is posted to Rust as
+   a typed IPC message ({kind:"action", ...}), the same channel
+   the chrome's commands and the navigation observer already
+   use. Rust decides it in ONE dispatch (start-tab + start-page
+   gate, enum-only socials, allowlisted service URLs) and logs
+   the decision. If window.ipc is somehow unavailable the click
+   is NOT intercepted: the anchor's own navigation proceeds and
+   the legacy pico:// transport lands in exactly the same
+   dispatch. */
+function postAction(payload, ev) {
+  if (window.ipc && typeof window.ipc.postMessage === "function") {
+    if (ev) ev.preventDefault();
+    try {
+      var msg = { kind: "action" };
+      for (var k in payload) msg[k] = payload[k];
+      window.ipc.postMessage(JSON.stringify(msg));
+    } catch (e) { /* IPC died mid-click; the log line in Rust is the witness either way */ }
+  }
+}
+var servicesEl = document.getElementById("services");
+var emptyEl = document.getElementById("services-empty");
+var recentsEl = document.getElementById("recents");
+var recentsHead = document.getElementById("recents-head");
+var recentsCount = document.getElementById("recents-count");
+var recentsVis = document.getElementById("recents-vis");
+var recentsClear = document.getElementById("recents-clear");
+
+function applyTheme(t, p) {
+  document.documentElement.setAttribute("data-theme", t === "dark" ? "dark" : "light");
+  /* v27: the palette rides along (second arg); older one-arg
+     pushes keep working — mode-only updates leave the palette
+     attribute untouched. */
+  if (p) document.documentElement.setAttribute("data-palette", p);
+}
+
+function renderServices(list) {
+  while (servicesEl.firstChild) servicesEl.removeChild(servicesEl.firstChild);
+  var n = 0;
+  (list || []).forEach(function (s) {
+    n++;
+    var a = document.createElement("a");
+    a.className = "card";
+    a.href = s.url;
+    var top = document.createElement("div"); top.className = "top";
+    var port = document.createElement("span"); port.className = "port";
+    port.textContent = ":" + s.port;
+    var scheme = document.createElement("span");
+    scheme.className = "scheme" + (s.kind === "https" ? " https" : "");
+    scheme.textContent = s.kind === "https" ? "HTTPS" : "HTTP";
+    top.appendChild(port); top.appendChild(scheme);
+    var name = document.createElement("div"); name.className = "name";
+    name.textContent = s.label || ("Port " + s.port);
+    var proc = document.createElement("div"); proc.className = "proc";
+    proc.textContent = s.process ? s.process : "";
+    a.appendChild(top); a.appendChild(name); a.appendChild(proc);
+    a.addEventListener("click", function (ev) {
+      postAction({ action: "service", url: s.url }, ev);
+    });
+    servicesEl.appendChild(a);
+  });
+  emptyEl.style.display = n === 0 ? "" : "none";
+}
+
+function baseName(p) {
+  var parts = String(p).split(/[\\/]/);
+  return parts[parts.length - 1] || p;
+}
+
+/* Recents rendering (v24). The page keeps the last list Rust
+   pushed (currentRecents) plus the visibility flag; every
+   mutation is requested over the action dispatch and comes
+   BACK through these hooks — the page never edits the list
+   itself. Hidden state collapses the section to its header
+   line: "RECENT FILES — hidden" + the Show tool. */
+var currentRecents = [];
+var recentsHidden = !!INIT.recentsHidden;
+
+function renderRecents(list) {
+  if (Array.isArray(list)) currentRecents = list;
+  var n = currentRecents.length;
+  while (recentsEl.firstChild) recentsEl.removeChild(recentsEl.firstChild);
+  currentRecents.forEach(function (p, i) {
+    var row = document.createElement("div");
+    row.className = "recent";
+    var a = document.createElement("a");
+    a.className = "recent-main";
+    a.href = "pico://recent/" + i;
+    var ic = document.createElement("span");
+    ic.innerHTML = '<svg viewBox="0 0 24 24" class="ic"><path d="M6 2h9l5 5v15H6z"/><path d="M14 2v6h6"/></svg>'; /* constant markup only */
+    var texts = document.createElement("span");
+    texts.className = "texts";
+    var rn = document.createElement("div"); rn.className = "rn"; rn.textContent = baseName(p);
+    var rp = document.createElement("div"); rp.className = "rp"; rp.textContent = p;
+    texts.appendChild(rn); texts.appendChild(rp);
+    a.appendChild(ic); a.appendChild(texts);
+    a.addEventListener("click", function (ev) {
+      postAction({ action: "recent", index: i }, ev);
+    });
+    var x = document.createElement("a");
+    x.className = "recent-x";
+    x.href = "pico://recent-remove/" + i;
+    x.textContent = "×";
+    x.title = "Remove from recents";
+    x.setAttribute("aria-label", "Remove " + baseName(p) + " from recents");
+    x.addEventListener("click", function (ev) {
+      postAction({ action: "recent-remove", index: i }, ev);
+    });
+    row.appendChild(a); row.appendChild(x);
+    recentsEl.appendChild(row);
+  });
+  recentsHead.hidden = n === 0 && !recentsHidden;
+  recentsCount.textContent = recentsHidden
+    ? "— hidden"
+    : (n === 0 ? "" : "· " + n + (n === 1 ? " file" : " files"));
+  recentsVis.textContent = recentsHidden ? "Show" : "Hide";
+  recentsVis.setAttribute("href",
+    recentsHidden ? "pico://recents-visibility/show" : "pico://recents-visibility/hide");
+  recentsClear.style.display = recentsHidden || n === 0 ? "none" : "";
+  recentsEl.style.display = recentsHidden ? "none" : "";
+}
+
+function setRecentsHidden(h) {
+  recentsHidden = !!h;
+  renderRecents();
+}
+
+/* Listeners that are not dev servers get ONE muted aggregate
+   line — never per-port cards. */
+var othersEl = document.getElementById("others");
+function renderOthers(n) {
+  n = n || 0;
+  othersEl.hidden = n === 0;
+  othersEl.textContent = n === 0 ? "" :
+    n + " other local listener" + (n === 1 ? "" : "s") + " (not dev servers)";
+}
+
+/* ------------------------------------------------------------
+   0.30: the savings band. The figures arrive in INIT and via
+   __picoSetStats pushes (Rust owns the book; this page only
+   renders it). The humanizers below MIRROR core::stats'
+   humanize_bytes / humanize_duration exactly — the shared
+   fixture cases are pinned against both implementations
+   (Rust unit tests + this page's DOM suite). All values are
+   placed with textContent; the ≈ is part of the copy, not
+   decoration: counts are exact, bytes and time are calibrated
+   estimates (see the tiles' title tooltips for the method).
+   ------------------------------------------------------------ */
+function sigFigs(v) {
+  if (v >= 99.95) return String(Math.round(v));
+  var s = v >= 9.995 ? v.toFixed(1) : v.toFixed(2);
+  if (s.indexOf(".") >= 0) s = s.replace(/0+$/, "").replace(/\.$/, "");
+  return s;
+}
+function humanizeBytes(n) {
+  if (n < 1000) return n + " B";
+  var units = ["KB", "MB", "GB", "TB", "PB", "EB"], v = n, u = 0;
+  while (v >= 1000 && u < units.length) { v /= 1000; u++; }
+  if (v >= 999.95 && u < units.length) { v /= 1000; u++; }
+  return sigFigs(v) + " " + units[u - 1];
+}
+function humanizeDuration(ms) {
+  var s = ms / 1000;
+  if (s < 60) return sigFigs(s) + " s";
+  var m = s / 60;
+  if (m < 60) return sigFigs(m) + " min";
+  var h = m / 60;
+  if (h < 24) return sigFigs(h) + " h";
+  var d = sigFigs(h / 24);
+  return d === "1" ? "1 day" : d + " days";
+}
+function fmtInt(n) {
+  return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+function statNum(x) {
+  return typeof x === "number" && isFinite(x) && x > 0 ? Math.floor(x) : 0;
+}
+function setText(id, text) {
+  var el = document.getElementById(id);
+  if (el) el.textContent = text;
+}
+function fillStatTile(name, e, withPruned) {
+  var blocked = statNum(e.blocked);
+  setText("stat-" + name + "-bytes", "≈ " + humanizeBytes(statNum(e.estBytes)));
+  setText("stat-" + name + "-count",
+    fmtInt(blocked) + (blocked === 1 ? " request blocked" : " requests blocked"));
+  var sess = document.getElementById("stat-" + name + "-session");
+  if (sess) {
+    var sb = statNum(e.sessionBlocked);
+    sess.textContent = sb > 0
+      ? fmtInt(sb) + " blocked this session · ≈ " + humanizeBytes(statNum(e.sessionEstBytes))
+      : "";
+  }
+  if (withPruned) {
+    var pr = document.getElementById("stat-shield-pruned");
+    var events = statNum(e.prunedEvents);
+    if (pr) {
+      pr.textContent = events > 0
+        ? "+ " + fmtInt(events) + (events === 1 ? " ad payload" : " ad payloads") +
+          " stripped in-page · ≈ " + humanizeBytes(statNum(e.prunedBytes)) +
+          " of removed values, counted per removal"
+        : "";
+    }
+  }
+}
+function renderStats(s) {
+  s = s || {};
+  var sh = s.shield || {}, li = s.lite || {};
+  var active = statNum(sh.blocked) > 0 || statNum(li.blocked) > 0 || statNum(sh.prunedEvents) > 0;
+  var grid = document.getElementById("stats-grid");
+  var zero = document.getElementById("stat-zero");
+  var timeEl = document.getElementById("stat-time");
+  if (grid) grid.style.display = active ? "" : "none";
+  if (zero) zero.hidden = active;
+  if (!active) {
+    if (timeEl) timeEl.style.display = "none";
+    return;
+  }
+  fillStatTile("shield", sh, true);
+  fillStatTile("lite", li, false);
+  var totalMs = statNum(sh.estDurationMs) + statNum(li.estDurationMs);
+  var sessMs = statNum(sh.sessionEstDurationMs) + statNum(li.sessionEstDurationMs);
+  if (timeEl) {
+    if (totalMs > 0) {
+      timeEl.style.display = "";
+      timeEl.textContent = "≈ " + humanizeDuration(totalMs) + " of loading prevented" +
+        (sessMs > 0 ? " · " + humanizeDuration(sessMs) + " this session" : "");
+    } else {
+      timeEl.style.display = "none";
+    }
+  }
+}
+
+window.__picoSetServices = renderServices;
+window.__picoSetRecents = renderRecents;
+window.__picoSetRecentsHidden = setRecentsHidden;
+window.__picoSetTheme = applyTheme;
+window.__picoSetOthers = renderOthers;
+window.__picoSetStats = renderStats;
+
+/* Static controls: the social chips and the file-picker button. */
+document.querySelectorAll(".byline .chip").forEach(function (el) {
+  el.addEventListener("click", function (ev) {
+    postAction({ action: "social", site: el.getAttribute("data-social") }, ev);
+  });
+});
+var pickEl = document.getElementById("pick-file");
+if (pickEl) {
+  pickEl.addEventListener("click", function (ev) {
+    postAction({ action: "pick-file" }, ev);
+  });
+}
+/* Recents management controls: the toggle asks for the
+   OPPOSITE of the current flag (Rust persists it and pushes
+   the confirmed state back through __picoSetRecentsHidden);
+   Clear all carries no payload at all. */
+recentsVis.addEventListener("click", function (ev) {
+  postAction({ action: "recents-visibility", hidden: !recentsHidden }, ev);
+});
+recentsClear.addEventListener("click", function (ev) {
+  postAction({ action: "recents-clear" }, ev);
+});
+/* 0.30: Reset stats rides the same dispatch (the anchor's
+   pico://stats-reset href is the no-IPC fallback). Rust
+   zeroes the book and pushes the zero view back here. */
+var statsReset = document.getElementById("stats-reset");
+if (statsReset) {
+  statsReset.addEventListener("click", function (ev) {
+    postAction({ action: "stats-reset" }, ev);
+  });
+}
+
+applyTheme(INIT.theme, INIT.palette);
+renderServices(INIT.services);
+renderOthers(INIT.otherListeners);
+renderRecents(INIT.recents);
+renderStats(INIT.stats);
+</script>
+</body>
+</html>

@@ -1,0 +1,6 @@
+/* Pico v24 exe icon (AUDIT V24-1): exactly ONE resource, an
+   ICON, compiled by llvm-rc from the generator-produced
+   pico.ico. NO manifest, NO version info, nothing else —
+   activation contexts read the manifest alone, and this file
+   deliberately has none to give. */
+1 ICON "pico.ico"

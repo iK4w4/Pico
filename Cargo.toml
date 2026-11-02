@@ -1,0 +1,64 @@
+[package]
+name = "pico"
+version = "0.31.0"
+edition = "2021"
+description = "Pico 0.31 by @iK4w4 \u2014 a tiny neumorphic Windows browser for local development (Rust + tao/wry WebView2): auto-detected localhost services, a uBlock-grade Shield (filter lists downloaded on first run from EasyList / uBlock Origin and cached beside the exe), Lite mode with chosen-video semantics, a start-page savings band, sixteen palette themes, and portable data (state, log, lists and profile in data\\ beside the exe). Ships with NO embedded manifest (zero RT_MANIFEST, gate-verified); the only resource is an icon-only .rsrc compiled by llvm-rc from a generated .ico."
+license = "MIT"
+
+[lib]
+name = "pico_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "Pico"
+path = "src/main.rs"
+required-features = ["gui"]
+
+[features]
+default = ["gui"]
+gui = ["dep:tao", "dep:wry", "dep:notify", "dep:rfd", "dep:webview2-com", "dep:windows-core"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tao = { version = "0.34", optional = true }
+wry = { version = "0.53", features = ["devtools"], optional = true }
+notify = { version = "7", optional = true }
+rfd = { version = "0.15", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+webview2-com = { version = "0.38", optional = true }
+windows-core = { version = "0.61", optional = true }
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    # v25: GetAdaptersAddresses + IP_ADAPTER_ADDRESSES_LH are
+    # gated on Ndis types (IF_OPER_STATUS) in windows-sys 0.59 —
+    # same crate, one more feature flag, no new dependency.
+    "Win32_NetworkManagement_Ndis",
+    # Public build: WinHTTP — the OS HTTP stack the Shield's
+    # first-run filter-list download rides on. Same crate, one
+    # more feature flag, no new dependency.
+    "Win32_Networking_WinHttp",
+    "Win32_Networking_WinSock",
+    "Win32_System_Threading",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+# NOTE: no build-dependencies, no build.rs, no embed-manifest, no winres.
+# Pico must link with NO RT_MANIFEST — gate v2 in scripts/ proves it
+# on the final binary. v24's ONE resource is assets/pico.res, an
+# ICON-ONLY .res compiled by llvm-rc from scripts/gen_icon.py's
+# pico.ico, CHECKED IN and linked via .cargo/config.toml's
+# link-arg — no build-time resource toolchain is needed, and
+# nothing else (no manifest, no version info) is in it. See
+# BUILD_NOTES.md for the forensic rationale.
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+opt-level = "z"

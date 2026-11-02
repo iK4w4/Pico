@@ -1,0 +1,1167 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light" data-palette="forest">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; connect-src 'none'; base-uri 'none'; form-action 'none';">
+<title>Pico</title>
+<style>
+/*__SHARED_CSS__*/
+
+/* Chrome layout (merged header; neumorphic material): ONE top
+   row + a slim address row + a feather strip. The heights MUST
+   keep matching the Rust-side constants in src/core/layout.rs —
+   the single source of truth: top row 40 + address row 46 =
+   CHROME_H 86; the solid (opaque) paint stops at SOLID_H 74; the
+   bottom FEATHER_H 12 is a transparent gradient over the content
+   (the content rect starts at 74, underneath this WebView). The
+   body itself is TRANSPARENT: the chrome WebView's controller
+   background is transparent too (wry `with_transparent` in
+   app.rs — a deliberate, documented exception to the v14
+   explicit-background rule; the themed tao window background is
+   what shows through, so a dead chrome document still yields
+   themed color, never a black void).
+   The header is ONE SLAB of the shared material — both rows
+   paint var(--surface), which IS var(--bg); no seam, line or
+   shadow exists between the rows. Controls are shaped ONLY by
+   the --neu-* dual-shadow tokens from the shared CSS: no borders
+   anywhere (the loading spinner's ring is the single functional
+   exception), and focus is the --neu-focus glow.
+   Spacing discipline: every margin/padding/gap from the scale
+   {0, 2, 4, 6, 8, 12, 16}, every radius from the --r-* tokens —
+   contract tests grep for strays. The ONE spacing exception is
+   #navbar's vertical padding (1px/13px), which is geometry, not
+   rhythm: it centers the 32 DIP content box in the 34 DIP solid
+   zone. */
+html, body { height: 86px; overflow: hidden; user-select: none; background: transparent; }
+
+#shell { position: relative; height: 86px; }
+
+/* Row 1 (40): brand block · tab strip · window controls. The
+   brand block is fixed-size (flex: none, nowrap — it never
+   shrinks); the strip takes the rest and scrolls internally, so
+   the brand and the window controls can never be pushed
+   off-screen. Non-interactive parts of this row (brand text,
+   empty strip) are the window-drag region — see the pointerdown
+   handler. The row's content starts on the shared 12 DIP page
+   inset — the brand mark's left edge and the navbar's back
+   button share one vertical line. The right side is the
+   borderless caption convention: the window-controls cluster
+   is flush to the window's top-right corner (no inset), its
+   boxes full-height. */
+#topbar {
+  height: 40px; display: flex; align-items: stretch; gap: 4px;
+  padding: 0 0 0 12px; background: var(--surface);
+}
+.brand { display: flex; align-items: center; gap: 8px; flex: none; font-weight: 650; font-size: 13px; letter-spacing: 0.02em; white-space: nowrap; }
+.brand .dot {
+  width: 22px; height: 22px; border-radius: 50%;
+  background: var(--accent); color: var(--accent-text);
+  display: grid; place-items: center; font-size: 12px; font-weight: 800;
+  /* v27 glow: the brand mark carries the theme's soft glow —
+     one of the approved --glow selector sites (AUDIT V27-A3). */
+  box-shadow: var(--neu-raised-sm), var(--glow-soft);
+}
+/* The version badge: a small raised pill of the slab itself,
+   accent only in its text. Height is exactly 22px (line-height
+   18 + 2x2 padding) so it matches the brand mark. */
+.brand .ver {
+  font-size: 10.5px; font-weight: 650; color: var(--accent);
+  background: var(--surface); box-shadow: var(--neu-raised-sm);
+  border-radius: var(--r-pill); padding: 2px 6px; line-height: 18px;
+}
+/* The muted "by @iK4w4" text-button in the brand block. Quiet by
+   default; warms to the accent on hover. A real button
+   (keyboard-focusable) that sends the enum-only social command
+   for Telegram — no URL lives in this page. Padding keeps its
+   hit target ≥28 DIP tall inside the 40 DIP row. */
+.brand .byline {
+  font-size: 11px; font-weight: 600; color: var(--muted);
+  padding: 8px; border-radius: var(--r-sm); white-space: nowrap;
+  transition: color 120ms ease;
+}
+.brand .byline:hover { color: var(--accent); }
+/* Window controls: a true caption cluster — three equal-width
+   38 DIP boxes, full row height, tiling contiguously to the
+   window's top-right corner (gap 0). Their glyphs use the
+   shared 16px .ic box, optically centered by the grid. */
+.win-controls { display: flex; gap: 0; flex: none; align-items: stretch; }
+.wbtn {
+  width: 38px; display: grid; place-items: center;
+  color: var(--muted); transition: background 120ms ease, color 120ms ease;
+}
+/* Caption hover: the cluster sits at the window's top-right
+   corner, where a raised shadow would clip against the window
+   edge — so hover uses the ONE documented fill exception, the
+   --raised luminance nudge, and no shadow. */
+.wbtn:hover { background: var(--raised); color: var(--text); }
+.wbtn.close:hover { background: var(--danger); color: var(--on-danger); }
+
+#tabstrip {
+  flex: 1 1 auto; min-width: 0; height: 40px;
+  display: flex; align-items: flex-end; gap: 6px;
+  padding: 0 4px; overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
+}
+#tabstrip::-webkit-scrollbar { display: none; }
+.tab {
+  position: relative; z-index: 0; display: flex; align-items: center; gap: 8px;
+  min-width: 100px; max-width: 200px; height: 34px; flex: 1 1 0;
+  padding: 0 4px 0 12px; border-radius: var(--r-lg) var(--r-lg) 0 0;
+  color: var(--muted); font-size: 12px; text-align: left;
+  transition: color 120ms ease;
+}
+/* ATTACHMENT: a tab's shadow lives on ::before, behind the
+   tab's own material face (z-index -1 inside the tab's
+   stacking context) and CLIPPED at the tab's bottom edge
+   (clip-path inset bottom = 0). No shadow can cross into the
+   navbar, so a raised tab's material runs unbroken into the
+   row beneath — the tab reads as GROWN from the slab, never
+   as a lozenge floating in front of it. Inactive tabs are flat
+   labels on the slab; the raise appears on hover and stays on
+   the active tab. */
+.tab::before {
+  content: ""; position: absolute; inset: 0; z-index: -1;
+  border-radius: inherit;
+  background: var(--surface);
+  clip-path: inset(-18px -18px 0 -18px);
+  transition: box-shadow 120ms ease;
+}
+.tab:hover { color: var(--text); }
+.tab:hover::before { box-shadow: var(--neu-raised-sm); }
+.tab[aria-selected="true"] {
+  background: var(--surface); color: var(--text);
+}
+.tab[aria-selected="true"]::before { box-shadow: var(--neu-raised-sm), var(--glow-soft); }
+/* Concave fillets: the active tab's bottom corners sweep into
+   the toolbar through two 12px radial-gradient fillets on
+   ::after — transparent inside the quarter arc (the notch),
+   material outside it. They extend 12px past the tab on each
+   side, in the same z-layer as the shadow, so the side shadows
+   bend around the arc instead of stopping dead at the corner. */
+.tab[aria-selected="true"]::after {
+  content: ""; position: absolute; bottom: 0; left: -12px; right: -12px;
+  height: 12px; z-index: -1; pointer-events: none;
+  background:
+    radial-gradient(circle at 0 0, transparent 11px, var(--surface) 12.5px) left top / 12px 12px no-repeat,
+    radial-gradient(circle at 100% 0, transparent 11px, var(--surface) 12.5px) right top / 12px 12px no-repeat;
+}
+.tab .favicon {
+  width: 8px; height: 8px; border-radius: 50%; flex: none;
+  background: var(--faint);
+}
+.tab.start .favicon { background: var(--accent); }
+.tab.failed .favicon { background: var(--warn); }
+.tab .tt {
+  flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  pointer-events: none; line-height: 16px;
+}
+.tab .spin {
+  width: 11px; height: 11px; flex: none; border-radius: 50%; display: none;
+  border: 2px solid var(--inset-line); border-top-color: var(--accent);
+  animation: spin 700ms linear infinite;
+}
+.tab.loading .spin { display: block; }
+.tab.loading .favicon { display: none; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.tab .x {
+  width: 30px; height: 30px; border-radius: var(--r-sm); flex: none;
+  display: grid; place-items: center; color: var(--faint);
+  /* An inactive, unhovered tab hides its close button (the
+     browser convention) — always-visible x's compete with the
+     titles in the strip. The active tab, a hovered tab, and
+     keyboard focus always show it. Opacity only: the box, and
+     therefore the layout, never moves. */
+  opacity: 0; transition: opacity 120ms ease, box-shadow 120ms ease, color 120ms ease;
+}
+.tab:hover .x, .tab:focus-visible .x, .tab[aria-selected="true"] .x { opacity: 1; }
+.tab .x:hover { box-shadow: var(--neu-raised-sm); color: var(--text); }
+#newtab {
+  width: 30px; height: 30px; align-self: center; border-radius: var(--r-md); flex: none;
+  display: grid; place-items: center; color: var(--muted);
+  box-shadow: var(--neu-raised-sm);
+  transition: color 120ms ease, box-shadow 120ms ease;
+}
+#newtab:hover { color: var(--text); }
+#newtab:active { box-shadow: var(--neu-pressed); }
+
+/* Row 2 (46): the address row. Its background paints SOLID
+   only for the top 34 DIP (down to SOLID_H 74); below that the
+   feather shows through. The controls live entirely in that
+   solid band: the row's content box is exactly 32 DIP tall at
+   the top (padding 1px top / 13px bottom — geometry, the one
+   spacing exception), so the 32 DIP address input and the
+   30 DIP buttons never dip into the feather zone, and every
+   control centers on the solid zone's midline. The row paints
+   the SAME material as the top row — the gradient below is
+   one color (var(--surface)) stopping at 34px only because
+   the feather zone must stay transparent; there is no seam,
+   line or shadow between the rows anywhere. The row's
+   left/right inset is the shared 12 DIP page inset: the back
+   button's left edge aligns with the brand mark's. */
+#navbar {
+  height: 46px; display: flex; align-items: center; gap: 8px;
+  padding: 1px 12px 13px;
+  background: linear-gradient(to bottom, var(--surface) 0, var(--surface) 34px, transparent 34px);
+}
+/* v27 (Workstream B): the address row is arranged in
+   functional clusters separated by neumorphic grooves —
+   navigation [back fwd reload home open] · the address well ·
+   filtering [shield lite + their counters] · send/appearance
+   [teleport palette mode]. DOM order == visual order == focus
+   order. The groove is a 2px pressed slit in the slab: the
+   --neu-pressed pair on a hairline box, no border, no fill. */
+.cluster { display: flex; align-items: center; gap: 8px; flex: none; }
+.vsep {
+  width: 2px; height: 20px; border-radius: var(--r-pill); flex: none;
+  background: var(--surface); box-shadow: var(--neu-pressed);
+}
+/* Narrow windows: the count badges collapse first (the
+   toggles themselves stay — a hidden count loses information,
+   a hidden control loses function). */
+@media (max-width: 900px) {
+  .badges .badge { display: none !important; }
+}
+@media (max-width: 820px) {
+  .brand .byline { display: none; }
+}
+/* Nav/utility buttons: raised from the slab AT REST —
+   neumorphic buttons are extrusions, not flat glyphs that
+   light up on hover. Pressing one swaps the raised pair for
+   the pressed (inset) pair: the button sinks into the slab. */
+.nbtn {
+  width: 30px; height: 30px; border-radius: var(--r-md); flex: none;
+  display: grid; place-items: center; color: var(--muted);
+  box-shadow: var(--neu-raised-sm);
+  transition: color 120ms ease, box-shadow 120ms ease;
+}
+.nbtn:hover { color: var(--text); box-shadow: var(--neu-raised-sm), var(--glow); }
+.nbtn:active { box-shadow: var(--neu-pressed); }
+.nbtn:disabled { opacity: 0.38; cursor: default; box-shadow: none; }
+.nbtn:disabled:hover { box-shadow: none; color: var(--muted); }
+/* The address well: a well pressed INTO the slab — the shared
+   .well class gives it the --neu-inset pair, and it has NO
+   border at all. Focus adds ONLY the --neu-focus glow — a soft
+   accent halo (<= 0.18 alpha) layered over the unchanged
+   inset pair — cross-faded in 120ms; the box never moves. */
+#addr-wrap {
+  flex: 1; display: flex; align-items: center; gap: 8px; height: 32px;
+  border-radius: var(--r-pill);
+  padding: 0 12px; min-width: 120px;
+  transition: box-shadow 120ms ease;
+}
+#addr-wrap:focus-within {
+  box-shadow: var(--neu-inset), var(--neu-focus), var(--glow);
+}
+#addr-wrap svg { color: var(--faint); }
+#addr {
+  flex: 1; border: none; background: none; color: var(--text);
+  font: inherit; font-size: 13px; line-height: 32px; outline: none; min-width: 0;
+  user-select: text;
+}
+#addr::placeholder { color: var(--faint); }
+/* The input itself never draws a focus ring: the wrap's
+   :focus-within glow IS the address bar's focus indication. */
+#addr:focus-visible { box-shadow: none; }
+.badges { display: flex; align-items: center; gap: 8px; flex: none; }
+/* Shield toggle: a latching neumorphic switch in the address
+   row's right cluster. ON = pressed into the slab with an
+   accent glyph (the --neu-pressed pair); OFF = raised and
+   muted, like every other resting button. The count chip next
+   to it is a .badge showing the session's blocked total. */
+#shield { color: var(--muted); }
+#shield[aria-pressed="true"] { box-shadow: var(--neu-pressed), var(--glow); color: var(--accent); }
+#shield[aria-pressed="false"] { box-shadow: var(--neu-raised-sm); }
+/* Lite toggle (v25): the Shield's latching language exactly —
+   pressed + accent while ON, raised + muted while OFF. */
+#lite { color: var(--muted); }
+#lite[aria-pressed="true"] { box-shadow: var(--neu-pressed), var(--glow); color: var(--accent); }
+#lite[aria-pressed="false"] { box-shadow: var(--neu-raised-sm); }
+/* While the Teleport panel is open its button reads pressed. */
+#teleport[aria-expanded="true"] { box-shadow: var(--neu-pressed), var(--glow); color: var(--accent); }
+/* While the theme picker is open its button reads pressed. */
+#palette[aria-expanded="true"] { box-shadow: var(--neu-pressed), var(--glow); color: var(--accent); }
+
+/* Teleport backdrop (v26): dims the CHROME area under the
+   centered card. It lives entirely inside the chrome rect —
+   the content webview is a separate HWND below and is NOT
+   dimmed (a chrome document cannot paint over it); the card
+   itself is the focus. Clicking the backdrop closes the
+   panel, like every other dismiss path. */
+#tp-backdrop, #pp-backdrop {
+  position: fixed; left: 0; right: 0; top: 86px; bottom: 0; z-index: 5;
+  background: var(--backdrop);
+  display: none;
+}
+#tp-backdrop.on, #pp-backdrop.on { display: block; }
+
+/* Theme picker panel (v27): the Teleport card's mechanics —
+   a centered sheet hanging from under the address row inside
+   the panel extension of the chrome rect. A grid of palette
+   cards: six palette dots + the theme's name; the current
+   theme's card is pressed + glowing; a click applies the
+   theme INSTANTLY (one theme_set command — the next snapshot
+   repaints every surface from the new token block, no reload
+   anywhere). The two centered panels are mutually exclusive;
+   the app enforces it and so does this page's open-state. */
+#ppanel {
+  position: fixed; top: 80px; left: 50%; transform: translateX(-50%); z-index: 6;
+  width: 400px; max-height: 486px; overflow-y: auto;
+  display: none; flex-direction: column; gap: 8px;
+  background: var(--surface); border-radius: var(--r-xl);
+  box-shadow: var(--neu-raised);
+  padding: 16px;
+}
+#ppanel.on { display: flex; }
+#ppanel .pp-head {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12px; font-weight: 650; letter-spacing: 0.04em;
+}
+#ppanel .pp-head .pp-title { flex: 1; text-transform: uppercase; color: var(--muted); }
+#ppanel .pp-x {
+  width: 30px; height: 30px; border-radius: var(--r-md); flex: none;
+  display: grid; place-items: center; color: var(--muted);
+  box-shadow: var(--neu-raised-sm);
+  transition: color 120ms ease, box-shadow 120ms ease;
+}
+#ppanel .pp-x:hover { color: var(--text); }
+#ppanel .pp-x:active { box-shadow: var(--neu-pressed); }
+#pp-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+}
+.pcard {
+  display: flex; flex-direction: column; gap: 8px; align-items: flex-start;
+  padding: 12px; border-radius: var(--r-lg); text-align: left;
+  background: var(--surface); box-shadow: var(--neu-raised-sm);
+  transition: box-shadow 120ms ease;
+}
+.pcard:hover { box-shadow: var(--neu-raised-sm), var(--glow); }
+.pcard:active { box-shadow: var(--neu-pressed); }
+.pcard[aria-pressed="true"] { box-shadow: var(--neu-pressed), var(--glow); }
+.pcard .pname { font-size: 12px; font-weight: 650; color: var(--text); }
+.pcard[aria-pressed="true"] .pname { color: var(--accent); }
+.pcard .pdots { display: flex; gap: 4px; }
+.pcard .pdot {
+  width: 14px; height: 14px; border-radius: 50%; flex: none;
+  /* A3-F2: a subtle neutral inset ring so pale dots on pale
+     cards and deep dots on deep cards stay visible as six
+     distinct dots in every derivation. The ring lives in a
+     --neu-* token (the shadow-vocabulary contract admits only
+     token references in box-shadow declarations). */
+  --neu-pdot-ring: inset 0 0 0 1px rgba(128,128,128,.45);
+  box-shadow: var(--neu-pdot-ring), var(--neu-raised-sm);
+}
+
+/* Teleport panel (v26, defect D3): a CENTERED card. Through
+   v25 it was a 264px dropdown pinned to the right edge —
+   on an ultrawide window that put a small QR in the far
+   corner, hard to aim a phone at. Now: a 400px card centered
+   horizontally in the window, hanging from just under the
+   address row, with the QR at 264px. It lives in the chrome
+   document but paints in the panel extension of the chrome
+   rect (the app grows the chrome HWND downward while it is
+   open — the content underneath never moves; AUDIT V26 D2).
+   The QR well is WHITE in both themes — a QR's quiet zone is
+   part of the symbol, and scanners expect the contrast; the
+   one deliberate non-material surface in the app. */
+#tpanel {
+  position: fixed; top: 80px; left: 50%; transform: translateX(-50%); z-index: 6;
+  width: 400px; max-height: 486px; overflow-y: auto;
+  display: none; flex-direction: column; gap: 8px;
+  background: var(--surface); border-radius: var(--r-xl);
+  box-shadow: var(--neu-raised);
+  padding: 16px;
+}
+#tpanel.on { display: flex; }
+#tpanel .tp-head {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12px; font-weight: 650; letter-spacing: 0.04em;
+}
+#tpanel .tp-head .tp-title { flex: 1; text-transform: uppercase; color: var(--muted); }
+#tpanel .tp-x {
+  width: 30px; height: 30px; border-radius: var(--r-md); flex: none;
+  display: grid; place-items: center; color: var(--muted);
+  box-shadow: var(--neu-raised-sm);
+  transition: color 120ms ease, box-shadow 120ms ease;
+}
+#tpanel .tp-x:hover { color: var(--text); }
+#tpanel .tp-x:active { box-shadow: var(--neu-pressed); }
+#tpanel .tp-qr {
+  background: #ffffff; border-radius: var(--r-lg);
+  padding: 12px; display: grid; place-items: center;
+}
+#tpanel .tp-qr svg { display: block; }
+#tpanel .tp-url {
+  width: 100%; height: 32px; border-radius: var(--r-md);
+  padding: 0 12px; color: var(--text); font: inherit; font-size: 12px;
+  text-overflow: ellipsis; user-select: text;
+}
+#tpanel .tp-note { font-size: 11px; line-height: 1.5; color: var(--muted); }
+#tpanel .tp-copy {
+  align-self: flex-start; padding: 6px 12px;
+  border-radius: var(--r-md); font-size: 12px; font-weight: 600;
+  color: var(--text); background: var(--surface);
+  box-shadow: var(--neu-raised-sm);
+  transition: box-shadow 120ms ease;
+}
+#tpanel .tp-copy:active { box-shadow: var(--neu-pressed); }
+.badge {
+  display: none; align-items: center; gap: 4px;
+  font-size: 11px; font-weight: 600; color: var(--muted);
+  border-radius: var(--r-pill); padding: 4px 8px;
+}
+.badge.on { display: inline-flex; }
+.badge.warnb { color: var(--warn); }
+
+/* The feather (the chrome rect's rows 74-86, its bottom 12 DIP
+   while the panel is closed):
+   two gradient layers over a transparent body — the themed
+   surface color melting to nothing, with a soft shadow baked
+   in as the top layer so the header keeps depth where it
+   floats over the page. The melt layer starts at exactly
+   var(--surface) — the same token the navbar's solid paint
+   ends at — so there is no banding line at the seam. The
+   shade layer is the --feather-shade TOKEN: soft blue-gray in
+   the light theme, deeper black in the dark. */
+/* AUDIT V26 (D2): anchored by TOP, never bottom. Through v25
+   this strip (and #errbar) were bottom-anchored to the chrome
+   VIEWPORT — when the Teleport panel grew the chrome rect,
+   the viewport grew with it and both strips re-pinned ~424px
+   too low, painting the feather's dark shade as a black band
+   across the page. The feather belongs to rows 74-86 of the
+   header by contract; top-anchoring makes that true at every
+   chrome height. */
+#feather {
+  position: fixed; left: 0; right: 0; top: 74px; height: 12px; z-index: 3;
+  pointer-events: none;
+  background:
+    linear-gradient(to bottom, var(--feather-shade), transparent 78%),
+    linear-gradient(to bottom, var(--surface), transparent);
+}
+#errbar {
+  position: fixed; left: 12px; right: 12px; top: 92px; z-index: 5;
+  display: none; align-items: center; gap: 8px;
+  font-size: 11.5px; color: var(--warn);
+  background: var(--surface); border-radius: var(--r-md); padding: 4px 12px;
+  box-shadow: var(--neu-raised-sm);
+  pointer-events: none;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#errbar.on { display: flex; }
+/* Shell self-diagnosis strip: hidden unless the page has seen
+   no snapshot ~2 s after load. Fully self-contained styling —
+   it must render even if every other style and the IPC channel
+   are dead. It overlays the TOP of the chrome (position fixed,
+   top 0) so it can never change the 86 DIP geometry. */
+#shellwarn {
+  display: none;
+  position: fixed; left: 0; right: 0; top: 0; z-index: 99;
+  padding: 6px 12px;
+  background: #b3261e; color: #ffffff;
+  font: 600 12px/1.4 system-ui, "Segoe UI", sans-serif;
+  text-align: center;
+}
+#shellwarn.on { display: block; }
+</style>
+</head>
+<body>
+  <div id="shell">
+    <div id="topbar">
+      <div class="brand"><span class="dot">P</span> Pico <span class="ver" id="ver">0.31</span><button class="byline" id="brand-by" title="Telegram — @iK4w4" aria-label="Open the author's Telegram">by @iK4w4</button></div>
+      <div id="tabstrip" role="tablist" aria-label="Tabs">
+        <button id="newtab" title="New tab (Ctrl+T)" aria-label="New tab">
+          <svg viewBox="0 0 24 24" class="ic"><path d="M12 5v14M5 12h14"/></svg>
+        </button>
+      </div>
+      <div class="win-controls">
+        <button class="wbtn" id="win-min" title="Minimize" aria-label="Minimize">
+          <svg viewBox="0 0 24 24" class="ic"><path d="M4 12h16"/></svg>
+        </button>
+        <button class="wbtn" id="win-max" title="Maximize / restore" aria-label="Maximize or restore">
+          <svg viewBox="0 0 24 24" class="ic"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>
+        </button>
+        <button class="wbtn close" id="win-close" title="Close" aria-label="Close">
+          <svg viewBox="0 0 24 24" class="ic"><path d="M5 5l14 14M19 5L5 19"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <div id="navbar">
+      <!-- v27 Workstream B: functional clusters, groove-separated.
+           DOM order == visual order == focus order. -->
+      <div class="cluster" role="group" aria-label="Navigation">
+        <button class="nbtn" id="back" title="Back (Alt+Left)" aria-label="Back">
+          <svg viewBox="0 0 24 24" class="ic"><path d="M15 5l-7 7 7 7"/></svg>
+        </button>
+        <button class="nbtn" id="fwd" title="Forward (Alt+Right)" aria-label="Forward">
+          <svg viewBox="0 0 24 24" class="ic"><path d="M9 5l7 7-7 7"/></svg>
+        </button>
+        <button class="nbtn" id="reload" title="Reload (Ctrl+R)" aria-label="Reload">
+          <svg viewBox="0 0 24 24" class="ic"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 3v4h-4"/></svg>
+        </button>
+        <button class="nbtn" id="home" title="Start page" aria-label="Start page">
+          <svg viewBox="0 0 24 24" class="ic"><path d="M4 11l8-7 8 7v9a1 1 0 0 1-1 1h-5v-6h-4v6H5a1 1 0 0 1-1-1z"/></svg>
+        </button>
+        <button class="nbtn" id="openfile" title="Open a local HTML file" aria-label="Open a local HTML file">
+          <svg viewBox="0 0 24 24" class="ic"><path d="M3 8a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+        </button>
+      </div>
+      <span class="vsep" aria-hidden="true"></span>
+      <div id="addr-wrap" class="well">
+        <svg viewBox="0 0 24 24" class="ic"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.9 5.7 3.9 9S14.5 18.4 12 21c-2.5-2.6-3.9-5.7-3.9-9S9.5 5.6 12 3z"/></svg>
+        <input id="addr" type="text" spellcheck="false" autocomplete="off"
+               placeholder="Search or enter address — try localhost:3000 or a file path"
+               aria-label="Address">
+      </div>
+      <span class="vsep" aria-hidden="true"></span>
+      <div class="cluster" role="group" aria-label="Filtering">
+        <button class="nbtn" id="shield" title="Shield — ad blocker on/off" aria-label="Toggle Shield ad blocker" aria-pressed="true">
+          <svg viewBox="0 0 24 24" class="ic"><path d="M12 3l7 2.8V11c0 4.6-3 7.9-7 9.2C8 18.9 5 15.6 5 11V5.8z"/><path d="M9.2 11.8l2 2 3.6-4"/></svg>
+        </button>
+        <button class="nbtn" id="lite" title="Lite mode — blocks images, fonts and previews to save data. The video you choose to watch still plays." aria-label="Toggle Lite mode" aria-pressed="false">
+          <svg viewBox="0 0 24 24" class="ic"><path d="M20 4c-6 0-12 2.5-14 10-1.2 4.5 1 6 1 6s4.5 1 8-3c3-3.5 5-9 5-13z"/><path d="M6 20c1-5 3.5-8.5 8-11"/></svg>
+        </button>
+        <div class="badges">
+          <span class="badge raised-sm" id="shield-badge"></span>
+          <span class="badge raised-sm" id="lite-badge"></span>
+        </div>
+      </div>
+      <span class="vsep" aria-hidden="true"></span>
+      <div class="cluster" role="group" aria-label="Send and appearance">
+        <button class="nbtn" id="teleport" title="Send to phone" aria-label="Send this page to your phone" aria-expanded="false" aria-controls="tpanel">
+          <svg viewBox="0 0 24 24" class="ic"><rect x="7" y="2.5" width="10" height="19" rx="2"/><path d="M10.5 5h3M13.5 17.5l2.5 2.5 2.5-2.5M16 20V10"/></svg>
+        </button>
+        <button class="nbtn" id="palette" title="Themes" aria-label="Choose a theme" aria-expanded="false" aria-controls="ppanel">
+          <svg viewBox="0 0 24 24" class="ic"><circle cx="12" cy="12" r="9"/><circle cx="8.5" cy="10" r="0.6"/><circle cx="12" cy="7.5" r="0.6"/><circle cx="15.5" cy="10" r="0.6"/><path d="M12 21c5 0 9-4 9-9"/></svg>
+        </button>
+        <button class="nbtn" id="theme" title="Toggle light / dark" aria-label="Toggle light or dark mode">
+          <svg viewBox="0 0 24 24" class="ic"><path d="M20 13.5A8.5 8.5 0 0 1 10.5 4 8.5 8.5 0 1 0 20 13.5z"/></svg>
+        </button>
+        <div class="badges">
+          <span class="badge raised-sm" id="svc-badge"></span>
+          <span class="badge raised-sm warnb" id="dl-badge"></span>
+        </div>
+      </div>
+    </div>
+
+    <div id="pp-backdrop"></div>
+    <div id="ppanel" role="dialog" aria-label="Choose a theme">
+      <div class="pp-head">
+        <span class="pp-title">Theme</span>
+        <button class="pp-x" id="pp-close" title="Close" aria-label="Close the theme picker">
+          <svg viewBox="0 0 24 24" class="ic"><path d="M5 5l14 14M19 5L5 19"/></svg>
+        </button>
+      </div>
+      <div id="pp-grid"></div>
+    </div>
+
+    <div id="tp-backdrop"></div>
+    <div id="tpanel" role="dialog" aria-label="Send to phone">
+      <div class="tp-head">
+        <span class="tp-title">Send to phone</span>
+        <button class="tp-x" id="tp-close" title="Close" aria-label="Close the phone panel">
+          <svg viewBox="0 0 24 24" class="ic"><path d="M5 5l14 14M19 5L5 19"/></svg>
+        </button>
+      </div>
+      <div class="tp-qr" id="tp-qr"></div>
+      <input class="tp-url well" id="tp-url" type="text" readonly aria-label="Link for your phone">
+      <div class="tp-note" id="tp-note"></div>
+      <button class="tp-copy" id="tp-copy">Copy link</button>
+    </div>
+  </div>
+
+  <div id="feather"></div>
+  <div id="errbar" role="alert"></div>
+  <div id="shellwarn" role="alert">Shell didn&rsquo;t connect &mdash; restart Pico; details in pico.log</div>
+
+<script>
+"use strict";
+/* Pico v26 chrome. This page is a pure renderer: it sends typed
+   commands and draws the snapshots Rust pushes via window.__pico.
+   All page/tab strings reach the DOM through textContent only. */
+var boot = "b" + Date.now().toString(36) + Math.floor(Math.random() * 1e9).toString(36);
+var req = 0;
+var state = null;
+
+function send(obj) {
+  obj.v = 1;
+  obj.boot = boot;
+  obj.req = ++req;
+  try { window.ipc.postMessage(JSON.stringify(obj)); } catch (e) { /* host gone */ }
+}
+
+var addrDirty = false;
+/* A6-F9: the tab a dirty address draft belongs to — a draft
+   must never follow the user across a tab switch. */
+var addrDirtyTabId = null;
+/* A1-F2: the active tab at the last render — the active tab
+   is scrolled into view only when this actually changes, so
+   a manual tabstrip scroll survives ordinary snapshots. */
+var lastActiveTabId = null;
+var tabstrip = document.getElementById("tabstrip");
+var newtabBtn = document.getElementById("newtab");
+var addr = document.getElementById("addr");
+var addrWrap = document.getElementById("addr-wrap");
+
+/* Refresh one tab element's dynamic face from its snapshot
+   record (AUDIT V28 A1-L6): shared by creation and by the keyed
+   reconciliation in __pico, so an existing element is updated
+   in place and never rebuilt. */
+function syncTabEl(el, tab) {
+  el.className = "tab" + (tab.start ? " start" : "") + (tab.loading ? " loading" : "") + (tab.failed ? " failed" : "");
+  el.setAttribute("aria-selected", tab.id === state.active ? "true" : "false");
+  el.title = tab.url || tab.title || "";
+  var tt = el.querySelector(".tt");
+  if (tt) tt.textContent = tab.title || "Tab";
+}
+
+function makeTab(tab) {
+  var el = document.createElement("button");
+  el.dataset.tabId = tab.id;
+  el.setAttribute("role", "tab");
+  var fav = document.createElement("span"); fav.className = "favicon";
+  var spin = document.createElement("span"); spin.className = "spin";
+  var tt = document.createElement("span"); tt.className = "tt";
+  var x = document.createElement("span"); x.className = "x"; x.title = "Close tab";
+  x.setAttribute("role", "button"); x.setAttribute("aria-label", "Close tab");
+  x.innerHTML = '<svg viewBox="0 0 24 24" class="ic"><path d="M5 5l14 14M19 5L5 19"/></svg>'; /* constant markup only */
+  x.addEventListener("click", function (ev) {
+    ev.stopPropagation();
+    send({ t: "close_tab", tab: tab.id });
+  });
+  el.appendChild(fav); el.appendChild(spin); el.appendChild(tt); el.appendChild(x);
+  syncTabEl(el, tab);
+  el.addEventListener("click", function () { send({ t: "switch_tab", tab: tab.id }); });
+  el.addEventListener("auxclick", function (ev) {
+    if (ev.button === 1) send({ t: "close_tab", tab: tab.id });
+  });
+  /* Keyboard support on the tab itself: arrows move between
+     tabs, Delete closes. */
+  el.addEventListener("keydown", function (ev) {
+    if (ev.key === "Delete") { send({ t: "close_tab", tab: tab.id }); }
+    if (ev.key === "ArrowRight" || ev.key === "ArrowLeft") {
+      send({ t: "cycle_tab", dir: ev.key === "ArrowRight" ? 1 : -1 });
+    }
+  });
+  return el;
+}
+
+window.__pico = function (s) {
+  state = s;
+  /* Shell health: a snapshot arrived, so the shell IS connected
+     — clear the self-diagnosis strip if it ever showed. */
+  window.__picoGotSnapshot = true;
+  var warn = document.getElementById("shellwarn");
+  if (warn) warn.classList.remove("on");
+  document.documentElement.setAttribute("data-theme", s.theme || "light");
+  /* v27 themes: the palette rides the same snapshot. Setting
+     two attributes IS the whole theme switch — every surface
+     is token-driven, so the new [data-palette] block applies
+     instantly with no reload and no flash of unstyled shell. */
+  document.documentElement.setAttribute("data-palette", s.palette || "forest");
+  /* Badge shows the display version (0.31: the name the
+     user gives the release) — the static badge and the
+     snapshot-driven badge must agree. */
+  document.getElementById("ver").textContent = String(s.version || "0.31");
+  /* Tabs: KEYED reconciliation (AUDIT V28 A1-L6) — an existing
+     tab's element is updated in place and only moved (via
+     insertBefore) when its position actually changes (A1-S1);
+     departed tabs are removed; new tabs are created. The v27
+     rebuild destroyed the focused tab element on every routine
+     snapshot, dropping keyboard focus to <body> and silently
+     killing arrow/Delete tab operations. */
+  var scroll = tabstrip.scrollLeft;
+  var existingTabs = {};
+  var existingOrder = [];
+  tabstrip.querySelectorAll(".tab").forEach(function (el) {
+    existingTabs[el.dataset.tabId] = el;
+    existingOrder.push(el);
+  });
+  /* A1-F6: remember the tab element holding keyboard focus
+     (and its strip index) before reconciliation removes
+     anything, so focus can land on its replacement below. */
+  var focusedTabEl = (document.activeElement && document.activeElement.classList &&
+    document.activeElement.classList.contains("tab")) ? document.activeElement : null;
+  var focusedTabIndex = focusedTabEl ? existingOrder.indexOf(focusedTabEl) : -1;
+  var focusedTabId = focusedTabEl ? focusedTabEl.dataset.tabId : null;
+  var seenTabs = {};
+  var prevTabEl = null;
+  for (var j = 0; j < s.tabs.length; j++) {
+    var tabRec = s.tabs[j];
+    seenTabs[tabRec.id] = true;
+    var tabEl = existingTabs[tabRec.id];
+    if (tabEl) {
+      syncTabEl(tabEl, tabRec);
+    } else {
+      tabEl = makeTab(tabRec);
+    }
+    /* A1-S1: the element is already in place when it sits in
+       the strip directly after the previous tab of the new
+       order (or first, for the first tab) — skip the move
+       entirely then; otherwise insert it before the new-tab
+       button anchor. */
+    var tabInPlace = tabEl.parentNode === tabstrip &&
+      (prevTabEl ? tabEl.previousElementSibling === prevTabEl
+                 : tabEl.previousElementSibling === null);
+    if (!tabInPlace) tabstrip.insertBefore(tabEl, newtabBtn);
+    prevTabEl = tabEl;
+  }
+  for (var goneId in existingTabs) {
+    if (!seenTabs[goneId]) existingTabs[goneId].remove();
+  }
+  /* A1-F6: the focused tab was closed by this reconciliation —
+     move focus to the tab now at the same strip index (clamped
+     to the last tab), falling back to the active tab element,
+     instead of dropping focus to <body>. */
+  if (focusedTabEl && !seenTabs[focusedTabId]) {
+    var remainingTabs = tabstrip.querySelectorAll(".tab");
+    var focusTarget = null;
+    if (remainingTabs.length) {
+      var focusIdx = focusedTabIndex;
+      if (focusIdx < 0) focusIdx = 0;
+      if (focusIdx >= remainingTabs.length) focusIdx = remainingTabs.length - 1;
+      focusTarget = remainingTabs[focusIdx];
+    }
+    if (!focusTarget) focusTarget = tabstrip.querySelector('[aria-selected="true"]');
+    if (focusTarget && focusTarget.focus) {
+      try { focusTarget.focus(); } catch (e) {}
+    }
+  }
+  tabstrip.scrollLeft = scroll;
+  var activeEl = tabstrip.querySelector('[aria-selected="true"]');
+  /* A1-F2: scroll the active tab into view ONLY when the
+     active tab id changed since the last render — otherwise
+     the scrollIntoView would defeat the scrollLeft restored
+     just above on every ordinary snapshot (badge updates…). */
+  if (s.active !== lastActiveTabId) {
+    lastActiveTabId = s.active;
+    if (activeEl && activeEl.scrollIntoView) {
+      try { activeEl.scrollIntoView({ block: "nearest", inline: "nearest" }); } catch (e) {}
+    }
+  }
+  /* Address (AUDIT V26, defects D7/D4): never stomp text the
+     user is actively editing. The snapshot's address is the
+     tab's LIVE URL (SourceChanged-fed); while the input is
+     focused with unsent edits, the stored value moves on
+     behind the draft and the input re-syncs on blur/submit.
+     A clean (unedited) focused input follows navigation like
+     any other state. The one-shot focus hint rides snapshots
+     that follow a fresh tab's creation: focus + select, so
+     typing replaces the prefilled text. */
+  /* A6-F9: the draft belongs to ONE tab — when the active tab
+     differs from the tab the dirty draft was typed in, the
+     draft is dropped and the input resyncs to the new tab's
+     address (it must not be submitted into the wrong tab).
+     A1-F4: a focus hint (fresh tab) likewise forces a resync
+     over a dirty draft in the already-focused input, so the
+     fresh tab shows its own address state, selected. */
+  var draftWrongTab = addrDirty && addrDirtyTabId !== null &&
+    addrDirtyTabId !== undefined && s.active !== addrDirtyTabId;
+  var forceAddrResync = !!(s.focusAddr && document.activeElement === addr && addrDirty);
+  if (document.activeElement !== addr) {
+    addr.value = s.address || "";
+    addrDirty = false;
+    addrDirtyTabId = null;
+  } else if (!addrDirty || draftWrongTab || forceAddrResync) {
+    addr.value = s.address || "";
+    addrDirty = false;
+    addrDirtyTabId = null;
+  }
+  if (s.focusAddr) {
+    addr.focus();
+    /* Already-focused inputs get no fresh focus event (and
+       therefore no select from the focus handler) — select
+       explicitly so the resynced text is ready to replace. */
+    if (addr.select) { try { addr.select(); } catch (e) {} }
+  }
+  document.getElementById("back").disabled = !s.canBack;
+  document.getElementById("fwd").disabled = !s.canForward;
+  var svc = document.getElementById("svc-badge");
+  if (s.services > 0) {
+    svc.classList.add("on");
+    svc.textContent = s.services + (s.services === 1 ? " local service" : " local services");
+  } else {
+    svc.classList.remove("on");
+  }
+  var sh = document.getElementById("shield");
+  sh.setAttribute("aria-pressed", s.shieldOn ? "true" : "false");
+  sh.title = s.shieldOn
+    ? "Shield is ON — click to turn off"
+    : "Shield is OFF — click to turn on";
+  var shb = document.getElementById("shield-badge");
+  if (s.shieldOn && s.blockedTotal > 0) {
+    shb.classList.add("on");
+    shb.textContent = s.blockedTotal + " blocked";
+    shb.title = s.blockedTab + " blocked in this tab · " +
+      s.blockedTotal + " this session";
+  } else {
+    shb.classList.remove("on");
+    shb.textContent = "";
+  }
+  var lite = document.getElementById("lite");
+  lite.setAttribute("aria-pressed", s.liteOn ? "true" : "false");
+  lite.title = s.liteOn
+    ? "Lite mode is ON — images, fonts and previews are blocked on public pages; your chosen video plays. Click to turn off."
+    : "Lite mode — blocks images, fonts and previews to save data. The video you choose to watch still plays.";
+  var lb = document.getElementById("lite-badge");
+  if (s.liteOn && s.liteBlocked > 0) {
+    lb.classList.add("on");
+    lb.textContent = s.liteBlocked + " lite-blocked";
+    lb.title = s.liteBlocked + " heavy resources blocked by Lite mode this session";
+  } else {
+    lb.classList.remove("on");
+    lb.textContent = "";
+  }
+  /* Theme picker (v27): the catalogue + open state ride the
+     snapshot; the grid re-renders only when the catalogue or
+     the current palette changes. */
+  renderPicker(s);
+  var wantPpOpen = !!s.paletteOpen;
+  if (wantPpOpen !== ppOpen) {
+    ppOpen = wantPpOpen;
+    document.getElementById("ppanel").classList.toggle("on", ppOpen);
+    document.getElementById("pp-backdrop").classList.toggle("on", ppOpen);
+    document.getElementById("palette").setAttribute("aria-expanded", ppOpen ? "true" : "false");
+  }
+  /* Teleport (v26, AUDIT V28 A1-H1): the open state is
+     APP-OWNED and rides the snapshot (`teleportOpen`), exactly
+     like the picker's — Rust closes the panel on navigation,
+     tab switch and conversion, and the chrome now MIRRORS that
+     close instead of keeping a stale panel painted (which also
+     resurfaced over the picker and swallowed the next Teleport
+     click as a phantom "close"). Mirroring a Rust-side close
+     does not send `teleport_close` back: Rust already knows. */
+  if (lastActive !== null && s.active !== lastActive && ppOpen) {
+    closePalette();
+  }
+  lastActive = s.active;
+  var wantTpOpen = !!s.teleportOpen;
+  if (wantTpOpen !== tpOpen) {
+    if (wantTpOpen) {
+      tpAwaiting = false;
+      if (ppOpen) closePalette();
+      if (s.teleport) renderTeleport(s.teleport);
+      tpOpen = true;
+      document.getElementById("tpanel").classList.add("on");
+      document.getElementById("tp-backdrop").classList.add("on");
+      document.getElementById("teleport").setAttribute("aria-expanded", "true");
+    } else {
+      tpOpen = false;
+      tpAwaiting = false;
+      document.getElementById("tpanel").classList.remove("on");
+      document.getElementById("tp-backdrop").classList.remove("on");
+      document.getElementById("teleport").setAttribute("aria-expanded", "false");
+    }
+  } else if (wantTpOpen && s.teleport) {
+    /* Still open, fresh payload (a re-request while open). */
+    tpAwaiting = false;
+    renderTeleport(s.teleport);
+  }
+  var dl = document.getElementById("dl-badge");
+  if (s.blockedDownloads > 0) {
+    dl.classList.add("on");
+    dl.textContent = s.blockedDownloads + " download" + (s.blockedDownloads === 1 ? "" : "s") + " blocked";
+    dl.title = s.downloadNotice || "";
+  } else {
+    dl.classList.remove("on");
+  }
+  var err = document.getElementById("errbar");
+  if (s.activeError) {
+    err.classList.add("on");
+    err.textContent = "This tab couldn't load: " + s.activeError + " — Reload retries, or close the tab.";
+  } else {
+    err.classList.remove("on");
+    err.textContent = "";
+  }
+};
+
+/* --- Teleport panel (v26) ---------------------------------------------
+   The panel is a pure renderer over the snapshot's teleport
+   payload: Rust resolves the URL and encodes the QR; this code
+   draws the matrix it is given (rows of "1"/"0" become one SVG
+   path — the matrix is data, never markup) and owns only the
+   panel's open/closed presentation state. Closing always tells
+   Rust (teleport_close) so the chrome bounds shrink back. */
+var tpOpen = false;
+var tpAwaiting = false;
+var lastActive = null;
+
+function qrSvg(matrix) {
+  var n = matrix.length;
+  if (!n) return "";
+  var cell = 4, quiet = 4;
+  var size = (n + quiet * 2) * cell;
+  var d = "";
+  for (var y = 0; y < n; y++) {
+    var row = matrix[y];
+    for (var x = 0; x < row.length; x++) {
+      if (row.charAt(x) === "1") {
+        d += "M" + ((x + quiet) * cell) + " " + ((y + quiet) * cell) +
+             "h" + cell + "v" + cell + "h-" + cell + "z";
+      }
+    }
+  }
+  return '<svg width="264" height="264" viewBox="0 0 ' + size + " " + size +
+    '" role="img" aria-label="QR code for this page"><rect width="' + size +
+    '" height="' + size + '" fill="#ffffff"/><path d="' + d + '" fill="#000000"/></svg>';
+}
+
+function renderTeleport(tp) {
+  var qrBox = document.getElementById("tp-qr");
+  var urlInput = document.getElementById("tp-url");
+  var copyBtn = document.getElementById("tp-copy");
+  if (tp.matrix && tp.matrix.length) {
+    qrBox.style.display = "";
+    qrBox.innerHTML = qrSvg(tp.matrix); /* generated above from data only */
+  } else {
+    qrBox.style.display = "none";
+    qrBox.innerHTML = "";
+  }
+  var hasUrl = !!tp.url;
+  urlInput.style.display = hasUrl ? "" : "none";
+  copyBtn.style.display = hasUrl ? "" : "none";
+  urlInput.value = tp.url || "";
+  /* AUDIT V26 (D1): the field never hides the URL's start —
+     the full string rides the tooltip, a click selects all
+     (below), and the scroll is pinned HOME after rendering:
+     an overflow that auto-scrolled to the end was part of
+     how the v25 field mis-showed the address. */
+  urlInput.title = tp.url || "";
+  urlInput.scrollLeft = 0;
+  if (urlInput.setSelectionRange) {
+    try { urlInput.setSelectionRange(0, 0); } catch (e) {}
+  }
+  document.getElementById("tp-note").textContent = tp.note || "";
+}
+
+function closeTeleport() {
+  if (!tpOpen && !tpAwaiting) return;
+  tpOpen = false;
+  tpAwaiting = false;
+  document.getElementById("tpanel").classList.remove("on");
+  document.getElementById("tp-backdrop").classList.remove("on");
+  document.getElementById("teleport").setAttribute("aria-expanded", "false");
+  send({ t: "teleport_close" });
+}
+
+document.getElementById("teleport").addEventListener("click", function () {
+  if (tpOpen || tpAwaiting) { closeTeleport(); return; }
+  tpAwaiting = true;
+  send({ t: "teleport" });
+});
+document.getElementById("tp-close").addEventListener("click", function () { closeTeleport(); });
+document.getElementById("tp-backdrop").addEventListener("click", function () { closeTeleport(); });
+document.getElementById("tp-url").addEventListener("click", function () {
+  this.select();
+});
+document.getElementById("tp-copy").addEventListener("click", function () {
+  var urlInput = document.getElementById("tp-url");
+  var btn = document.getElementById("tp-copy");
+  var text = urlInput.value;
+  /* AUDIT V28 A1-L7: "Copied" (and the Rust-side log line) only
+     on an actual success — the v27 handler reported success on
+     every path, including clipboard rejection + fallback
+     failure, leaving the user with an empty clipboard and a
+     confident button. */
+  function done() {
+    send({ t: "teleport_copy" });
+    btn.textContent = "Copied";
+    setTimeout(function () { btn.textContent = "Copy link"; }, 1200);
+  }
+  function failed() {
+    btn.textContent = "Copy failed";
+    setTimeout(function () { btn.textContent = "Copy link"; }, 1200);
+  }
+  function fallback() {
+    urlInput.select();
+    var okCopy = false;
+    try {
+      okCopy = typeof document.execCommand === "function" && document.execCommand("copy");
+    } catch (e) {}
+    if (okCopy) done(); else failed();
+  }
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(done, fallback);
+  } else {
+    fallback();
+  }
+});
+
+/* --- Theme picker panel (v27) -----------------------------------------
+   A pure renderer like Teleport's: the snapshot carries the
+   catalogue (id, name, the six palette hexes) from the one
+   Rust-side table; this page draws cards from that data and
+   sends back only the chosen id. Dot colors are set as inline
+   styles built from those hex strings (our own constants —
+   they are data values, never markup). Opening/closing is
+   app-owned state (paletteOpen in the snapshot), so the two
+   centered panels can never both be open: the app closes one
+   when the other is requested, and the snapshot closes the
+   local UI of the loser. */
+var ppOpen = false;
+var ppRenderKey = "";
+
+function renderPicker(s) {
+  if (!s.themes || !s.themes.length) return;
+  /* AUDIT V28 A3-LOW-1: the rebuild key is the CATALOGUE (ids +
+     names + slot hexes), not the selection. A palette switch
+     used to rebuild the whole grid just to move `aria-pressed`,
+     destroying the focused card mid-interaction; the selection
+     now updates in place below, and a rebuild happens only when
+     the catalogue itself actually changes. */
+  var key = s.themes.map(function (t) {
+    return t.id + "|" + t.name + "|" + (t.slots || []).join(",");
+  }).join(";");
+  var grid = document.getElementById("pp-grid");
+  if (key !== ppRenderKey) {
+    ppRenderKey = key;
+    while (grid.firstChild) grid.removeChild(grid.firstChild);
+    buildPickerCards(s, grid);
+  }
+  var cards = grid.querySelectorAll(".pcard");
+  for (var i = 0; i < cards.length; i++) {
+    cards[i].setAttribute("aria-pressed", cards[i].dataset.id === s.palette ? "true" : "false");
+  }
+}
+
+function buildPickerCards(s, grid) {
+  s.themes.forEach(function (t) {
+    var card = document.createElement("button");
+    card.className = "pcard";
+    card.dataset.id = t.id;
+    card.setAttribute("aria-pressed", t.id === s.palette ? "true" : "false");
+    card.title = "Apply the " + t.name + " theme";
+    var name = document.createElement("span");
+    name.className = "pname";
+    name.textContent = t.name;
+    var dots = document.createElement("span");
+    dots.className = "pdots";
+    (t.slots || []).forEach(function (hex) {
+      var d = document.createElement("span");
+      d.className = "pdot";
+      d.style.background = hex;
+      dots.appendChild(d);
+    });
+    card.appendChild(dots);
+    card.appendChild(name);
+    card.addEventListener("click", function () {
+      send({ t: "theme_set", id: t.id });
+    });
+    grid.appendChild(card);
+  });
+}
+
+function closePalette() {
+  if (!ppOpen) return;
+  ppOpen = false;
+  document.getElementById("ppanel").classList.remove("on");
+  document.getElementById("pp-backdrop").classList.remove("on");
+  document.getElementById("palette").setAttribute("aria-expanded", "false");
+  send({ t: "palette_close" });
+}
+
+document.getElementById("palette").addEventListener("click", function () {
+  if (ppOpen) { closePalette(); return; }
+  if (tpOpen || tpAwaiting) closeTeleport();
+  send({ t: "palette" });
+});
+document.getElementById("pp-close").addEventListener("click", function () { closePalette(); });
+document.getElementById("pp-backdrop").addEventListener("click", function () { closePalette(); });
+
+/* --- commands ------------------------------------------------------- */
+newtabBtn.addEventListener("click", function () { send({ t: "new_tab" }); });
+document.getElementById("back").addEventListener("click", function () { send({ t: "back" }); });
+document.getElementById("fwd").addEventListener("click", function () { send({ t: "forward" }); });
+document.getElementById("reload").addEventListener("click", function () { send({ t: "reload" }); });
+document.getElementById("home").addEventListener("click", function () { send({ t: "home" }); });
+document.getElementById("openfile").addEventListener("click", function () { send({ t: "open_file" }); });
+/* Branding: the byline in the brand block opens the author's
+   Telegram. Only the enum name crosses IPC — Rust owns the URL. */
+document.getElementById("brand-by").addEventListener("click", function () { send({ t: "social", site: "telegram" }); });
+document.getElementById("theme").addEventListener("click", function () { send({ t: "theme_toggle" }); });
+document.getElementById("shield").addEventListener("click", function () { send({ t: "shield_toggle" }); });
+document.getElementById("lite").addEventListener("click", function () { send({ t: "lite_toggle" }); });
+document.getElementById("win-min").addEventListener("click", function () { send({ t: "win_min" }); });
+document.getElementById("win-max").addEventListener("click", function () { send({ t: "win_max" }); });
+document.getElementById("win-close").addEventListener("click", function () { send({ t: "win_close" }); });
+
+/* Window drag: the merged top row has no dedicated drag div —
+   the brand block and the tab strip share the row with the
+   tabs. A pointerdown on the row that does NOT land on a
+   control (button, input, tab, link) starts a window drag; a
+   double-click on the same non-control area toggles maximize.
+   The strip's empty space and the brand text are the grabbable
+   parts. */
+function isControlTarget(ev) {
+  return !!(ev.target && ev.target.closest && ev.target.closest("button, input, a, .tab"));
+}
+var topbar = document.getElementById("topbar");
+topbar.addEventListener("pointerdown", function (ev) {
+  if (ev.button === 0 && !isControlTarget(ev)) send({ t: "win_drag" });
+});
+topbar.addEventListener("dblclick", function (ev) {
+  if (!isControlTarget(ev)) send({ t: "win_max" });
+});
+
+addr.addEventListener("input", function () {
+  addrDirty = true;
+  /* A6-F9: record WHICH tab this draft belongs to. */
+  addrDirtyTabId = state ? state.active : null;
+});
+addr.addEventListener("blur", function () {
+  addrDirty = false;
+  addrDirtyTabId = null;
+  if (state) addr.value = state.address || "";
+});
+addr.addEventListener("keydown", function (ev) {
+  if (ev.key === "Enter") {
+    var text = addr.value.trim();
+    addrDirty = false;
+    addrDirtyTabId = null;
+    if (text) send({ t: "navigate", text: text });
+    addr.blur();
+  } else if (ev.key === "Escape") {
+    /* A1-F3: this Escape is the address input's own (revert
+       the draft) — keep it from ALSO reaching the document
+       handler, which would dismiss an open panel with the
+       same keypress. */
+    ev.stopPropagation();
+    addrDirty = false;
+    addrDirtyTabId = null;
+    if (state) addr.value = state.address || "";
+    addr.blur();
+  }
+});
+addr.addEventListener("focus", function () { addr.select(); });
+
+document.addEventListener("keydown", function (ev) {
+  if (ev.key === "Escape" && ppOpen) { closePalette(); return; }
+  if (ev.key === "Escape" && (tpOpen || tpAwaiting)) { closeTeleport(); return; }
+  var mod = ev.ctrlKey || ev.metaKey;
+  if (mod && (ev.key === "t" || ev.key === "T")) { ev.preventDefault(); send({ t: "new_tab" }); }
+  else if (mod && (ev.key === "w" || ev.key === "W")) {
+    ev.preventDefault();
+    if (state) send({ t: "close_tab", tab: state.active });
+  }
+  else if (mod && ev.key === "Tab") { ev.preventDefault(); send({ t: "cycle_tab", dir: ev.shiftKey ? -1 : 1 }); }
+  else if (mod && (ev.key === "l" || ev.key === "L")) { ev.preventDefault(); addr.focus(); addr.select(); }
+  else if (mod && (ev.key === "r" || ev.key === "R")) { ev.preventDefault(); send({ t: "reload" }); }
+  else if (ev.key === "F5") { ev.preventDefault(); send({ t: "reload" }); }
+  else if (ev.altKey && ev.key === "ArrowLeft") { ev.preventDefault(); send({ t: "back" }); }
+  else if (ev.altKey && ev.key === "ArrowRight") { ev.preventDefault(); send({ t: "forward" }); }
+});
+
+send({ t: "ready" });
+addr.focus();
+
+/* Self-diagnosis: if Rust never answers with a snapshot, say so
+   IN the page. ~2 s after load with no snapshot, the warning
+   strip appears — the user sees an explanation and a next step
+   even if the IPC channel is completely dead. Inline only. */
+setTimeout(function () {
+  if (!window.__picoGotSnapshot) {
+    var warn = document.getElementById("shellwarn");
+    if (warn) warn.classList.add("on");
+  }
+}, 2000);
+</script>
+</body>
+</html>

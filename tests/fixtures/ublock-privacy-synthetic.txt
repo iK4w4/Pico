@@ -1,0 +1,27 @@
+! Title: Pico synthetic fixture - uBlock privacy analogue
+! Every rule in this file is original fixture content,
+! hand-written for Pico's test suites on reserved example /
+! invalid hosts. It is NOT the real list, and no line is
+! copied from any published filter list.
+! ------------------------------------------------------------------
+www.youtube.com##+js(no-xhr-if, log_event? method:POST)
+||telemetry.example.org^$removeparam=/^utm_/
+||ping.example.org^$ping
+||collect.example.net^$xmlhttprequest,third-party
+||video.example/player$xmlhttprequest,replace=/a/b/
+||video.example/get_video$media,redirect=noop.txt
+||data-1.example.org^
+||data-2.example.org^
+||data-3.example.org^
+||data-4.example.org^
+||data-5.example.org^
+||data-6.example.org^
+||data-7.example.org^
+||data-8.example.org^
+||data-9.example.org^
+||data-10.example.org^
+||data-11.example.org^
+||data-12.example.org^
+||data-13.example.org^
+||data-14.example.org^
+||data-15.example.org^
