@@ -2,7 +2,7 @@
 name = "pico"
 version = "0.31.0"
 edition = "2021"
-description = "Pico 0.31 by @iK4w4 \u2014 a tiny neumorphic Windows browser for local development (Rust + tao/wry WebView2): auto-detected localhost services, a uBlock-grade Shield (filter lists downloaded on first run from EasyList / uBlock Origin and cached beside the exe), Lite mode with chosen-video semantics, a start-page savings band, sixteen palette themes, and portable data (state, log, lists and profile in data\\ beside the exe). Ships with NO embedded manifest (zero RT_MANIFEST, gate-verified); the only resource is an icon-only .rsrc compiled by llvm-rc from a generated .ico."
+description = "Pico 0.31 by @iK4w4 \u2014 a tiny neumorphic Windows browser for local development (Rust + tao/wry WebView2): auto-detected localhost services, a three-layer Shield (filter lists downloaded on first run from EasyList / uBlock Origin and cached beside the exe), Lite mode with chosen-video semantics, a start-page savings band, sixteen palette themes, and portable data (state, log, lists and profile in data\\ beside the exe). Ships with NO embedded manifest (zero RT_MANIFEST, gate-verified); the only resource is an icon-only .rsrc compiled by llvm-rc from a generated .ico."
 license = "MIT"
 
 [lib]

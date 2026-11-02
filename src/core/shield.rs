@@ -1,4 +1,5 @@
-//! The Shield: Pico's uBlock-grade ad blocker (AUDIT V21).
+//! The Shield: Pico's ad blocker — network, cosmetic and
+//! scriptlet layers, Adblock-Plus rule semantics.
 //!
 //! The user explicitly ordered the blocker back (2026-10-24),
 //! amending the old reset-spec non-goal. This engine is built to
