@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Questions & general feedback
+    url: https://github.com/iK4w4/Pico/discussions
+    about: Ask a question, share your experience, or talk about Pico — Discussions is the place.
+  - name: Reach the author on Telegram
+    url: https://t.me/iK4w4
+    about: Prefer a chat? The author is @iK4w4 on Telegram.

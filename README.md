@@ -77,6 +77,16 @@ Shield that has not downloaded its lists yet; `lite chosen:
 tab=… host=…` marks the moment a page designated the video
 you picked.
 
+## Feedback
+
+- **Bugs & feature requests** — open an
+  [issue](https://github.com/iK4w4/Pico/issues); the templates
+  will walk you through it.
+- **Questions, opinions, show & tell** — the
+  [Discussions](https://github.com/iK4w4/Pico/discussions) tab
+  is the place.
+- Like Pico? A ⭐ star helps other people find it.
+
 ## Credits
 
 - Filter lists: [EasyList](https://easylist.to/) and
