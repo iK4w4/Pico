@@ -16,6 +16,14 @@ Pico is a young, one-person project for **local development**.
 For banking, email and anything else sensitive, use a
 mainstream browser (Edge, Firefox, Chrome).
 
+## Verifying the release download
+
+The `Pico.exe` attached to the 0.31 release is 1,329,152
+bytes with SHA-256
+`470514f3a3282a7ed8271afc6ed91bfd31159b72ba0e1c5c28599defdae7f8f8`.
+If your copy's hash differs, it is not the file published
+from this tree.
+
 ## Network behavior
 
 - **No telemetry, no accounts, no sync.** Pico sends nothing

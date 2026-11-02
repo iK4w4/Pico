@@ -1,11 +1,11 @@
 //! Tiny structured log at `<data dir>\pico.log` — Pico's data
 //! directory: `data\` beside the exe since v27 (appdata only
-//! as the not-writable fallback; AUDIT V27-C).
+//! as the not-writable fallback).
 //!
 //! Diagnostics only — nothing leaves the machine. One line per
 //! event: `[<unix-ms>] <message>`. The file is rotated at
 //! startup when it exceeds 1 MiB **and** mid-session when the
-//! running total crosses the same cap (AUDIT L12 — checking only
+//! running total crosses the same cap (checking only
 //! at startup let one long session grow it without bound).
 //! Rotation drops our own handle BEFORE removing the file:
 //! Windows cannot delete an open file, so the order is the
@@ -14,7 +14,7 @@
 //!
 //! Anything URL-shaped must pass through
 //! `pico_core::core::redact::redact_url` before it is formatted
-//! into a message (AUDIT M5): query strings and fragments never
+//! into a message: query strings and fragments never
 //! reach this file. Control characters are stripped here as a
 //! second wall.
 
@@ -59,7 +59,7 @@ pub fn init() {
     if let Ok(meta) = std::fs::metadata(&path) {
         existing_len = meta.len();
         if existing_len > MAX_BYTES {
-            // AUDIT 0.31 (A5-L8): the byte counter may only be
+            // The byte counter may only be
             // zeroed when the file is actually GONE (the remove
             // succeeded, or a re-stat finds nothing). Through
             // 0.30 a failed remove still zeroed it, leaving the
@@ -96,7 +96,7 @@ fn sanitize(msg: &str) -> String {
     const MAX_CHARS: usize = 4096;
     let mut out = String::with_capacity(msg.len().min(MAX_CHARS));
     for c in msg.chars().take(MAX_CHARS) {
-        // AUDIT V28 (A5-L6): Cc controls are not the whole
+        // Cc controls are not the whole
         // story — U+2028/U+2029 and the bidi/zero-width format
         // characters pass is_control() and forge log lines
         // visually; the shared helper in core::redact names
@@ -121,7 +121,7 @@ pub fn write_line(msg: &str) {
             // file (handle dropped first — see module doc).
             if state.written > MAX_BYTES {
                 state.file = None;
-                // AUDIT 0.31 (A5-L8): only a confirmed removal
+                // Only a confirmed removal
                 // resets the counter; otherwise it stays over
                 // the cap and the next line retries the
                 // rotation instead of appending to an already
@@ -134,7 +134,7 @@ pub fn write_line(msg: &str) {
                     state.written = 0;
                 }
             }
-            // AUDIT V28 (A5-L5): a failed open (at init or in
+            // A failed open (at init or in
             // rotation) used to leave file=None for the whole
             // session — every later line silently dropped,
             // exactly when diagnostics mattered. Retry the open
