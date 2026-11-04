@@ -2,7 +2,7 @@
 //! decision that can be made without a window lives here and is
 //! covered by the integration suites in `tests/`.
 
-/// The version the USER names this release by: **0.31**.
+/// The version the USER names this release by: **0.31.1**.
 /// Every user-visible string — the chrome badge, the start
 /// page, the log banner — shows exactly this. The display
 /// form is the name the user gives the release: a feature
@@ -13,7 +13,7 @@
 /// form must be the Cargo version or a dotted prefix of
 /// it — so a Cargo bump without a display bump (or the
 /// reverse) fails the suite.
-pub const DISPLAY_VERSION: &str = "0.31";
+pub const DISPLAY_VERSION: &str = "0.31.1";
 
 #[cfg(test)]
 mod tests {

@@ -81,7 +81,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     doc.getElementById("stat-shield") === null &&
     doc.getElementById("stats-grid") === null);
   check("skeleton: version badge is 0.31",
-    doc.getElementById("ver").textContent === "0.31",
+    doc.getElementById("ver").textContent === "0.31.1",
     doc.getElementById("ver").textContent);
   check("skeleton: brand byline present",
     doc.getElementById("brand-by").textContent.includes("@iK4w4"),
@@ -139,7 +139,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     paletteOpen: false,
     liteOn: false,
     focusAddr: false,
-    version: "0.31",
+    version: "0.31.1",
   });
 
   const tabs = doc.querySelectorAll("#tabstrip .tab");
@@ -223,8 +223,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     doc.getElementById("addr").value);
   check("snapshot: theme applied",
     doc.documentElement.getAttribute("data-theme") === "dark");
-  check("snapshot: version badge stays 0.31 (display version)",
-    doc.getElementById("ver").textContent === "0.31",
+  check("snapshot: version badge stays 0.31.1 (display version)",
+    doc.getElementById("ver").textContent === "0.31.1",
     doc.getElementById("ver").textContent);
   check("snapshot: services badge shows count",
     doc.getElementById("svc-badge").textContent.includes("3"),
@@ -246,7 +246,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     tabs: [], active: 0, theme: "dark", address: "", canBack: false,
     canForward: false, maximized: false, services: 0, otherListeners: 0,
     blockedDownloads: 0, downloadNotice: "", activeError: "",
-    blockedTotal: 0, blockedTab: 0, shieldOn: false, version: "0.31",
+    blockedTotal: 0, blockedTab: 0, shieldOn: false, version: "0.31.1",
   });
   check("shield: aria-pressed follows shieldOn=false",
     shieldBtn.getAttribute("aria-pressed") === "false",
@@ -337,7 +337,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     active: 1, theme: "light", address: "http://localhost:5173/",
     canBack: false, canForward: false, maximized: false, services: 1,
     otherListeners: 0, blockedDownloads: 0, downloadNotice: "", activeError: "",
-    blockedTotal: 0, blockedTab: 0, shieldOn: true, version: "0.31",
+    blockedTotal: 0, blockedTab: 0, shieldOn: true, version: "0.31.1",
     liteOn: false, liteBlocked: 0, teleport: null,
   };
   window.__pico({ ...baseSnap });
@@ -617,7 +617,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     active: 1, theme: "dark", address: "http://localhost:5173/",
     canBack: false, canForward: false, maximized: false, services: 1,
     otherListeners: 0, blockedDownloads: 0, downloadNotice: "", activeError: "",
-    blockedTotal: 0, blockedTab: 0, shieldOn: true, version: "0.31",
+    blockedTotal: 0, blockedTab: 0, shieldOn: true, version: "0.31.1",
     liteOn: false, liteBlocked: 0, teleport: null,
     palette: "forest", themes: THEMES16, paletteOpen: false,
   };
@@ -728,7 +728,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     active: 1, theme: "dark", address: "",
     canBack: false, canForward: false, maximized: false, services: 0,
     otherListeners: 0, blockedDownloads: 0, downloadNotice: "", activeError: "",
-    blockedTotal: 0, blockedTab: 0, shieldOn: true, version: "0.31",
+    blockedTotal: 0, blockedTab: 0, shieldOn: true, version: "0.31.1",
     liteOn: false, liteBlocked: 0, teleport: null, focusAddr: false,
     ...over,
   });
@@ -793,7 +793,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     tabs: TABS3, active: 1, theme: "light", address: "http://one.example/",
     canBack: false, canForward: false, maximized: false, services: 0,
     otherListeners: 0, blockedDownloads: 0, downloadNotice: "", activeError: "",
-    blockedTotal: 0, blockedTab: 0, shieldOn: true, version: "0.31",
+    blockedTotal: 0, blockedTab: 0, shieldOn: true, version: "0.31.1",
     liteOn: false, liteBlocked: 0, focusAddr: false,
     paletteOpen: false, teleportOpen: false, teleport: null,
     ...over,
@@ -995,8 +995,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check("start: chip glyphs are inline SVG (no <img>)",
     doc.querySelectorAll(".byline .chip svg").length === 2 &&
     doc.querySelectorAll(".byline img").length === 0);
-  check("start: footer reads 'Pico 0.31 · by @iK4w4'",
-    doc.querySelector(".footer").textContent.includes("Pico 0.31 · by @iK4w4"));
+  check("start: footer reads 'Pico 0.31.1 · by @iK4w4'",
+    doc.querySelector(".footer").textContent.includes("Pico 0.31.1 · by @iK4w4"));
   // Clicking a chip must target its action URL as the fallback
   // (the Rust nav handler turns that into a NEW tab — the start
   // tab never navigates). Capture the click before jsdom follows.
@@ -1148,7 +1148,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     doc.getElementById("stat-lite-bytes").textContent);
   check("0.30: time line combines both engines, session alongside",
     doc.getElementById("stat-time").textContent ===
-      "≈ 16.7 min of loading prevented · 17.1 s this session",
+      "≈ 16.7 min of loading prevented · ≈ 17.1 s this session",
     doc.getElementById("stat-time").textContent);
   check("0.30: populated band hides the zero state",
     doc.getElementById("stat-zero").hidden === true &&
@@ -1172,7 +1172,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     doc.getElementById("stat-shield-count").textContent === "1 request blocked" &&
     doc.getElementById("stat-shield-bytes").textContent === "≈ 50 KB" &&
     doc.getElementById("stat-time").textContent ===
-      "≈ 0.8 s of loading prevented · 0.8 s this session" &&
+      "≈ 0.8 s of loading prevented · ≈ 0.8 s this session" &&
     doc.getElementById("stat-zero").hidden === true,
     doc.getElementById("stat-shield-count").textContent + " | " +
     doc.getElementById("stat-time").textContent);

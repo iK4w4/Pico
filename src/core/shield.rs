@@ -293,6 +293,7 @@ pub fn host_span(url: &str, host: &str) -> Option<(usize, usize)> {
 /// and is now the ONLY one: `filterpipe::classify_origin` reads
 /// this function, Lite delegates to it, and the document
 /// runtimes spell the same rule for JS.
+/// Teleport delegates as well since 0.31.1.
 pub fn is_local_host(host: &str) -> bool {
     // AUDIT V28 (A2-L1): 0.0.0.0 is this machine too (dev servers
     // print it as a URL host; Teleport already treated it as
@@ -300,6 +301,23 @@ pub fn is_local_host(host: &str) -> bool {
     // Lite stripped a local dev page's images).
     if host == "localhost" || host == "::1" || host == "0.0.0.0" || host.ends_with(".localhost") {
         return true;
+    }
+    // IPv6 literals arrive bracket-free (host_of strips
+    // them): ::1 in any spelling is loopback, and an
+    // IPv4-mapped address inherits its embedded v4 verdict
+    // (0.31.1 — the rule Teleport's private copy always had
+    // and this definition lacked).
+    if host.contains(':') {
+        return match host.parse::<std::net::Ipv6Addr>() {
+            Ok(v6) => {
+                v6.is_loopback()
+                    || v6
+                        .to_ipv4_mapped()
+                        .map(|v4| v4.octets()[0] == 127)
+                        .unwrap_or(false)
+            }
+            Err(_) => false,
+        };
     }
     match host.parse::<std::net::Ipv4Addr>() {
         Ok(v4) => v4.octets()[0] == 127,
@@ -3710,13 +3728,6 @@ impl ShieldRuntime {
         if let Ok(mut slot) = self.engine.write() {
             *slot = Some(std::sync::Arc::new(engine));
         }
-    }
-
-    pub fn is_ready(&self) -> bool {
-        self.engine
-            .read()
-            .map(|slot| slot.is_some())
-            .unwrap_or(false)
     }
 
     /// The combined document-start script (scriptlets +

@@ -229,89 +229,18 @@ const NOTE_PICO_SERVED: &str =
 const NOTE_SCHEME: &str = "This kind of page can't be opened on a phone from here.";
 
 /// Is `host` (already extracted, brackets removed) a loopback
-/// name/address? `localhost` and any `*.localhost`, the entire
-/// 127.0.0.0/8 block, `::1`, and 0.0.0.0 (which dev servers print
-/// as a URL host and which means "this machine" in practice).
-/// Parse a WHATWG IPv4 number-form host (AUDIT 0.31, A4-F3):
-/// the short and integer forms a URL parser accepts for an
-/// IPv4 address — `127.1`, `127.0.1`, `2130706433`,
-/// `0x7f000001`, octal `0177.0.0.1` — which std's dotted-quad
-/// parser refuses. Returns `None` for anything that is not
-/// purely a number-form address (ordinary hostnames).
-fn parse_whatwg_ipv4(h: &str) -> Option<Ipv4Addr> {
-    if h.is_empty() || !h.chars().all(|c| c.is_ascii_alphanumeric() || c == '.') {
-        return None;
-    }
-    let parts: Vec<&str> = h.split('.').collect();
-    if parts.len() > 4 || parts.iter().any(|p| p.is_empty()) {
-        return None;
-    }
-    let mut nums: Vec<u64> = Vec::with_capacity(parts.len());
-    for p in &parts {
-        let (digits, radix) =
-            if let Some(hex) = p.strip_prefix("0x").or_else(|| p.strip_prefix("0X")) {
-                (hex, 16)
-            } else if p.len() > 1 && p.starts_with('0') {
-                (*p, 8)
-            } else {
-                (*p, 10)
-            };
-        if digits.is_empty() {
-            return None;
-        }
-        nums.push(u64::from_str_radix(digits, radix).ok()?);
-    }
-    let last = *nums.last()?;
-    // WHATWG: every part but the last is a single byte; the
-    // last fills the remaining bytes.
-    if nums[..nums.len() - 1].iter().any(|&n| n > 255) {
-        return None;
-    }
-    if last >= 256u64.pow((5 - nums.len()) as u32) {
-        return None;
-    }
-    let mut addr: u32 = last as u32;
-    for (i, &n) in nums[..nums.len() - 1].iter().enumerate() {
-        addr += (n as u32) << (24 - 8 * i);
-    }
-    Some(Ipv4Addr::from(addr))
-}
-
+/// name/address? The definition itself is the ONE in
+/// `shield::is_local_host` — through 0.31 this file kept a
+/// private copy, and the two drifted apart and were re-aligned
+/// three times (127/8, then 0.0.0.0, then trailing dots). This
+/// call site only normalizes first: `split_url` does not
+/// lowercase or trim trailing dots the way `shield::host_of`
+/// does for the filter layers (`localhost.` and `LOCALHOST`
+/// are this machine too).
 fn is_loopback_host(host: &str) -> bool {
     let h = host.to_ascii_lowercase();
-    // AUDIT V28 (A4-L1): a trailing dot is the same host
-    // (`localhost.` is still this machine; it resolved as
-    // Public through v27 and teleported as a public URL).
-    // AUDIT 0.31 (A4-F3): repeated trailing dots are the
-    // same host too (`localhost...`).
     let h = h.trim_end_matches('.');
-    if h == "localhost" || h.ends_with(".localhost") || h == "::1" || h == "0.0.0.0" {
-        return true;
-    }
-    // AUDIT 0.31 (A4-F3): bracketed IPv6 forms reach here
-    // with brackets already stripped by split_url — parse
-    // them as IPv6, including IPv4-mapped forms such as
-    // [::ffff:127.0.0.1], whose loopback-ness lives in the
-    // mapped IPv4.
-    if h.contains(':') {
-        if let Ok(v6) = h.parse::<std::net::Ipv6Addr>() {
-            if v6.is_loopback() {
-                return true;
-            }
-            if let Some(v4) = v6.to_ipv4_mapped() {
-                return v4.octets()[0] == 127;
-            }
-        }
-        return false;
-    }
-    if let Ok(v4) = h.parse::<Ipv4Addr>() {
-        return v4.octets()[0] == 127;
-    }
-    // AUDIT 0.31 (A4-F3): WHATWG number forms of 127/8.
-    if let Some(v4) = parse_whatwg_ipv4(h) {
-        return v4.octets()[0] == 127;
-    }
-    false
+    crate::core::shield::is_local_host(h)
 }
 
 /// Split an absolute URL into (scheme, authority, host, rest),

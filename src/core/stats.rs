@@ -1129,15 +1129,6 @@ impl StatsView {
             .saturating_add(self.lite.est_duration_ms)
     }
 
-    pub fn session_time_saved_ms(&self) -> u64 {
-        self.shield
-            .session_est_duration_ms
-            .saturating_add(self.lite.session_est_duration_ms)
-    }
-
-    pub fn any_activity(&self) -> bool {
-        self.shield.blocked > 0 || self.lite.blocked > 0 || self.shield.pruned_events > 0
-    }
 }
 
 /// Is this origin one the ledger may learn from / credit

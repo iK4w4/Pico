@@ -200,7 +200,7 @@ body { min-height: 100vh; }
 <div class="page">
   <div class="hero">
     <div class="ring"><span>P</span></div>
-    <h1>Pico <span class="v">0.31</span></h1>
+    <h1>Pico <span class="v">0.31.1</span></h1>
     <p>A tiny browser for local development. Your dev servers, files and pages — nothing else.</p>
   </div>
 
@@ -285,7 +285,7 @@ body { min-height: 100vh; }
         YouTube
       </a>
     </div>
-    Pico 0.31 · by @iK4w4
+    Pico 0.31.1 · by @iK4w4
   </div>
 </div>
 
@@ -527,7 +527,7 @@ function renderStats(s) {
     if (totalMs > 0) {
       timeEl.style.display = "";
       timeEl.textContent = "≈ " + humanizeDuration(totalMs) + " of loading prevented" +
-        (sessMs > 0 ? " · " + humanizeDuration(sessMs) + " this session" : "");
+        (sessMs > 0 ? " · ≈ " + humanizeDuration(sessMs) + " this session" : "");
     } else {
       timeEl.style.display = "none";
     }

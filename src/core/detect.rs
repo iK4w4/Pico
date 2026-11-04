@@ -172,10 +172,6 @@ pub fn normalize_targets(listeners: &[Listener], our_pid: u32) -> Vec<ProbeTarge
 /// byte length (the failure mode of the RS-era `to_lowercase`
 /// implementation — it could slice at a non-char-boundary and panic
 /// on a hostile page title).
-pub fn find_ascii_ci(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    find_ascii_ci_from(haystack, needle, 0)
-}
-
 fn find_ascii_ci_from(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
     if needle.is_empty() || haystack.len() < needle.len() || from > haystack.len() - needle.len() {
         return None;

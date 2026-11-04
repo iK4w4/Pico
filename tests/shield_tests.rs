@@ -963,6 +963,21 @@ fn whatwg_ipv4_number_forms_classify_loopback() {
 }
 
 #[test]
+fn ipv6_forms_classify_loopback() {
+    // IPv6 literals arrive bracket-free (host_of strips them).
+    // ::1 in any spelling is loopback, and an IPv4-mapped
+    // address inherits its embedded v4 verdict — the rule
+    // Teleport always applied, now part of the one definition.
+    use pico_core::core::shield::is_local_host;
+    for host in ["::1", "0:0:0:0:0:0:0:1", "::ffff:127.0.0.1", "::ffff:7f00:1"] {
+        assert!(is_local_host(host), "{host} must be local");
+    }
+    for host in ["::ffff:8.8.8.8", "2001:db8::1", "fe80::1"] {
+        assert!(!is_local_host(host), "{host} must NOT be local");
+    }
+}
+
+#[test]
 fn genericblock_spares_generic_exceptions() {
     // AUDIT V22-5: on a $genericblock page, generic BLOCK rules
     // are suppressed — but a generic EXCEPTION stays in force

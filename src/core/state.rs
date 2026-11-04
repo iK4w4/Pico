@@ -204,10 +204,6 @@ impl Default for PersistState {
 }
 
 impl PersistState {
-    pub fn is_dark(&self) -> bool {
-        self.theme == "dark"
-    }
-
     /// Syntactically sanitize a state value that came from disk
     /// (or anywhere else untrusted): the theme must be one of
     /// the two known values, recents are capped, deduped, and
