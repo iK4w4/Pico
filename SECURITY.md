@@ -18,9 +18,9 @@ mainstream browser (Edge, Firefox, Chrome).
 
 ## Verifying the release download
 
-The `Pico.exe` attached to the 0.31 release is 1,329,152
+The `Pico.exe` attached to the 0.31.1 release is 1,327,616
 bytes with SHA-256
-`470514f3a3282a7ed8271afc6ed91bfd31159b72ba0e1c5c28599defdae7f8f8`.
+`763e72391a87d13376c00ed8a2bbfea688e788b520a6f2a64bd7c3423b4a87e4`.
 If your copy's hash differs, it is not the file published
 from this tree.
 
