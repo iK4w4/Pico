@@ -2,6 +2,7 @@
 
 [![YouTube](https://img.shields.io/badge/YouTube-@iK4w4-FF0000?logo=youtube&logoColor=white)](https://www.youtube.com/@iK4w4)
 [![Telegram](https://img.shields.io/badge/Telegram-@iK4w4-26A5E4?logo=telegram&logoColor=white)](https://t.me/iK4w4)
+[![Telegram Bot](https://img.shields.io/badge/Telegram_Bot-@AskKawaBot-26A5E4?logo=telegram&logoColor=white)](https://t.me/AskKawaBot)
 
 A tiny, portable Windows browser for local development — one
 `Pico.exe`, no installer. Pico watches your machine for running
@@ -124,7 +125,7 @@ you picked.
   ([SOURCES.md](SOURCES.md)).
 - Rendering: Microsoft Edge WebView2.
 - Find the author on Telegram (https://t.me/iK4w4) and
-  YouTube (https://www.youtube.com/@iK4w4).
+  YouTube (https://www.youtube.com/@iK4w4). Questions: [@AskKawaBot](https://t.me/AskKawaBot) on Telegram.
 
 ## License
 
