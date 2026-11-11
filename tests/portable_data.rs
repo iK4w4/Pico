@@ -365,6 +365,118 @@ fn migration_replaces_a_readonly_state_destination() {
 }
 
 #[test]
+fn migration_of_a_readonly_source_state_is_not_born_readonly() {
+    // AUDIT 0.40.2: `fs::copy` copies the source's
+    // permissions, so a read-only appdata state.json used
+    // to produce a read-only portable state.json — which
+    // then made every later `save_to` rename fail on
+    // Windows. The copy must arrive writable. (The
+    // permissions half is observable on any host; the
+    // Windows rename consequence is reasoned, as in the
+    // 0.34.1 test above.)
+    let root = tmp("mig-readonly-source");
+    let appdata = seed_appdata(&root);
+    let src = appdata.join("state.json");
+    let mut perms = fs::metadata(&src).expect("src meta").permissions();
+    perms.set_readonly(true);
+    fs::set_permissions(&src, perms).expect("make source read-only");
+    let portable = root.join("exe").join("data");
+    let plan = MigrationPlan::CopyStateOnly {
+        from: appdata,
+        to: portable.clone(),
+    };
+    let report = pico_core::core::state::perform_migration(&plan);
+    assert!(report.state_copied, "{report:?}");
+    assert_eq!(report.failed, 0, "{report:?}");
+    let landed = portable.join("state.json");
+    assert_eq!(
+        fs::read(&landed).expect("state landed"),
+        br#"{"theme":"dark"}"#
+    );
+    assert!(
+        !fs::metadata(&landed)
+            .expect("landed meta")
+            .permissions()
+            .readonly(),
+        "the migrated state must not be born read-only"
+    );
+    // And the writer that runs constantly can replace it.
+    save_to(&landed, &PersistState::default()).expect("save over migrated state");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn migration_profile_files_are_not_born_readonly() {
+    // AUDIT 0.40.2: the copy_tree half of the same pattern —
+    // a read-only profile file in appdata must not arrive
+    // read-only in the portable profile WebView2 writes to.
+    let root = tmp("mig-readonly-profile");
+    let appdata = seed_appdata(&root);
+    let cookies_src = appdata
+        .join("WebView2")
+        .join("EBWebView")
+        .join("Default")
+        .join("Cookies");
+    let mut perms = fs::metadata(&cookies_src)
+        .expect("cookies meta")
+        .permissions();
+    perms.set_readonly(true);
+    fs::set_permissions(&cookies_src, perms).expect("make cookies read-only");
+    let portable = root.join("exe").join("data");
+    let plan = MigrationPlan::Copy {
+        from: appdata,
+        to: portable.clone(),
+    };
+    let report = pico_core::core::state::perform_migration(&plan);
+    assert_eq!(report.profile_files, 2, "{report:?}");
+    assert_eq!(report.failed, 0, "{report:?}");
+    let landed = portable
+        .join("WebView2")
+        .join("EBWebView")
+        .join("Default")
+        .join("Cookies");
+    assert_eq!(fs::read(&landed).expect("cookies landed"), b"login-cookies");
+    assert!(
+        !fs::metadata(&landed)
+            .expect("landed meta")
+            .permissions()
+            .readonly(),
+        "the migrated profile file must not be born read-only"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_failed_state_copy_leaves_no_temp_behind() {
+    // AUDIT 0.40.2: copy_atomic's temp is named exactly
+    // like a save_to temp, and the loader promotes a
+    // complete temp as the newest intent — so a failed
+    // migration copy that leaked its temp would silently
+    // become the state at next load, contradicting the
+    // migration report that withheld it. Squat the
+    // destination with a directory so the rename fails.
+    let root = tmp("mig-copy-failure");
+    let appdata = seed_appdata(&root);
+    let portable = root.join("exe").join("data");
+    fs::create_dir_all(portable.join("state.json")).expect("squat destination");
+    let plan = MigrationPlan::CopyStateOnly {
+        from: appdata,
+        to: portable.clone(),
+    };
+    let report = pico_core::core::state::perform_migration(&plan);
+    assert!(!report.state_copied, "{report:?}");
+    assert!(report.failed >= 1, "{report:?}");
+    let leftovers: Vec<String> = fs::read_dir(&portable)
+        .expect("read portable dir")
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("state.json") && n.ends_with(".tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "leaked temps: {leftovers:?}");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
 fn v29_load_never_deletes_a_fresh_foreign_temp_but_reaps_an_old_one() {
     // A5-2: temp names are per-process and there is no
     // single-instance guard — a second instance's in-flight

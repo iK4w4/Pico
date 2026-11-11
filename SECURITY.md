@@ -1,6 +1,6 @@
 # Pico — Security Model
 
-This document describes the **public build** of Pico 0.40.1 —
+This document describes the **public build** of Pico 0.40.2 —
 the one built from this source tree. The `Pico.exe` attached
 to this repository's releases is built from this tree.
 
@@ -11,6 +11,14 @@ This document describes only what the public build does
 today, including the download manager added in 0.32 and the
 audit pass that shipped in 0.40.1.
 
+0.40.2 came out of an external review of the 0.40.1
+source. It fixes a Windows file-handle bug that
+could fail the one-time data migration, closes
+mixed-separator UNC and device-path spellings that
+slipped past the local-path gates, and corrects
+local-server error responses that advertised a
+body they never sent for non-GET requests.
+
 Pico is a young, one-person project for **local
 development**. For banking, email and anything else
 sensitive, use a mainstream browser (Edge, Firefox,
@@ -18,9 +26,9 @@ Chrome).
 
 ## Verifying the release download
 
-The `Pico.exe` attached to the 0.40.1 release is 1,638,912
+The `Pico.exe` attached to the 0.40.2 release is 1,639,936
 bytes with SHA-256
-`54dcc42c3ae1bb24904ae24802d6df3db69c3e49dcd3a684c642d733aa87dcd8`.
+`805d9c4e2a87792d11fd99662f3d0c640bb2dc1af5ae3c33bd876764d95342e4`.
 If your copy's hash differs, it is not the file published
 from this tree.
 
@@ -250,7 +258,7 @@ product token removed. Several sign-in flows — notably
 Google's — reject or degrade the Edge token; this is
 a compatibility choice, disclosed here rather than
 hidden. Pico's own requests (the filter-list download
-and the download engine) identify as `Pico/0.40.1`.
+and the download engine) identify as `Pico/0.40.2`.
 
 ## Phone Teleport
 

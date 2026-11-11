@@ -1122,7 +1122,15 @@ fn handle_conn(
         };
         served += 1;
         let close_after = !req.keep_alive || served >= MAX_REQUESTS_PER_CONNECTION;
-        let send_body = req.method == "GET";
+        // AUDIT 0.40.2: the body is suppressed for HEAD only.
+        // This used to be `method == "GET"`, which made the
+        // error arms ABOVE the method gate (events, the
+        // reserved prefix) advertise a Content-Length they
+        // never sent for POST/PUT/DELETE — a truncated
+        // response. Every consumer below the method gate only
+        // ever sees GET or HEAD, so their behaviour is
+        // unchanged.
+        let send_body = req.method != "HEAD";
 
         let path = req.target.split(['?', '#']).next().unwrap_or("/");
 
@@ -1211,8 +1219,15 @@ fn handle_conn(
                     Some(RangeOutcome::Unsatisfiable) => {
                         // AUDIT V22-1: send_body threaded through —
                         // a HEAD 416 no longer carries a body.
-                        let _ =
-                            respond_range_unsatisfiable(&mut writer, len, close_after, send_body);
+                        // AUDIT 0.40.2 (A5-3): a failed write here
+                        // closes the connection like every other
+                        // response site — never loop keep-alive on
+                        // a desynced stream.
+                        if respond_range_unsatisfiable(&mut writer, len, close_after, send_body)
+                            .is_err()
+                        {
+                            return;
+                        }
                     }
                     Some(RangeOutcome::Slice(start, end)) => {
                         // AUDIT V29 (A5-3): a mid-stream error
@@ -1252,14 +1267,22 @@ fn handle_conn(
                 }
             }
             Err(status) => {
-                let _ = respond_bytes(
+                // AUDIT 0.40.2 (A5-3): same rule as the 416 arm
+                // above — a failed write closes the connection
+                // instead of looping keep-alive on a desynced
+                // stream.
+                if respond_bytes(
                     &mut writer,
                     status,
                     "text/plain; charset=utf-8",
                     status_message(status),
                     send_body,
                     close_after,
-                );
+                )
+                .is_err()
+                {
+                    return;
+                }
             }
         }
         if close_after {

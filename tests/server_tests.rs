@@ -270,6 +270,41 @@ fn traversal_corpus_never_escapes_the_root() {
     assert_eq!(status_of(&resp), 200);
 }
 
+#[test]
+fn non_get_error_responses_on_reserved_paths_send_their_body() {
+    // AUDIT 0.40.2: the events and reserved-prefix error arms
+    // sit BEFORE the method gate, and their `send_body` was
+    // `method == "GET"` — a POST got a Content-Length for a
+    // body that was never sent (a truncated response). Only
+    // HEAD may suppress a body.
+    let fx = fixture("nobody");
+    let post = |path: &str| {
+        request(
+            &fx,
+            &format!(
+                "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Length: 0\r\n\r\n",
+                fx.server.port()
+            ),
+        )
+    };
+    let resp = post("/__pico/other");
+    assert_eq!(status_of(&resp), 404);
+    assert_eq!(body_of(&resp), "404 Not Found");
+    let resp = post("/__pico/events/abc");
+    assert_eq!(status_of(&resp), 404);
+    assert_eq!(body_of(&resp), "404 Not Found");
+    // HEAD on the same arm still gets headers only.
+    let resp = request(
+        &fx,
+        &format!(
+            "HEAD /__pico/other HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n",
+            fx.server.port()
+        ),
+    );
+    assert_eq!(status_of(&resp), 404);
+    assert_eq!(body_of(&resp), "");
+}
+
 // ---------------------------------------------------------------------------
 // Keep-alive (AUDIT M4)
 // ---------------------------------------------------------------------------

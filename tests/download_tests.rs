@@ -2385,6 +2385,16 @@ fn token_bucket_partial_wait_math_is_exact() {
 }
 
 #[test]
+fn token_bucket_refill_saturates_instead_of_overflowing() {
+    // AUDIT 0.40.2: refill's `tokens + add` overflowed
+    // before the capacity clamp could run for absurd
+    // rate × elapsed products (a debug-build panic at the
+    // addition). Saturation IS the clamped result.
+    let mut b = TokenBucket::new(u64::MAX, 0);
+    assert_eq!(b.available(u64::MAX), u64::MAX);
+}
+
+#[test]
 fn token_bucket_set_rate_refills_then_clamps() {
     let mut b = TokenBucket::new(1_000, 0);
     assert!(b.try_take(1_000, 0));

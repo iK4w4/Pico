@@ -20,8 +20,8 @@ page and run it. It needs the Microsoft Edge
 WebView2 Runtime, which ships with Windows 11 and
 recent Windows 10.
 
-- Size: 1,638,912 bytes
-- SHA-256: 54dcc42c3ae1bb24904ae24802d6df3db69c3e49dcd3a684c642d733aa87dcd8
+- Size: 1,639,936 bytes
+- SHA-256: 805d9c4e2a87792d11fd99662f3d0c640bb2dc1af5ae3c33bd876764d95342e4
 
 Everything Pico keeps — settings, the log, the
 cached filter lists and the WebView2 profile —
@@ -121,7 +121,8 @@ how downloads are captured and routed, how
 cookies are scoped per task and never logged,
 how file names are made safe, the host wall on
 the local server, what the log redacts, and the
-0.40.1 audit pass. In short: Pico stores no
+0.40.1 audit pass and the 0.40.2 external-review
+fixes. In short: Pico stores no
 passwords, sends nothing anywhere except the
 requests your browsing makes and the one-time
 filter-list download, and its internal pages

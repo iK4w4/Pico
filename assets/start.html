@@ -202,7 +202,7 @@ body { min-height: 100vh; }
 <div class="page">
   <div class="hero">
     <div class="ring"><span>P</span></div>
-    <h1>Pico <span class="v">0.40.1</span></h1>
+    <h1>Pico <span class="v">0.40.2</span></h1>
     <p>A tiny browser for local development. Your dev servers, files and pages — nothing else.</p>
   </div>
 
@@ -299,7 +299,7 @@ body { min-height: 100vh; }
         YouTube
       </a>
     </div>
-    Pico 0.40.1 · by @iK4w4
+    Pico 0.40.2 · by @iK4w4
   </div>
 </div>
 
@@ -354,7 +354,7 @@ function applyTheme(t, p) {
   if (p) document.documentElement.setAttribute("data-palette", p);
 }
 
-/* 0.40.1: the ONE theme entry point. The app pushes only
+/* 0.40.2: the ONE theme entry point. The app pushes only
    window.__picoTheme(payload) with payload =
    {"v":1,"mode":"dark"|"light","palette":"<id>"}; every other
    theme input was removed. The hook is defensive: any invalid
@@ -620,7 +620,7 @@ function renderStats(s) {
 }
 
 /* ------------------------------------------------------------
-   0.40.1: the Downloads card. The model rides the start INIT
+   0.40.2: the Downloads card. The model rides the start INIT
    JSON's `downloads` field and __picoSetDownloadsCard pushes,
    in the contract shape {state, count, speed_bps, paused,
    queued, newest_name, unseen} with state one of "empty",

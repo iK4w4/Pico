@@ -85,7 +85,13 @@ fn has_whitespace(s: &str) -> bool {
 /// named server.
 pub fn is_unc_address(s: &str) -> bool {
     let t = s.trim_start_matches(|c: char| c.is_control() || c.is_whitespace());
-    t.starts_with("\\\\") || t.starts_with("//")
+    // AUDIT 0.40.2: Windows categorises a path as UNC/device
+    // when it begins with two separators of EITHER kind —
+    // `/` and `\` are interchangeable separators there (and
+    // in std's own prefix parser). The homogeneous spellings
+    // alone let the mixed forms (`\/…`, `/\…`) through.
+    let b = t.as_bytes();
+    b.len() >= 2 && (b[0] == b'\\' || b[0] == b'/') && (b[1] == b'\\' || b[1] == b'/')
 }
 
 /// Whether `path` is safe to hand to filesystem APIs as a *local*
@@ -99,13 +105,25 @@ pub fn is_safe_local_path(path: &Path) -> bool {
         return false;
     }
     let lower = s.to_ascii_lowercase();
-    if lower.starts_with("\\??\\")
-        || lower.starts_with("\\device\\")
-        || lower.starts_with("\\globalroot\\")
+    // AUDIT 0.40.2: the namespace and UNC classification
+    // below runs on a separator-squashed view of the path.
+    // Windows (and std's prefix parser) treat `/` and `\` as
+    // the same separator, so the NT-namespace prefixes can
+    // be spelled with slashes and a UNC can mix them
+    // (`\/.\pipe\…`, `/\evil.example\share`) — the
+    // homogeneous spellings alone let those forms through
+    // both this gate and `is_unc_address`.
+    let squashed: String = lower
+        .chars()
+        .map(|c| if c == '/' { '\\' } else { c })
+        .collect();
+    if squashed.starts_with("\\??\\")
+        || squashed.starts_with("\\device\\")
+        || squashed.starts_with("\\globalroot\\")
     {
         return false;
     }
-    if let Some(rest) = s.strip_prefix("\\\\?\\") {
+    if let Some(rest) = squashed.strip_prefix("\\\\?\\") {
         // Only \\?\X:\ or \\?\X:/ (a local drive) is acceptable.
         let b = rest.as_bytes();
         return b.len() >= 3
@@ -113,7 +131,8 @@ pub fn is_safe_local_path(path: &Path) -> bool {
             && b[1] == b':'
             && (b.len() == 2 || b[2] == b'\\' || b[2] == b'/');
     }
-    if s.starts_with("\\\\") || s.starts_with("//") {
+    let b = s.as_bytes();
+    if b.len() >= 2 && (b[0] == b'\\' || b[0] == b'/') && (b[1] == b'\\' || b[1] == b'/') {
         return false;
     }
     true
@@ -129,7 +148,28 @@ fn valid_port(text: &str) -> Option<u16> {
     }
 }
 
+/// AUDIT 0.40.2: a URL tail (path/query/fragment) that
+/// will be carried verbatim into a minted URL must not
+/// contain whitespace, controls, or backslashes — the same
+/// refusal `web_origin` and the bare-port branch already
+/// apply to their forms.
+fn tail_dirty(tail: &str) -> bool {
+    tail.chars()
+        .any(|c| c.is_whitespace() || c.is_control() || c == '\\')
+}
+
 fn parse_host_port(s: &str) -> Option<Target> {
+    // AUDIT 0.40.2: refuse a dirty tail up front (see
+    // `tail_dirty`) — every branch below mints
+    // `http(s)://{s}` with the tail verbatim, and
+    // `localhost/my page.html` / `example.com:8080/a\b` used
+    // to mint URLs this module's own navigation allowlist
+    // then rejected. Refusing lets the caller fall through
+    // (to search), like the bare-port branch does.
+    let tail_at = s.find(['/', '?', '#']).unwrap_or(s.len());
+    if tail_dirty(&s[tail_at..]) {
+        return None;
+    }
     // Bracketed IPv6, with optional port.
     if s.starts_with('[') {
         let close = s.find(']')?;
@@ -172,7 +212,13 @@ fn parse_host_port(s: &str) -> Option<Target> {
         };
     }
     let lower = host.to_ascii_lowercase();
-    if lower == "localhost" || host.parse::<std::net::Ipv4Addr>().is_ok() {
+    // AUDIT 0.40.2: `*.localhost` is local too (the Shield
+    // and Lite already classify it so) — a dev server on
+    // `app.localhost:5173` is plain http, like `localhost`.
+    if lower == "localhost"
+        || lower.ends_with(".localhost")
+        || host.parse::<std::net::Ipv4Addr>().is_ok()
+    {
         return Some(Target::Url(format!("http://{s}")));
     }
     // A dotted or single-label host with an explicit port: keep
@@ -556,11 +602,14 @@ pub fn parse_input(raw: &str) -> Option<Target> {
     if is_drive_path(&s) {
         return Some(Target::File(PathBuf::from(&s)));
     }
-    // `localhost` with no port.
-    if lower == "localhost"
+    // `localhost` with no port. AUDIT 0.40.2: the tail
+    // guard from `parse_host_port` applies here too — the
+    // whole input rides into the minted URL verbatim.
+    if (lower == "localhost"
         || lower.starts_with("localhost/")
         || lower.starts_with("localhost?")
-        || lower.starts_with("localhost#")
+        || lower.starts_with("localhost#"))
+        && !tail_dirty(&s["localhost".len()..])
     {
         return Some(Target::Url(format!("http://{s}")));
     }
@@ -643,6 +692,13 @@ pub fn parse_input(raw: &str) -> Option<Target> {
             if ip.is_loopback() || ip.is_unspecified() {
                 return Some(Target::Url(format!("http://{s}")));
             }
+        }
+        // AUDIT 0.40.2: bare `*.localhost` (no port) is a
+        // local dev host too — plain http, matching its
+        // with-port form in `parse_host_port`.
+        let lower_host = hostpart.to_ascii_lowercase();
+        if lower_host == "localhost" || lower_host.ends_with(".localhost") {
+            return Some(Target::Url(format!("http://{s}")));
         }
     }
     if is_plausible_bare_host(&s) || has_file_extension(&s) {
@@ -748,6 +804,25 @@ pub fn file_url_to_path(url: &str) -> Option<PathBuf> {
     if after.starts_with("//") {
         return None;
     }
+    // AUDIT 0.40.2: the drive-letter form with BACKSLASH
+    // separators (`file://C:\…`), as some Windows tools emit
+    // it. Normalise the separators and let the ONE pipeline
+    // below handle the result, so percent-decoding and the
+    // decoded-control rejection apply exactly as they do to
+    // the slash form. (An external patch once returned
+    // early for this form, skipping the decode — the slash
+    // spelling `file://C:/my%20file.html` then came back
+    // with a literal `%20` in the path.)
+    let after_owned;
+    let after = if after.len() >= 2
+        && after.as_bytes()[0].is_ascii_alphabetic()
+        && after.as_bytes()[1] == b':'
+    {
+        after_owned = after.replace('\\', "/");
+        after_owned.as_str()
+    } else {
+        after
+    };
     let (authority, path_part) = match after.find('/') {
         Some(0) => ("", after),
         Some(i) => (&after[..i], &after[i..]),

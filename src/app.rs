@@ -1448,7 +1448,7 @@ fn split_https_url(url: &str) -> Option<(String, u16, String)> {
 /// third-party HTTP code enters the tree. The transport is
 /// deliberately narrow: it exists only for the four canonical
 /// list URLs in `core::lists`, sends no cookies and no custom
-/// headers (the session's plain `Pico/0.40.1` User-Agent only),
+/// headers (the session's plain `Pico/0.40.2` User-Agent only),
 /// follows at most 5 redirects MANUALLY (automatic following
 /// is switched off, so the https→https-only policy is enforced
 /// here, hop by hop), and enforces the caller's size cap
@@ -1478,7 +1478,7 @@ fn winhttp_get(url: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
             split_https_url(&current).ok_or_else(|| format!("not an https URL: {current}"))?;
         let host_w = wide(&host);
         let path_w = wide(&path);
-        let ua_w = wide("Pico/0.40.1");
+        let ua_w = wide("Pico/0.40.2");
         // SAFETY: every handle below is created by WinHTTP and
         // immediately owned by a WinHttpHandle (closed on drop);
         // all string pointers reference the NUL-terminated wide

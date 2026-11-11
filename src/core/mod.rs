@@ -30,7 +30,7 @@
 /// form must be the Cargo version or a dotted prefix of
 /// it — so a Cargo bump without a display bump (or the
 /// reverse) fails the suite.
-pub const DISPLAY_VERSION: &str = "0.40.1";
+pub const DISPLAY_VERSION: &str = "0.40.2";
 
 #[cfg(test)]
 mod tests {

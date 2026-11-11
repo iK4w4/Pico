@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-//! Pico 0.40.1 — a tiny neumorphic Windows browser for local development.
+//! Pico 0.40.2 — a tiny neumorphic Windows browser for local development.
 //!
 //! All logic lives in `app` (GUI shell) and the `pico_core` library
 //! (static file server, localhost detector, history machine, typed

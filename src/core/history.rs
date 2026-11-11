@@ -267,10 +267,24 @@ impl TabHistory {
             if let Some(s) = commit_start.as_deref() {
                 if s != url {
                     if let Some(j) = self.landing_index(s) {
-                        self.entries[j] = url.to_string();
-                        self.index = Some(j);
-                        self.clear_pending();
-                        return;
+                        // AUDIT 0.40.2: never replace the slot
+                        // with a URL the list already holds —
+                        // above all not with a NEIGHBOUR's URL,
+                        // which mints consecutive duplicates
+                        // ([a,b]: start a, finish b → [b,b]).
+                        // When the finish URL is already
+                        // present, skip the replace and let
+                        // the landing search below reconcile
+                        // by position instead.
+                        let finish_already_present = self.landing_index(url).is_some()
+                            || (j > 0 && self.entries[j - 1] == url)
+                            || self.entries.get(j + 1).map(String::as_str) == Some(url);
+                        if !finish_already_present {
+                            self.entries[j] = url.to_string();
+                            self.index = Some(j);
+                            self.clear_pending();
+                            return;
+                        }
                     }
                 }
             }
@@ -443,9 +457,19 @@ impl TabHistory {
             return;
         }
         self.entries.remove(i);
-        self.index = if self.entries.is_empty() {
-            None
-        } else if i == 0 {
+        // AUDIT 0.40.2: the removal can splice two EQUAL
+        // neighbours together ([a,b,a] at b drops to [a,a])
+        // — the same consecutive duplicate the A6-L6 second
+        // drop prevents in `record_replace`. Drop the
+        // shifted-in copies at the seam too.
+        if i >= 1 {
+            while self.entries.get(i - 1).is_some()
+                && self.entries.get(i - 1) == self.entries.get(i)
+            {
+                self.entries.remove(i);
+            }
+        }
+        self.index = if self.entries.is_empty() || i == 0 {
             None
         } else {
             Some(i - 1)

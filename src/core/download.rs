@@ -1834,7 +1834,14 @@ impl TokenBucket {
         // Milli-tokens accrue at `rate` per millisecond:
         // exact integer math, no fractional loss.
         let add = u128::from(elapsed) * u128::from(self.rate_per_sec);
-        self.tokens_milli = (self.tokens_milli + add).min(self.capacity_milli());
+        // AUDIT 0.40.2: saturating — for absurd (rate ×
+        // elapsed) products the plain addition overflowed
+        // before the clamp could run; the clamp makes
+        // saturation the correct result anyway.
+        self.tokens_milli = self
+            .tokens_milli
+            .saturating_add(add)
+            .min(self.capacity_milli());
     }
 
     /// Change the rate: refill at the OLD rate first, then
@@ -1897,7 +1904,7 @@ impl TokenBucket {
         // ceil((want - tokens) * 1000 / rate) over exact
         // (fractional) tokens.
         let rate = u128::from(self.rate_per_sec);
-        let wait = (deficit_milli + rate - 1) / rate;
+        let wait = deficit_milli.div_ceil(rate);
         u64::try_from(wait).unwrap_or(u64::MAX)
     }
 }

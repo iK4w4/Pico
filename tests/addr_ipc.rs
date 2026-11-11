@@ -639,6 +639,98 @@ fn file_url_conversion_is_windows_only_safe() {
 }
 
 #[test]
+fn file_url_drive_forms_share_one_pipeline() {
+    // AUDIT 0.40.2: the backslash drive form converts like
+    // the slash form — through the same percent-decoding
+    // and control rejection, not a parallel early return.
+    let norm = |p: PathBuf| p.to_string_lossy().replace('\\', "/");
+    assert_eq!(
+        norm(
+            pico_core::core::addr::file_url_to_path(r"file://C:\Users\me\page.html")
+                .expect("backslash drive form converts")
+        ),
+        "C:/Users/me/page.html"
+    );
+    // The slash form still percent-decodes (the regression
+    // an early-return version of this fix introduced).
+    assert_eq!(
+        norm(
+            pico_core::core::addr::file_url_to_path("file://C:/my%20file.html")
+                .expect("slash drive form converts")
+        ),
+        "C:/my file.html"
+    );
+    // An encoded control is rejected in the backslash form
+    // exactly as in the slash form.
+    assert_eq!(
+        pico_core::core::addr::file_url_to_path(r"file://C:\evil%00.html"),
+        None::<PathBuf>
+    );
+}
+
+#[test]
+fn mixed_separator_unc_and_device_forms_are_refused() {
+    // AUDIT 0.40.2: Windows treats `/` and `\` as the same
+    // separator, so mixed spellings are UNC/device paths
+    // too — the gates classify on both-separator prefixes
+    // and separator-squashed namespace spellings.
+    for p in [
+        r"\/.\pipe\namedpipe",
+        r"/\.\pipe\namedpipe",
+        r"\/evil.example\share\x.html",
+        r"/\evil.example/share/x.html",
+        r"\device/foo",
+        "/??/C:/x",
+    ] {
+        assert!(!is_safe_local_path(Path::new(p)), "{p} must be unsafe");
+    }
+    assert!(is_unc_address(r"\/evil.example\share"));
+    assert!(is_unc_address(r"/\evil.example\share"));
+    // The homogeneous verdicts are unchanged.
+    assert!(!is_safe_local_path(Path::new(r"\\evil.example\share")));
+    assert!(!is_safe_local_path(Path::new("//evil.example/share")));
+    assert!(is_safe_local_path(Path::new(r"\\?\C:\Users\me")));
+    assert!(is_safe_local_path(Path::new(r"C:\Users\me\page.html")));
+    assert!(is_safe_local_path(Path::new("/tmp/x.html")));
+    assert!(!is_unc_address(r"C:\Users\me"));
+}
+
+#[test]
+fn dirty_tails_are_not_minted_into_urls() {
+    // AUDIT 0.40.2: whitespace/backslash tails fall through
+    // (to search / refusal) instead of riding verbatim into
+    // a minted URL the navigation allowlist would reject.
+    for input in ["localhost/my page.html", "[::1]/my page.html"] {
+        match parse_input(input) {
+            Some(Target::Url(u)) => assert!(
+                u.starts_with("https://www.google.com/search?q="),
+                "{input} minted {u}"
+            ),
+            other => panic!("{input}: expected a search, got {other:?}"),
+        }
+    }
+    assert_eq!(parse_input("example.com:8080/a\\b"), None);
+}
+
+#[test]
+fn localhost_subdomains_are_http() {
+    // AUDIT 0.40.2: `*.localhost` is a local dev host in
+    // every form, like `localhost` itself.
+    assert_eq!(
+        parse_input("foo.localhost:5173"),
+        Some(Target::Url("http://foo.localhost:5173".to_string()))
+    );
+    assert_eq!(
+        parse_input("foo.localhost"),
+        Some(Target::Url("http://foo.localhost".to_string()))
+    );
+    assert_eq!(
+        parse_input("app.localhost/dashboard"),
+        Some(Target::Url("http://app.localhost/dashboard".to_string()))
+    );
+}
+
+#[test]
 fn navigate_text_boundary_is_exact() {
     // 8192 bytes of navigate text is the cap: at it passes, above fails.
     let at = format!(

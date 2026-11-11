@@ -738,7 +738,7 @@ html, body { height: 86px; overflow: hidden; user-select: none; background: tran
 <body>
   <div id="shell">
     <div id="topbar">
-      <div class="brand"><span class="dot">P</span> Pico <span class="ver" id="ver">0.40.1</span><button class="byline" id="brand-by" title="Telegram — @iK4w4" aria-label="Open the author's Telegram">by @iK4w4</button></div>
+      <div class="brand"><span class="dot">P</span> Pico <span class="ver" id="ver">0.40.2</span><button class="byline" id="brand-by" title="Telegram — @iK4w4" aria-label="Open the author's Telegram">by @iK4w4</button></div>
       <div id="tabstrip" role="tablist" aria-label="Tabs">
         <button id="newtab" title="New tab (Ctrl+T)" aria-label="New tab">
           <svg viewBox="0 0 24 24" class="ic"><path d="M12 5v14M5 12h14"/></svg>
@@ -1030,7 +1030,7 @@ function picoApply(s) {
   /* Badge shows the display version (0.32: the name the
      user gives the release) — the static badge and the
      snapshot-driven badge must agree. */
-  document.getElementById("ver").textContent = String(s.version || "0.40.1");
+  document.getElementById("ver").textContent = String(s.version || "0.40.2");
   /* Tabs: KEYED reconciliation (AUDIT V28 A1-L6) — an existing
      tab's element is updated in place and only moved (via
      insertBefore) when its position actually changes (A1-S1);

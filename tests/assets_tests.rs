@@ -41,8 +41,8 @@ fn chrome_final_html_is_complete() {
     // Static skeleton: the version badge is correct BEFORE any Rust
     // message arrives.
     assert!(
-        html.contains(">0.40.1<"),
-        "static version badge must say 0.40.1"
+        html.contains(">0.40.2<"),
+        "static version badge must say 0.40.2"
     );
 }
 
@@ -61,7 +61,7 @@ fn start_final_html_is_complete() {
         );
     }
     assert!(html.contains("\"marker\":true"), "init JSON not embedded");
-    assert!(html.contains(">0.40.1<"), "start page must say 0.40.1");
+    assert!(html.contains(">0.40.2<"), "start page must say 0.40.2");
     // Script-breakout neutralization is part of assembly: a hostile
     // title inside the init JSON cannot close the script element.
     let hostile = assemble_start_html("{\"t\":\"x</script><script>alert(1)</script>\"}");
@@ -139,11 +139,11 @@ fn branding_is_present_and_enum_wired() {
 
     let start = assemble_start_html("{}");
     // Hero heading + byline row + footer line.
-    assert!(start.contains("Pico <span class=\"v\">0.40.1</span>"));
+    assert!(start.contains("Pico <span class=\"v\">0.40.2</span>"));
     assert!(start.contains("by @iK4w4"), "start byline text missing");
     assert!(
-        start.contains("Pico 0.40.1 · by @iK4w4"),
-        "start footer must read 'Pico 0.40.1 · by @iK4w4'"
+        start.contains("Pico 0.40.2 · by @iK4w4"),
+        "start footer must read 'Pico 0.40.2 · by @iK4w4'"
     );
     // Chips: action-URL hrefs carrying ONLY the enum name, plus the
     // data-social attributes the DOM test drives.

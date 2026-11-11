@@ -685,23 +685,51 @@ fn copy_atomic(src: &Path, dst: &Path) -> std::io::Result<()> {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "state.json".to_string());
     let tmp = dst.with_file_name(format!("{name}.{}.tmp", std::process::id()));
-    std::fs::copy(src, &tmp)?;
-    {
-        let f = std::fs::File::open(&tmp)?;
-        f.sync_all()?;
+    let copied = (|| -> std::io::Result<()> {
+        std::fs::copy(src, &tmp)?;
+        // AUDIT 0.40.2: `fs::copy` copies the source's
+        // permissions, so a read-only source would make the
+        // copy itself read-only — the destination would be
+        // born poisoned even with the 0.34.1 clearing below.
+        // Clear the attribute on the temp, before it is
+        // published under the real name.
+        clear_readonly(&tmp);
+        {
+            // AUDIT 0.40.2: the sync handle must be opened
+            // with WRITE access. On Windows `sync_all` is
+            // FlushFileBuffers, which requires a GENERIC_WRITE
+            // handle; the read-only `File::open` used here
+            // before failed with access denied on Windows
+            // every time, so the migration's state copy could
+            // never complete there — while passing every test
+            // on the Linux build host, where fsync accepts a
+            // read-only fd.
+            let f = std::fs::OpenOptions::new().write(true).open(&tmp)?;
+            f.sync_all()?;
+        }
+        // AUDIT 0.34.1 (retry poisoning): a previous partial
+        // migration can leave the destination state.json
+        // READ-ONLY (fs::copy copies the source's permissions);
+        // on Windows a rename over a read-only destination
+        // fails with access denied, so every retry would fail
+        // forever even after the original cause cleared. Clear
+        // the attribute first, best-effort. (The Windows
+        // read-only rename semantics are reasoned from the
+        // platform docs, not verifiable on the Linux build
+        // host, where rename ignores the file's mode.)
+        clear_readonly(dst);
+        std::fs::rename(&tmp, dst)
+    })();
+    if copied.is_err() {
+        // AUDIT 0.40.2: a leftover temp is named exactly like
+        // a `save_to` temp, and the loader promotes a complete
+        // temp as the newest intent — a failed migration copy
+        // must not become the state after the migration
+        // report said the copy was withheld. Best-effort
+        // cleanup; the copy's own error is the one returned.
+        let _ = std::fs::remove_file(&tmp);
     }
-    // AUDIT 0.34.1 (retry poisoning): a previous partial
-    // migration can leave the destination state.json
-    // READ-ONLY (fs::copy copies the source's permissions);
-    // on Windows a rename over a read-only destination
-    // fails with access denied, so every retry would fail
-    // forever even after the original cause cleared. Clear
-    // the attribute first, best-effort. (The Windows
-    // read-only rename semantics are reasoned from the
-    // platform docs, not verifiable on the Linux build
-    // host, where rename ignores the file's mode.)
-    clear_readonly(dst);
-    std::fs::rename(&tmp, dst)
+    copied
 }
 
 /// Best-effort: if `path` exists and is read-only, clear
@@ -795,7 +823,15 @@ fn copy_tree_at_depth(
             copy_tree_at_depth(&s, &d, root, report, depth + 1);
         } else if kind.is_file() {
             match std::fs::copy(&s, &d) {
-                Ok(_) => report.profile_files += 1,
+                // AUDIT 0.40.2: `fs::copy` copies the source's
+                // permissions — clear a read-only attribute on
+                // the NEW copy, so the portable profile is not
+                // born read-only (the 0.34.1 fix below only
+                // clears a PRE-EXISTING destination on retry).
+                Ok(_) => {
+                    clear_readonly(&d);
+                    report.profile_files += 1;
+                }
                 Err(first) => {
                     // AUDIT 0.34.1 (retry poisoning): a
                     // partial earlier copy may have left
@@ -813,7 +849,12 @@ fn copy_tree_at_depth(
                     if d.exists() {
                         clear_readonly(&d);
                         match std::fs::copy(&s, &d) {
-                            Ok(_) => report.profile_files += 1,
+                            // AUDIT 0.40.2: same born-read-only
+                            // clearing as the first-copy arm.
+                            Ok(_) => {
+                                clear_readonly(&d);
+                                report.profile_files += 1;
+                            }
                             Err(second) => {
                                 report.note_failure(
                                     "profile file",
@@ -863,6 +904,15 @@ pub const MAX_STATE_BYTES: u64 = 1024 * 1024;
 pub fn load_from_checked(path: &Path) -> LoadOutcome {
     match std::fs::metadata(path) {
         Ok(meta) if meta.len() > MAX_STATE_BYTES => {
+            // AUDIT 0.40.2: this was the one failure branch
+            // that did not attempt temp recovery — every other
+            // branch (missing, unreadable, unparseable) treats
+            // a complete temp sibling as the newest intent
+            // (the A5-L2/L3 rationale below), and an oversized
+            // main file does not change that.
+            if let Some(recovered) = recover_from_temp(path) {
+                return LoadOutcome::Loaded(Box::new(recovered));
+            }
             return LoadOutcome::Corrupt(format!(
                 "state file implausibly large ({} bytes)",
                 meta.len()
@@ -1031,6 +1081,14 @@ pub fn save_to(path: &Path, state: &PersistState) -> std::io::Result<()> {
         f.write_all(text.as_bytes())?;
         f.sync_all()?;
     }
+    // AUDIT 0.40.2: `save_to` was the one writer the 0.34.1
+    // retry-poisoning fix missed — on Windows the rename
+    // fails with access denied when the destination is
+    // read-only, and this writer runs at every state change,
+    // so one read-only state.json (e.g. born that way from a
+    // migration copy) would fail every save until a human
+    // cleared the attribute by hand.
+    clear_readonly(path);
     std::fs::rename(&tmp, path)
 }
 

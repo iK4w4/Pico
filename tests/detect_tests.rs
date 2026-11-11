@@ -357,7 +357,21 @@ fn python_http_server_fixture_is_detected() {
         drop(ln);
         p
     };
-    let mut child = std::process::Command::new("python3")
+    // Prefer python3 (Linux/macOS/CI) but fall back to `python`
+    // (Windows), so the fixture runs on either host.
+    let python = if std::process::Command::new("python3")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        "python3"
+    } else {
+        "python"
+    };
+    let mut child = std::process::Command::new(python)
         .args([
             "-m",
             "http.server",
@@ -370,7 +384,7 @@ fn python_http_server_fixture_is_detected() {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .expect("python3 must be available for the detector fixture");
+        .expect("python must be available for the detector fixture");
 
     // Wait until the server accepts connections (bounded).
     let deadline = std::time::Instant::now() + Duration::from_secs(8);

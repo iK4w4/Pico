@@ -52,6 +52,40 @@ fn redirect_during_traversal_replaces_destination() {
 }
 
 #[test]
+fn coalesced_commit_start_finish_on_a_neighbour_keeps_no_duplicates() {
+    // AUDIT 0.40.2: the commit-start slot replace never
+    // checked the finish URL against the list — [a,b], a
+    // Back load that started at a and finished back on b
+    // replaced a's slot with b: [b,b]. A finish URL that is
+    // already present must reconcile by landing instead.
+    // (Sequence: intent first, then the load's start note —
+    // the order the shell produces them.)
+    let mut h = hist_with(&["http://a/", "http://b/"]);
+    assert_eq!(h.go_back(0), Some("http://a/"));
+    h.note_commit_start("http://a/");
+    h.record_commit("http://b/");
+    assert_eq!(h.entries(), ["http://a/", "http://b/"]);
+    assert_eq!(h.index(), Some(1));
+    assert_eq!(h.current(), Some("http://b/"));
+    assert!(!h.can_go_forward());
+}
+
+#[test]
+fn drop_top_entry_does_not_splice_equal_neighbours() {
+    // AUDIT 0.40.2: [a,b,a] with the cursor on b — dropping
+    // b spliced the two a entries into consecutive
+    // duplicates, the splice `record_replace` already
+    // guards against (A6-L6).
+    let mut h = hist_with(&["http://a/", "http://b/", "http://a/"]);
+    h.record_pop("http://b/");
+    assert_eq!(h.current(), Some("http://b/"));
+    h.drop_top_entry();
+    assert_eq!(h.entries(), ["http://a/"]);
+    assert_eq!(h.index(), Some(0));
+    assert!(!h.can_go_forward());
+}
+
+#[test]
 fn spa_push_replace_pop() {
     let mut h = hist_with(&["http://a/"]);
     h.record_push("http://a/spa1");
@@ -682,6 +716,28 @@ fn oversized_state_file_is_corrupt_not_loaded() {
     match load_from_checked(&path) {
         LoadOutcome::Corrupt(why) => assert!(why.contains("implausibly large")),
         other => panic!("expected Corrupt, got {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn oversized_state_recovers_from_a_complete_temp() {
+    // AUDIT 0.40.2: the oversized arm was the one load
+    // failure branch that never attempted temp recovery —
+    // every other branch treats a complete temp sibling as
+    // the newest intent. Same oversized main as the test
+    // above, now with a crashed save's temp beside it.
+    let dir = temp_state_dir("oversized-temp");
+    let path = dir.join("state.json");
+    let big = format!(
+        "{{\"theme\":\"dark\",\"pad\":\"{}\"}}",
+        "x".repeat(1_100_000)
+    );
+    std::fs::write(&path, big).expect("write oversized");
+    std::fs::write(dir.join("state.json.99999.tmp"), r#"{"theme":"light"}"#).expect("write temp");
+    match load_from_checked(&path) {
+        LoadOutcome::Loaded(loaded) => assert_eq!(loaded.theme, "light"),
+        other => panic!("expected Loaded from temp, got {other:?}"),
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
