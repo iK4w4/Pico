@@ -18,8 +18,14 @@ fn main() {
         .unwrap_or_else(|| PathBuf::from("."));
     std::fs::create_dir_all(&dir).expect("create out dir");
     let chrome = pico_core::core::assets::assemble_chrome_html();
+    // 0.35.1 fixture theme: NON-default ember/dark (the default
+    // is forest/light), so the DOM suite proves boot-applied INIT
+    // theming instead of passing on the pages' static defaults.
+    // INIT.downloads carries the 0.35.1 card contract model
+    // (state/count/speed_bps/paused/queued/newest_name/unseen),
+    // active with the humanizer-pinned speed 1258291 ("1.26 MB").
     let start = pico_core::core::assets::assemble_start_html(
-        "{\"services\":[{\"port\":5173,\"pid\":4242,\"process\":\"node.exe\",\"title\":\"Fixture App\",\"label\":\"Fixture App\",\"url\":\"http://localhost:5173\",\"kind\":\"http\"}],\"otherListeners\":0,\"recents\":[\"C:\\\\Users\\\\Fixture\\\\Downloads\\\\First Page.html\",\"C:\\\\Users\\\\Fixture\\\\Desktop\\\\Second.html\"],\"recentsHidden\":false,\"theme\":\"light\",\"palette\":\"forest\",\"stats\":{\"shield\":{\"blocked\":1234,\"estBytes\":86400000,\"estDurationMs\":864000,\"prunedEvents\":34,\"prunedBytes\":512000,\"sessionBlocked\":12,\"sessionEstBytes\":640000,\"sessionEstDurationMs\":9600},\"lite\":{\"blocked\":56,\"estBytes\":22400000,\"estDurationMs\":140000,\"prunedEvents\":0,\"prunedBytes\":0,\"sessionBlocked\":3,\"sessionEstBytes\":1200000,\"sessionEstDurationMs\":7500}}}",
+        "{\"services\":[{\"port\":5173,\"pid\":4242,\"process\":\"node.exe\",\"title\":\"Fixture App\",\"label\":\"Fixture App\",\"url\":\"http://localhost:5173\",\"kind\":\"http\"}],\"otherListeners\":0,\"recents\":[\"C:\\\\Users\\\\Fixture\\\\Downloads\\\\First Page.html\",\"C:\\\\Users\\\\Fixture\\\\Desktop\\\\Second.html\"],\"recentsHidden\":false,\"theme\":\"dark\",\"palette\":\"ember\",\"downloads\":{\"state\":\"active\",\"count\":2,\"speed_bps\":1258291,\"paused\":0,\"queued\":0,\"newest_name\":null,\"unseen\":false},\"stats\":{\"shield\":{\"blocked\":1234,\"estBytes\":86400000,\"estDurationMs\":864000,\"prunedEvents\":34,\"prunedBytes\":512000,\"sessionBlocked\":12,\"sessionEstBytes\":640000,\"sessionEstDurationMs\":9600},\"lite\":{\"blocked\":56,\"estBytes\":22400000,\"estDurationMs\":140000,\"prunedEvents\":0,\"prunedBytes\":0,\"sessionBlocked\":3,\"sessionEstBytes\":1200000,\"sessionEstDurationMs\":7500}}}",
     );
     std::fs::write(dir.join("chrome.html"), &chrome).expect("write chrome");
     std::fs::write(dir.join("start.html"), &start).expect("write start");
@@ -28,6 +34,19 @@ fn main() {
         chrome.len(),
         start.len()
     );
+
+    // The Downloads page (0.34): THE snapshot shape the
+    // runtime pushes (page init JSON == __picoSetDownloads
+    // payload) — one task per status, the failed one carrying
+    // its hint + retry_text, the done one its SHA-256, plus
+    // active_count / failed_unseen and a live notice, so the
+    // DOM test can assert every per-status action set and
+    // the visual check renders the full vocabulary.
+    let downloads = pico_core::core::assets::assemble_downloads_html(
+        "{\"theme\":\"dark\",\"palette\":\"ember\",\"version\":\"0.35\",\"tasks\":[{\"id\":11,\"name\":\"ubuntu-24.04.iso\",\"host\":\"releases.ubuntu.com\",\"url\":\"https://releases.ubuntu.com/ubuntu-24.04.iso\",\"status\":\"downloading\",\"total\":1500000000,\"downloaded\":637500000,\"percent\":42.5,\"size_text\":\"1.4 GB\",\"detail_text\":\"612 MB of 1.4 GB · 3.2 MB/s · 4 min left\",\"connections\":8,\"error\":null,\"hint\":null,\"retry_text\":null,\"retry_pending\":false,\"refreshing\":false,\"sha256\":null,\"added_ms\":1730000000000},{\"id\":12,\"name\":\"lecture.mp4\",\"host\":\"media.example.org\",\"url\":\"https://media.example.org/lecture.mp4\",\"status\":\"paused\",\"total\":251658240,\"downloaded\":50331648,\"percent\":20,\"size_text\":\"240 MB\",\"detail_text\":\"48 MB of 240 MB · Paused\",\"connections\":8,\"error\":null,\"hint\":null,\"retry_text\":null,\"retry_pending\":false,\"refreshing\":false,\"sha256\":null,\"added_ms\":1730003600000},{\"id\":13,\"name\":\"file.rar\",\"host\":\"dl.soft98.ir\",\"url\":\"https://dl.soft98.ir/file.rar?token=abc123\",\"status\":\"failed\",\"total\":89128960,\"downloaded\":26738688,\"percent\":30,\"size_text\":\"85 MB\",\"detail_text\":\"25 MB of 85 MB · Failed\",\"connections\":8,\"error\":\"HTTP 403\",\"hint\":\"the link may have expired — use Refresh link\",\"retry_text\":\"Retrying in 15 s · attempt 1 of 3\",\"retry_pending\":true,\"refreshing\":false,\"sha256\":null,\"added_ms\":1730007200000},{\"id\":14,\"name\":\"manual.pdf\",\"host\":\"docs.example.com\",\"url\":\"https://docs.example.com/manual.pdf\",\"status\":\"done\",\"total\":12582912,\"downloaded\":12582912,\"percent\":100,\"size_text\":\"12.0 MB\",\"detail_text\":\"12.0 MB\",\"connections\":8,\"error\":null,\"hint\":null,\"retry_text\":null,\"retry_pending\":false,\"refreshing\":false,\"sha256\":\"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08\",\"added_ms\":1730010800000},{\"id\":15,\"name\":\"notes.zip\",\"host\":\"files.example.com\",\"url\":\"https://files.example.com/notes.zip\",\"status\":\"queued\",\"total\":5242880,\"downloaded\":0,\"percent\":0,\"size_text\":\"5.0 MB\",\"detail_text\":\"Queued\",\"connections\":8,\"error\":null,\"hint\":null,\"retry_text\":null,\"retry_pending\":false,\"refreshing\":false,\"sha256\":null,\"added_ms\":1730014400000}],\"active_count\":2,\"failed_unseen\":1,\"settings\":{\"default_connections\":8,\"max_concurrent\":3,\"speed_limit_kbps\":0},\"notice\":{\"seq\":7,\"kind\":\"failed\",\"name\":\"file.rar\",\"reason\":\"HTTP 403\",\"open\":true}}",
+    );
+    std::fs::write(dir.join("downloads.html"), &downloads).expect("write downloads");
+    println!("downloads.html {} bytes", downloads.len());
 
     // The Shield fixture (AUDIT V23): a minimal page whose head
     // installs page-environment stubs FIRST (the "native" fetch /

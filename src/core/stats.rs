@@ -1128,7 +1128,6 @@ impl StatsView {
             .est_duration_ms
             .saturating_add(self.lite.est_duration_ms)
     }
-
 }
 
 /// Is this origin one the ledger may learn from / credit

@@ -1,8 +1,8 @@
 [package]
 name = "pico"
-version = "0.31.1"
+version = "0.40.1"
 edition = "2021"
-description = "Pico 0.31 by @iK4w4 \u2014 a tiny neumorphic Windows browser for local development (Rust + tao/wry WebView2): auto-detected localhost services, a three-layer Shield (filter lists downloaded on first run from EasyList / EasyPrivacy / uBlock Origin and cached beside the exe), Lite mode with chosen-video semantics, a start-page savings band, sixteen palette themes, and portable data (state, log, lists and profile in data\\ beside the exe). Ships with NO embedded manifest (zero RT_MANIFEST, gate-verified); the only resource is an icon-only .rsrc compiled by llvm-rc from a generated .ico."
+description = "Pico 0.40.1 by @iK4w4 \u2014 a tiny neumorphic Windows browser for local development (Rust + tao/wry WebView2): auto-detected localhost services, a download manager (multi-connection downloads, pause/resume across restarts, a live-speed popover and a full downloads page), a three-layer Shield (filter lists downloaded on first run from EasyList / EasyPrivacy / uBlock Origin and cached beside the exe), Lite mode with chosen-video semantics, a start-page savings band, sixteen palette themes, and portable data (state, log, lists and profile in data\\ beside the exe). Ships with NO embedded manifest (zero RT_MANIFEST, gate-verified); the only resource is an icon-only .rsrc compiled by llvm-rc from a generated .ico."
 license = "MIT"
 
 [lib]
@@ -36,15 +36,33 @@ windows-sys = { version = "0.59", features = [
     # gated on Ndis types (IF_OPER_STATUS) in windows-sys 0.59 —
     # same crate, one more feature flag, no new dependency.
     "Win32_NetworkManagement_Ndis",
-    # Public build: WinHTTP — the OS HTTP stack the Shield's
-    # first-run filter-list download rides on. Same crate, one
-    # more feature flag, no new dependency.
+    # 0.32: WinHttp* for the download manager's transport
+    # (src/winhttp.rs) — same crate, one more feature flag,
+    # no new dependency (precedent: the Ndis flag above).
     "Win32_Networking_WinHttp",
+    # 0.32.1: GetDiskFreeSpaceExW for the download disk-fill
+    # guard (src/downloads.rs) — same crate, one more flag.
+    "Win32_Storage_FileSystem",
+    # 0.34.1: the clipboard format/open/get/set calls for
+    # Pico's own context menu (src/app.rs) — same crate, one
+    # more feature flag, no new dependency (precedent: the
+    # FileSystem flag above).
+    "Win32_System_DataExchange",
+    # 0.34.1: GlobalAlloc/GlobalLock/GlobalUnlock/GlobalSize
+    # for the clipboard text hand-off — same crate, one more
+    # flag (GlobalFree itself lives in Win32_Foundation,
+    # already enabled above).
+    "Win32_System_Memory",
     "Win32_Networking_WinSock",
     "Win32_System_Threading",
     "Win32_UI_HiDpi",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
+    # 0.35: GetKeyState + VK_CONTROL for the content
+    # webviews' Ctrl+J downloads accelerator (src/app.rs)
+    # — same crate, one more feature flag, no new
+    # dependency (precedent: the DataExchange flag above).
+    "Win32_UI_Input_KeyboardAndMouse",
 ] }
 
 # NOTE: no build-dependencies, no build.rs, no embed-manifest, no winres.

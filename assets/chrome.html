@@ -256,11 +256,25 @@ html, body { height: 86px; overflow: hidden; user-select: none; background: tran
   flex: 1; border: none; background: none; color: var(--text);
   font: inherit; font-size: 13px; line-height: 32px; outline: none; min-width: 0;
   user-select: text;
+  /* 0.32.3: the caret speaks the theme too — the accent,
+     never the platform default. */
+  caret-color: var(--accent);
 }
 #addr::placeholder { color: var(--faint); }
 /* The input itself never draws a focus ring: the wrap's
    :focus-within glow IS the address bar's focus indication. */
 #addr:focus-visible { box-shadow: none; }
+/* Text selection (0.32.3): through 0.32.2 a selected URL
+   painted the platform default — one solid OS-blue block,
+   white text, edge to edge — foreign to every palette.
+   The tint is the theme's own --selection token (the
+   accent at an alpha derived to keep --text at AA on the
+   composite, pinned per palette in core::themes), and the
+   selected text keeps the theme's text color. The rule is
+   document-wide: the shell's other inputs (the downloads
+   Add-URL field, the Teleport URL) select in the same
+   language. */
+::selection { background: var(--selection); color: var(--text); }
 .badges { display: flex; align-items: center; gap: 8px; flex: none; }
 /* Shield toggle: a latching neumorphic switch in the address
    row's right cluster. ON = pressed into the slab with an
@@ -275,6 +289,8 @@ html, body { height: 86px; overflow: hidden; user-select: none; background: tran
 #lite { color: var(--muted); }
 #lite[aria-pressed="true"] { box-shadow: var(--neu-pressed), var(--glow); color: var(--accent); }
 #lite[aria-pressed="false"] { box-shadow: var(--neu-raised-sm); }
+/* While the Downloads panel is open its button reads pressed. */
+#downloads[aria-expanded="true"] { box-shadow: var(--neu-pressed), var(--glow); color: var(--accent); }
 /* While the Teleport panel is open its button reads pressed. */
 #teleport[aria-expanded="true"] { box-shadow: var(--neu-pressed), var(--glow); color: var(--accent); }
 /* While the theme picker is open its button reads pressed. */
@@ -304,7 +320,10 @@ html, body { height: 86px; overflow: hidden; user-select: none; background: tran
    the app enforces it and so does this page's open-state. */
 #ppanel {
   position: fixed; top: 80px; left: 50%; transform: translateX(-50%); z-index: 6;
-  width: 400px; max-height: 486px; overflow-y: auto;
+  /* AUDIT 0.34.2: the height cap also respects the window —
+     at the 500-DIP minimum height a flat 486px card ran
+     off the bottom of the window. */
+  width: 400px; max-height: min(486px, calc(100vh - 90px)); overflow-y: auto;
   display: none; flex-direction: column; gap: 8px;
   background: var(--surface); border-radius: var(--r-xl);
   box-shadow: var(--neu-raised);
@@ -350,6 +369,260 @@ html, body { height: 86px; overflow: hidden; user-select: none; background: tran
   box-shadow: var(--neu-pdot-ring), var(--neu-raised-sm);
 }
 
+/* Downloads popover (0.32.2): a compact dropdown anchored
+   under the toolbar's right cluster — NO backdrop, nothing
+   dims; dismissal is the toolbar toggle, Escape, an outside
+   pointerdown, or a committed navigation (app side). The
+   geometry numbers below are the contract shared with
+   src/core/layout.rs (DL_POPOVER_* / DL_ROW_* / DL_LIST_MAX_H
+   there): top 78, width 360, padding 10, gap 8, header 26,
+   add row 30, row 76, row gap 6, list max-height 386 — keep
+   both places in sync. Rows are keyed by task id and
+   reconciled in place like the tab strip; every dynamic
+   string (names, hosts, details — network data) is placed
+   with textContent only, and the size/detail lines arrive
+   preformatted from Rust: this page formats nothing itself.
+   The row-action icons are STATIC markup (JS string
+   constants), never built from task data. */
+#dpanel {
+  position: fixed; top: 78px; right: 12px; z-index: 6;
+  width: 360px;
+  /* AUDIT 0.34.2: the card never outgrows the window — at
+     the 500-DIP minimum height the uncapped card (478px
+     from top 78) ran off the bottom and took the footer
+     with it; capped, the list shrinks and scrolls instead
+     (see #dl-list's min-height). On tall windows the cap
+     never binds (the layout.rs geometry is unchanged). */
+  max-height: calc(100vh - 88px);
+  display: none; flex-direction: column; gap: 8px;
+  background: var(--surface); border-radius: var(--r-xl);
+  box-shadow: var(--neu-raised);
+  padding: 10px;
+}
+#dpanel.on { display: flex; }
+#dpanel .dp-head {
+  display: flex; align-items: center; gap: 8px; height: 26px; flex: none;
+  font-size: 12px; font-weight: 650; letter-spacing: 0.04em;
+}
+#dpanel .dp-head .dp-title { flex: 1; text-transform: uppercase; color: var(--muted); }
+/* Aggregate speed (0.35): the summed meter of every
+   downloading task, shown only while 2+ are downloading. */
+#dl-agg { font-size: 11.5px; color: var(--muted); flex: none; }
+#dpanel .dp-conn-label {
+  font-size: 11px; font-weight: 600; color: var(--muted); letter-spacing: 0;
+}
+#dpanel select {
+  font: inherit; font-size: 12px; color: var(--text);
+  background: var(--surface); border: none; border-radius: var(--r-md);
+  box-shadow: var(--neu-raised-sm);
+  padding: 2px 6px; height: 24px;
+}
+#dpanel select.dl-conn {
+  font-size: 11px; padding: 2px 4px; height: 22px; flex: none;
+}
+#dpanel .dp-x {
+  width: 24px; height: 24px; border-radius: var(--r-md); flex: none;
+  display: grid; place-items: center; color: var(--muted);
+  box-shadow: var(--neu-raised-sm);
+  transition: color 120ms ease, box-shadow 120ms ease;
+}
+#dpanel .dp-x:hover { color: var(--text); }
+#dpanel .dp-x:active { box-shadow: var(--neu-pressed); }
+#dpanel .dp-add { display: flex; align-items: center; gap: 8px; height: 30px; flex: none; }
+#dl-add-url {
+  flex: 1; height: 30px; border: none; border-radius: var(--r-md);
+  padding: 0 8px; color: var(--text); font: inherit; font-size: 12px;
+  min-width: 0; user-select: text;
+}
+#dl-add-url:focus-visible { box-shadow: var(--neu-inset), var(--neu-focus); }
+#dl-add-btn {
+  height: 30px; flex: none; padding: 4px 8px;
+  border-radius: var(--r-md); font-size: 12px; font-weight: 600;
+  color: var(--text); background: var(--surface);
+  box-shadow: var(--neu-raised-sm);
+  transition: box-shadow 120ms ease;
+}
+#dl-add-btn:active { box-shadow: var(--neu-pressed); }
+#dl-list {
+  display: flex; flex-direction: column; gap: 6px;
+  max-height: 386px; overflow-y: auto;
+  /* Flex children do not shrink below content height by
+     default; inside the height-capped card (AUDIT 0.34.2)
+     the list must be allowed to shrink so IT scrolls and
+     the header/footer stay on screen. */
+  min-height: 0;
+}
+#dl-empty {
+  display: none; padding: 6px 8px; text-align: center;
+  font-size: 12px; line-height: 18px; color: var(--muted);
+}
+#dl-empty.on { display: block; }
+.dl-row {
+  display: flex; flex-direction: column; gap: 5px;
+  padding: 8px 10px; border-radius: var(--r-lg);
+  background: var(--surface); box-shadow: var(--neu-raised-sm);
+}
+/* Row pricing (0.35, the Rust contract): padding 8/10,
+   flex column gap 5; name-line 24 + bar 4 + prog-line 22
+   = row 76. */
+.dl-name-line { display: flex; align-items: center; gap: 8px; height: 24px; }
+.dl-name {
+  flex: 1; min-width: 0; font-size: 12.5px; font-weight: 650; color: var(--text);
+  line-height: 14px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.dl-status { flex: none; font-size: 11px; font-weight: 600; color: var(--accent); }
+.dl-bar {
+  height: 4px; border-radius: var(--r-pill); overflow: hidden;
+  background: var(--surface); box-shadow: var(--neu-pressed);
+}
+.dl-fill { height: 100%; width: 0; border-radius: var(--r-pill); background: var(--accent); }
+.dl-fill.indet { opacity: 0.35; }
+/* Line 3 of a row (0.35): the progress line + the
+   per-task conn select, on ONE flex line. */
+.dl-prog { display: flex; align-items: center; gap: 6px; height: 22px; }
+.dl-prog-text {
+  flex: 1; min-width: 0; font-size: 11.5px; color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.dl-error {
+  font-size: 11px; line-height: 15px; color: var(--warn);
+  /* The flex gap above this line is part of the row's rhythm;
+     the error line's whole cost is its 15px (DL_ROW_ERR_H). */
+  margin-top: -5px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.dl-icon-btn {
+  width: 24px; height: 24px; border-radius: var(--r-md); flex: none;
+  display: grid; place-items: center; color: var(--muted);
+  background: var(--surface);
+  box-shadow: var(--neu-raised-sm);
+  transition: color 120ms ease, box-shadow 120ms ease;
+}
+.dl-icon-btn:hover { color: var(--text); }
+.dl-icon-btn:active { box-shadow: var(--neu-pressed); }
+.dl-icon-btn svg.ic { width: 14px; height: 14px; }
+.dl-cancel { font-size: 14px; }
+/* Popover footer (0.33): the bridge to the full Downloads
+   page — part of the panel, visible whenever it is open. */
+#dpanel .dp-foot { display: flex; flex: none; gap: 8px; align-items: center; }
+#dl-all {
+  flex: 1; height: 28px; padding: 4px 8px;
+  border-radius: var(--r-md); font-size: 12px; font-weight: 600;
+  color: var(--text); background: var(--surface);
+  box-shadow: var(--neu-raised-sm);
+  transition: box-shadow 120ms ease;
+}
+#dl-all:active { box-shadow: var(--neu-pressed); }
+/* Footer companions (0.35): Clear finished (only while a
+   done task exists — toggled in syncDownloads) and the
+   downloads-folder icon button. Footer height stays 28. */
+#dl-clear-finished {
+  flex: none; height: 28px; padding: 4px 8px;
+  border-radius: var(--r-md); font-size: 12px; font-weight: 600;
+  color: var(--text); background: var(--surface);
+  box-shadow: var(--neu-raised-sm);
+  transition: box-shadow 120ms ease;
+}
+#dl-clear-finished:active { box-shadow: var(--neu-pressed); }
+#dl-open-folder {
+  width: 28px; height: 28px; border-radius: var(--r-md); flex: none;
+  display: grid; place-items: center; color: var(--muted);
+  background: var(--surface);
+  box-shadow: var(--neu-raised-sm);
+  transition: color 120ms ease, box-shadow 120ms ease;
+}
+#dl-open-folder:hover { color: var(--text); }
+#dl-open-folder:active { box-shadow: var(--neu-pressed); }
+/* Failed-downloads badge (0.33): a small warn pill beside
+   the active-count badge, present only while the snapshot's
+   downloadsFailedBadge is above zero. */
+.dl-fail-badge {
+  display: none; align-items: center;
+  font-size: 11px; font-weight: 700; color: #ffffff;
+  background: var(--warn);
+  border-radius: var(--r-pill); padding: 4px 8px;
+}
+.dl-fail-badge.on { display: inline-flex; }
+
+/* Download toast (0.32.3): the "started / blocked" glance.
+   A small pill at the popover's anchor (top 78, right 12 —
+   the DL_TOAST_* contract in core::layout; the app extends
+   the chrome rect by exactly the pill's height while the
+   notice is open, so the pill is never clipped by the
+   HWND). It is app-owned state mirrored from the snapshot
+   like the panels: Rust decides when it is open (born open
+   on a new task or a refused capture, closed by the 4 s
+   expiry, by any panel opening, or by the toast's own
+   click — which opens the Downloads panel instead). The
+   blocked variant leads in the theme's warn color. Every
+   string in it is network data and arrives via textContent. */
+#dl-toast {
+  position: fixed; top: 78px; right: 12px; z-index: 7;
+  max-width: 360px;
+  display: none; align-items: center; gap: 8px;
+  background: var(--surface); border-radius: var(--r-lg);
+  box-shadow: var(--neu-raised);
+  padding: 8px 12px; cursor: pointer;
+  font-size: 12px; line-height: 18px;
+}
+#dl-toast.on { display: flex; }
+#dl-toast svg.ic { color: var(--accent); }
+#dl-toast .dt-lead { flex: none; font-weight: 650; color: var(--text); }
+#dl-toast .dt-name {
+  min-width: 0; color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#dl-toast.warn .dt-lead { color: var(--warn); }
+#dl-toast.warn svg.ic { color: var(--warn); }
+/* The badge pulse (0.32.3): one scale beat when a new
+   task appears — driven by the snapshot's notice sequence
+   changing, never by a timer in this page. */
+@keyframes dl-pulse {
+  0% { transform: scale(1); }
+  35% { transform: scale(1.3); }
+  100% { transform: scale(1); }
+}
+#dl-count.pulse { animation: dl-pulse 600ms ease; }
+
+/* Context menu (0.34.1): the content page's right-click
+   menu, rendered in the chrome face at the snapshot's
+   anchor point. The geometry numbers below are the
+   contract shared with src/core/layout.rs (CTX_MENU_W
+   236, row 30, separator total 9, vertical padding 6
+   there) — keep both places in sync. The menu is a pure
+   renderer: the snapshot carries the item list (this page
+   never hardcodes it), every label/shortcut string is
+   placed with textContent only, and a pick or a dismissal
+   is the only thing that crosses IPC. It sits above every
+   other overlay (z-index 8), so Escape and outside
+   pointerdowns reach it first. */
+#ctxmenu {
+  position: fixed; width: 236px; z-index: 8;
+  display: none; flex-direction: column; padding: 6px 6px;
+  background: var(--surface); border-radius: var(--r-lg);
+  box-shadow: var(--neu-raised);
+}
+#ctxmenu.on { display: flex; }
+.ctx-row {
+  display: flex; align-items: center; gap: 8px; height: 30px;
+  padding: 0 8px; border-radius: var(--r-md);
+  font-size: 12.5px; color: var(--text); cursor: pointer; user-select: none;
+  transition: color 120ms ease, box-shadow 120ms ease;
+}
+.ctx-row:hover:not(.off) { box-shadow: var(--neu-raised-sm); }
+.ctx-row:focus-visible { box-shadow: var(--neu-raised-sm), var(--neu-focus); }
+.ctx-row:active:not(.off) { box-shadow: var(--neu-pressed); }
+.ctx-row.off { color: var(--faint); cursor: default; }
+.ctx-row .ctx-label {
+  flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ctx-row .ctx-key { flex: none; font-size: 11px; color: var(--faint); }
+.ctx-sep {
+  height: 1px; margin: 4px 8px;
+  background: var(--surface); box-shadow: var(--neu-pressed);
+}
+
 /* Teleport panel (v26, defect D3): a CENTERED card. Through
    v25 it was a 264px dropdown pinned to the right edge —
    on an ultrawide window that put a small QR in the far
@@ -364,7 +637,7 @@ html, body { height: 86px; overflow: hidden; user-select: none; background: tran
    one deliberate non-material surface in the app. */
 #tpanel {
   position: fixed; top: 80px; left: 50%; transform: translateX(-50%); z-index: 6;
-  width: 400px; max-height: 486px; overflow-y: auto;
+  width: 400px; max-height: min(486px, calc(100vh - 90px)); overflow-y: auto;
   display: none; flex-direction: column; gap: 8px;
   background: var(--surface); border-radius: var(--r-xl);
   box-shadow: var(--neu-raised);
@@ -465,7 +738,7 @@ html, body { height: 86px; overflow: hidden; user-select: none; background: tran
 <body>
   <div id="shell">
     <div id="topbar">
-      <div class="brand"><span class="dot">P</span> Pico <span class="ver" id="ver">0.31.1</span><button class="byline" id="brand-by" title="Telegram — @iK4w4" aria-label="Open the author's Telegram">by @iK4w4</button></div>
+      <div class="brand"><span class="dot">P</span> Pico <span class="ver" id="ver">0.40.1</span><button class="byline" id="brand-by" title="Telegram — @iK4w4" aria-label="Open the author's Telegram">by @iK4w4</button></div>
       <div id="tabstrip" role="tablist" aria-label="Tabs">
         <button id="newtab" title="New tab (Ctrl+T)" aria-label="New tab">
           <svg viewBox="0 0 24 24" class="ic"><path d="M12 5v14M5 12h14"/></svg>
@@ -526,6 +799,9 @@ html, body { height: 86px; overflow: hidden; user-select: none; background: tran
       </div>
       <span class="vsep" aria-hidden="true"></span>
       <div class="cluster" role="group" aria-label="Send and appearance">
+        <button class="nbtn" id="downloads" title="Downloads" aria-label="Downloads" aria-expanded="false" aria-controls="dpanel">
+          <svg viewBox="0 0 24 24" class="ic"><path d="M12 3v11M7.5 10L12 14.5 16.5 10M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+        </button>
         <button class="nbtn" id="teleport" title="Send to phone" aria-label="Send this page to your phone" aria-expanded="false" aria-controls="tpanel">
           <svg viewBox="0 0 24 24" class="ic"><rect x="7" y="2.5" width="10" height="19" rx="2"/><path d="M10.5 5h3M13.5 17.5l2.5 2.5 2.5-2.5M16 20V10"/></svg>
         </button>
@@ -537,7 +813,8 @@ html, body { height: 86px; overflow: hidden; user-select: none; background: tran
         </button>
         <div class="badges">
           <span class="badge raised-sm" id="svc-badge"></span>
-          <span class="badge raised-sm warnb" id="dl-badge"></span>
+          <span class="badge raised-sm" id="dl-count"></span>
+          <span id="dl-fail-badge" class="dl-fail-badge"></span>
         </div>
       </div>
     </div>
@@ -552,6 +829,41 @@ html, body { height: 86px; overflow: hidden; user-select: none; background: tran
       </div>
       <div id="pp-grid"></div>
     </div>
+
+    <div id="dpanel" role="dialog" aria-label="Downloads">
+      <div class="dp-head">
+        <span class="dp-title">Downloads</span>
+        <span id="dl-agg" hidden></span>
+        <label class="dp-conn-label" for="dl-default-conn">Connections</label>
+        <select id="dl-default-conn" aria-label="Default connections for new downloads">
+          <option value="1">1</option>
+          <option value="2">2</option>
+          <option value="4">4</option>
+          <option value="8" selected>8</option>
+          <option value="16">16</option>
+          <option value="32">32</option>
+        </select>
+        <button class="dp-x" id="dp-close" title="Close" aria-label="Close the downloads panel">
+          <svg viewBox="0 0 24 24" class="ic"><path d="M5 5l14 14M19 5L5 19"/></svg>
+        </button>
+      </div>
+      <div class="dp-add">
+        <input class="well" id="dl-add-url" type="text" spellcheck="false" autocomplete="off"
+               placeholder="Paste a download link" aria-label="Download link">
+        <button id="dl-add-btn">Add</button>
+      </div>
+      <div id="dl-list"></div>
+      <div id="dl-empty">Downloads you start will show here</div>
+      <div class="dp-foot"><button id="dl-all" type="button">All downloads</button><button id="dl-clear-finished" type="button" hidden>Clear finished</button><button id="dl-open-folder" type="button" aria-label="Open downloads folder" title="Open downloads folder"><svg viewBox="0 0 24 24" class="ic"><path d="M3 8a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></button></div>
+    </div>
+
+    <div id="dl-toast" role="status" aria-label="Download notification" title="Open Downloads">
+      <svg viewBox="0 0 24 24" class="ic"><path d="M12 3v11M7.5 10L12 14.5 16.5 10M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+      <span class="dt-lead" id="dl-toast-lead">Download started</span>
+      <span class="dt-name" id="dl-toast-name"></span>
+    </div>
+
+    <div id="ctxmenu" role="menu" aria-label="Context menu"></div>
 
     <div id="tp-backdrop"></div>
     <div id="tpanel" role="dialog" aria-label="Send to phone">
@@ -574,6 +886,7 @@ html, body { height: 86px; overflow: hidden; user-select: none; background: tran
 
 <script>
 "use strict";
+/*__DLROWS__*/
 /* Pico v26 chrome. This page is a pure renderer: it sends typed
    commands and draws the snapshots Rust pushes via window.__pico.
    All page/tab strings reach the DOM through textContent only. */
@@ -644,23 +957,80 @@ function makeTab(tab) {
   return el;
 }
 
+/* AUDIT 0.34.2 — per-section render guards (blast radius).
+   A snapshot application is a sequence of independent
+   section renders (tabs, picker, teleport, downloads,
+   context menu, …). Through 0.34.1 an exception in ANY of
+   them aborted the whole application at that point: every
+   section after it silently kept its previous paint, and
+   nothing anywhere said so. Now the separable sections run
+   under guardSection: a throw is recorded in
+   window.__picoErrors, logged to the console, and painted
+   on the self-diagnosis strip — visible, never silent —
+   while the remaining sections still apply. The whole
+   application additionally runs under one outer guard in
+   window.__pico itself, so even a throw in the inline
+   sections (tabs/address) surfaces instead of vanishing.
+   A section that later succeeds clears its own error. */
+window.__picoErrors = {};
+function picoSectionError(name, err) {
+  if (typeof console !== "undefined" && console.error) {
+    console.error("pico shell section " + name + ":", err);
+  }
+  if (!window.__picoErrors[name]) {
+    window.__picoErrors[name] = String((err && err.message) || err);
+  }
+  var warn = document.getElementById("shellwarn");
+  if (warn) {
+    warn.dataset.kind = "error";
+    warn.textContent = "Pico hit a display problem (" + name +
+      ") — the rest of the shell is unaffected; details in pico.log";
+    warn.classList.add("on");
+  }
+}
+function guardSection(name, fn) {
+  try {
+    fn();
+    if (window.__picoErrors[name]) {
+      delete window.__picoErrors[name];
+      var warn = document.getElementById("shellwarn");
+      if (warn && warn.dataset.kind === "error" &&
+          Object.keys(window.__picoErrors).length === 0) {
+        warn.classList.remove("on");
+      }
+    }
+  } catch (e) {
+    picoSectionError(name, e);
+  }
+}
+
 window.__pico = function (s) {
+  try {
+    picoApply(s);
+  } catch (e) {
+    picoSectionError("shell", e);
+  }
+};
+
+function picoApply(s) {
   state = s;
   /* Shell health: a snapshot arrived, so the shell IS connected
-     — clear the self-diagnosis strip if it ever showed. */
+     — clear the self-diagnosis strip if it ever showed (but
+     never wipe a section-error strip: that one clears when
+     its section renders cleanly again). */
   window.__picoGotSnapshot = true;
   var warn = document.getElementById("shellwarn");
-  if (warn) warn.classList.remove("on");
+  if (warn && warn.dataset.kind !== "error") warn.classList.remove("on");
   document.documentElement.setAttribute("data-theme", s.theme || "light");
   /* v27 themes: the palette rides the same snapshot. Setting
      two attributes IS the whole theme switch — every surface
      is token-driven, so the new [data-palette] block applies
      instantly with no reload and no flash of unstyled shell. */
   document.documentElement.setAttribute("data-palette", s.palette || "forest");
-  /* Badge shows the display version (0.31.1: the name the
+  /* Badge shows the display version (0.32: the name the
      user gives the release) — the static badge and the
      snapshot-driven badge must agree. */
-  document.getElementById("ver").textContent = String(s.version || "0.31.1");
+  document.getElementById("ver").textContent = String(s.version || "0.40.1");
   /* Tabs: KEYED reconciliation (AUDIT V28 A1-L6) — an existing
      tab's element is updated in place and only moved (via
      insertBefore) when its position actually changes (A1-S1);
@@ -813,7 +1183,7 @@ window.__pico = function (s) {
   /* Theme picker (v27): the catalogue + open state ride the
      snapshot; the grid re-renders only when the catalogue or
      the current palette changes. */
-  renderPicker(s);
+  guardSection("picker", function () { renderPicker(s); });
   var wantPpOpen = !!s.paletteOpen;
   if (wantPpOpen !== ppOpen) {
     ppOpen = wantPpOpen;
@@ -855,14 +1225,12 @@ window.__pico = function (s) {
     tpAwaiting = false;
     renderTeleport(s.teleport);
   }
-  var dl = document.getElementById("dl-badge");
-  if (s.blockedDownloads > 0) {
-    dl.classList.add("on");
-    dl.textContent = s.blockedDownloads + " download" + (s.blockedDownloads === 1 ? "" : "s") + " blocked";
-    dl.title = s.downloadNotice || "";
-  } else {
-    dl.classList.remove("on");
-  }
+  /* Downloads (0.32): the count badge, the panel's open state
+     and the task list all ride the snapshot, exactly like
+     Teleport/palette — Rust owns the open state; this page
+     mirrors it (a Rust-side close is never echoed back). */
+  guardSection("dl-render", function () { syncDownloads(s); });
+  guardSection("context-menu", function () { syncContextMenu(s); });
   var err = document.getElementById("errbar");
   if (s.activeError) {
     err.classList.add("on");
@@ -871,7 +1239,7 @@ window.__pico = function (s) {
     err.classList.remove("on");
     err.textContent = "";
   }
-};
+}
 
 /* --- Teleport panel (v26) ---------------------------------------------
    The panel is a pure renderer over the snapshot's teleport
@@ -1066,6 +1434,350 @@ document.getElementById("palette").addEventListener("click", function () {
 document.getElementById("pp-close").addEventListener("click", function () { closePalette(); });
 document.getElementById("pp-backdrop").addEventListener("click", function () { closePalette(); });
 
+/* --- Downloads panel (0.34) -----------------------------------------
+   Rebuilt on the shared DlRows renderer (spliced in above —
+   the same bytes the downloads page runs): the popover list
+   is DlRows.renderTaskList(snapshot, "popover") and every
+   task gesture is posted by DlRows.bindCommands through
+   sendDl, which wraps payloads into the canonical downloads
+   body {"kind":"dl","action":"<verb>", ...args} on the same
+   postMessage transport the other ChromeCmds use (send adds
+   the v/boot/req framing). The snapshot is THE downloads
+   snapshot {tasks, active_count, failed_unseen, settings,
+   notice}: it rides the chrome snapshot in `s.downloads`
+   when that field is an object with a tasks array; the
+   0.33 fragment shape (bare task array + downloadsActive /
+   downloadsFailedBadge / downloadsDefaultConn /
+   downloadsNotice siblings) is still accepted and folded
+   into the canonical shape here, and DlRows normalizes
+   either. The panel's open state stays app-owned
+   (`downloadsOpen`), mirrored exactly like teleportOpen /
+   paletteOpen — a Rust-side close is never echoed back.
+   Focus discipline: while a row's conn select is focused a
+   re-render restores that select's value + focus (its
+   change event carries the user's pick); the add-url input
+   is local state — snapshots never write it, and a
+   successful Add send clears it. */
+var dpOpen = false;
+/* Toast state: the sequence of the notice this page last
+   rendered (a new sequence re-renders + pulses; the same
+   one never re-triggers) and whether the pill is currently
+   painted. Open/close itself is app-owned and mirrored
+   from the snapshot's notice, like dpOpen. */
+var dlToastSeq = 0;
+var dlToastShown = false;
+
+function sendDl(payload) {
+  var obj = { kind: "dl" };
+  for (var k in payload) obj[k] = payload[k];
+  send(obj);
+}
+
+function dlSnapshotOf(s) {
+  if (s.downloads && !Array.isArray(s.downloads) && Array.isArray(s.downloads.tasks)) {
+    var snap = s.downloads;
+    if (!snap.notice && s.downloadsNotice) {
+      snap = Object.assign({}, snap, { notice: s.downloadsNotice });
+    }
+    return snap;
+  }
+  return {
+    tasks: Array.isArray(s.downloads) ? s.downloads : [],
+    active_count: s.downloadsActive,
+    failed_unseen: s.downloadsFailedBadge,
+    settings: { default_connections: s.downloadsDefaultConn },
+    notice: s.downloadsNotice || null
+  };
+}
+
+function syncDownloads(s) {
+  var snap = DlRows.normalizeSnapshot(dlSnapshotOf(s));
+  /* Badges: the active-download count + the failed-unseen
+     warn pill, both from the snapshot. */
+  var badge = document.getElementById("dl-count");
+  var failBadge = document.getElementById("dl-fail-badge");
+  if (snap.failed_unseen > 0) {
+    failBadge.classList.add("on");
+    failBadge.textContent = String(snap.failed_unseen);
+  } else {
+    failBadge.classList.remove("on");
+    failBadge.textContent = "";
+  }
+  var active = snap.active_count || 0;
+  if (active > 0) {
+    badge.classList.add("on");
+    badge.textContent = String(active);
+    badge.title = active + (active === 1 ? " download in progress" : " downloads in progress");
+  } else {
+    badge.classList.remove("on");
+    badge.textContent = "";
+    badge.title = "";
+  }
+  /* Panel open state: app-owned, mirrored like the other
+     panels — a Rust-side close is never echoed back. */
+  var wantOpen = !!s.downloadsOpen;
+  if (wantOpen !== dpOpen) {
+    if (wantOpen) {
+      if (ppOpen) closePalette();
+      if (tpOpen || tpAwaiting) closeTeleport();
+      dpOpen = true;
+      document.getElementById("dpanel").classList.add("on");
+      document.getElementById("downloads").setAttribute("aria-expanded", "true");
+    } else {
+      dpOpen = false;
+      document.getElementById("dpanel").classList.remove("on");
+      document.getElementById("downloads").setAttribute("aria-expanded", "false");
+    }
+  }
+  /* Toast: the notice mirrors like the panel — app-owned
+     open state plus a sequence number. A NEW sequence
+     (re)renders the pill and pulses the badge once; the
+     same sequence never re-triggers. The pill never paints
+     over the open panel. Expiry arrives as open:false.
+     Kinds (0.33): started / finished / failed / blocked —
+     failed and blocked carry the warn styling. */
+  var notice = snap.notice;
+  var toast = document.getElementById("dl-toast");
+  if (notice && notice.open && !wantOpen) {
+    if (notice.seq !== dlToastSeq) {
+      dlToastSeq = notice.seq;
+      var blocked = notice.kind === "blocked";
+      var failedNotice = notice.kind === "failed";
+      document.getElementById("dl-toast-lead").textContent =
+        blocked ? "Download blocked"
+        : notice.kind === "finished" ? "Download finished"
+        : failedNotice ? "Download failed"
+        : "Download started";
+      document.getElementById("dl-toast-name").textContent =
+        (blocked || failedNotice) ? (notice.reason || notice.name || "") : (notice.name || "");
+      toast.classList.toggle("warn", blocked || failedNotice);
+      toast.classList.add("on");
+      dlToastShown = true;
+      badge.classList.remove("pulse");
+      void badge.offsetWidth;
+      badge.classList.add("pulse");
+    }
+  } else if (dlToastShown) {
+    toast.classList.remove("on");
+    dlToastShown = false;
+  }
+  /* Global default connections: never revalue while focused. */
+  var defSel = document.getElementById("dl-default-conn");
+  var defConn = snap.settings.default_connections;
+  if (defConn !== null && defConn !== undefined &&
+      document.activeElement !== defSel) {
+    defSel.value = String(defConn);
+    /* P4-11: a non-standard count (hand-edited state) must
+       render as a real option, never a blank select. */
+    if (defSel.value !== String(defConn)) {
+      var opt = document.createElement("option");
+      opt.value = String(defConn);
+      opt.textContent = String(defConn);
+      defSel.appendChild(opt);
+      defSel.value = String(defConn);
+    }
+  }
+  /* Task rows via the shared renderer. While a row's conn
+     select holds focus, its value + focus are restored
+     after the re-render so a snapshot can never revalue
+     the select the user is interacting with. */
+  var list = document.getElementById("dl-list");
+  var focusConnId = null;
+  var focusConnVal = null;
+  var ae = document.activeElement;
+  if (ae && list.contains(ae) && ae.classList && ae.classList.contains("dl-conn")) {
+    focusConnId = ae.getAttribute("data-dl-id");
+    focusConnVal = ae.value;
+  }
+  list.innerHTML = DlRows.renderTaskList(snap, "popover");
+  if (focusConnId !== null) {
+    var sel = list.querySelector('select.dl-conn[data-dl-id="' + focusConnId + '"]');
+    if (sel) {
+      sel.value = focusConnVal;
+      try { sel.focus(); } catch (e) {}
+    }
+  }
+  document.getElementById("dl-empty").classList.toggle("on", snap.tasks.length === 0);
+  /* Aggregate speed (0.35): with 2+ tasks downloading,
+     the header shows the SUM of the same speed_bps meter
+     values the rows print; otherwise it stays empty. */
+  var aggEl = document.getElementById("dl-agg");
+  var dlCount = 0;
+  var dlSum = 0;
+  snap.tasks.forEach(function (t) {
+    if (t.status === "downloading") {
+      dlCount++;
+      var spd = Number(t.speed_bps);
+      if (isFinite(spd) && spd > 0) dlSum += spd;
+    }
+  });
+  if (dlCount >= 2 && dlSum > 0) {
+    aggEl.textContent = DlRows.fmtSpeed(dlSum);
+    aggEl.hidden = false;
+  } else {
+    aggEl.textContent = "";
+    aggEl.hidden = true;
+  }
+  /* Clear finished shows only while a done task exists. */
+  document.getElementById("dl-clear-finished").hidden =
+    !snap.tasks.some(function (t) { return t.status === "done"; });
+}
+
+/* Task verbs inside the popover list: ONE delegated DlRows
+   handler; sendDl supplies the canonical body. */
+DlRows.bindCommands(document.getElementById("dl-list"), function (payload) {
+  sendDl(payload);
+});
+
+function closeDownloads() {
+  if (!dpOpen) return;
+  dpOpen = false;
+  document.getElementById("dpanel").classList.remove("on");
+  document.getElementById("downloads").setAttribute("aria-expanded", "false");
+  sendDl({ action: "close-panel" });
+}
+
+document.getElementById("downloads").addEventListener("click", function () {
+  if (dpOpen) { closeDownloads(); return; }
+  if (tpOpen || tpAwaiting) closeTeleport();
+  if (ppOpen) closePalette();
+  sendDl({ action: "open-panel" });
+});
+document.getElementById("dp-close").addEventListener("click", function () { closeDownloads(); });
+/* Toast click: dismiss the notice — the app opens the
+   downloads page in response (0.34: the single
+   dismiss-notice verb replaces the per-kind routing). */
+document.getElementById("dl-toast").addEventListener("click", function () {
+  document.getElementById("dl-toast").classList.remove("on");
+  dlToastShown = false;
+  sendDl({ action: "dismiss-notice" });
+});
+/* Popover footer: the full Downloads page. */
+document.getElementById("dl-all").addEventListener("click", function () {
+  sendDl({ action: "open-page" });
+});
+/* Footer companions (0.35): clear-completed and the
+   id-less open-folder verb (the payload object must not
+   carry an id property at all). */
+document.getElementById("dl-clear-finished").addEventListener("click", function () {
+  sendDl({ action: "clear-completed" });
+});
+document.getElementById("dl-open-folder").addEventListener("click", function () {
+  sendDl({ action: "open-folder" });
+});
+/* The pulse is one beat: the class comes off when the
+   animation ends, so the next notice's re-add restarts it
+   from a clean state. */
+document.getElementById("dl-count").addEventListener("animationend", function () {
+  this.classList.remove("pulse");
+});
+/* Outside-click dismissal: the popover has no backdrop, so
+   a document pointerdown that lands inside neither the
+   panel nor its toolbar button closes it. The handler is
+   inert while the panel is closed, and the target may lack
+   closest() (a text node in some engines) — guard for it.
+   The context menu rides the same handler, ahead of the
+   downloads branch: it is the topmost layer, and a
+   pointerdown anywhere outside #ctxmenu closes it. */
+document.addEventListener("pointerdown", function (ev) {
+  if (ctxOpen) {
+    var ctxT = ev.target;
+    if (!(ctxT && ctxT.closest && ctxT.closest("#ctxmenu"))) closeCtxMenu();
+  }
+  if (!dpOpen) return;
+  var t = ev.target;
+  if (t && t.closest && (t.closest("#dpanel") || t.closest("#downloads"))) return;
+  closeDownloads();
+});
+document.getElementById("dl-default-conn").addEventListener("change", function () {
+  sendDl({ action: "set-default-connections", conn: parseInt(this.value, 10) });
+});
+
+var dlAddUrl = document.getElementById("dl-add-url");
+function submitDownloadAdd() {
+  var url = dlAddUrl.value.trim();
+  if (!url) return;
+  sendDl({ action: "add-url", url: url });
+  dlAddUrl.value = "";
+}
+document.getElementById("dl-add-btn").addEventListener("click", function () { submitDownloadAdd(); });
+dlAddUrl.addEventListener("keydown", function (ev) {
+  if (ev.key === "Enter") { ev.preventDefault(); submitDownloadAdd(); }
+});
+
+/* --- Context menu (0.34.1) ------------------------------------------
+   A pure renderer over the snapshot's `contextMenu` field:
+   null hides the menu; otherwise {x, y, items} anchors it
+   and lists its rows. The item list is Rust's — this page
+   renders whatever the snapshot carries and never hardcodes
+   an item. Rows are rebuilt only when the signature (x / y /
+   items as JSON) changes, so an unrelated snapshot does not
+   churn the open menu's DOM. Every label and shortcut is
+   placed with textContent only. An enabled row's click sends
+   {t:"ctx_pick", id}; a disabled row sends nothing.
+   Dismissal mirrors closeDownloads' habit: the local open
+   state is cleared, the face hides, and Rust is told with
+   {t:"ctx_close"} — a Rust-side close arriving as
+   contextMenu:null is mirrored silently, never echoed. */
+var ctxOpen = false;
+var ctxSig = "";
+
+function closeCtxMenu() {
+  if (!ctxOpen) return;
+  ctxOpen = false;
+  document.getElementById("ctxmenu").classList.remove("on");
+  send({ t: "ctx_close" });
+}
+
+function syncContextMenu(s) {
+  var el = document.getElementById("ctxmenu");
+  var cm = s.contextMenu;
+  if (!cm) {
+    el.classList.remove("on");
+    ctxOpen = false;
+    ctxSig = "";
+    return;
+  }
+  var sig = JSON.stringify([cm.x, cm.y, cm.items]);
+  el.style.left = cm.x + "px";
+  el.style.top = cm.y + "px";
+  if (sig !== ctxSig) {
+    ctxSig = sig;
+    while (el.firstChild) el.removeChild(el.firstChild);
+    (cm.items || []).forEach(function (item) {
+      if (item.sep) {
+        var sep = document.createElement("div");
+        sep.className = "ctx-sep";
+        sep.setAttribute("role", "separator");
+        el.appendChild(sep);
+        return;
+      }
+      var row = document.createElement("div");
+      row.className = "ctx-row" + (item.enabled ? "" : " off");
+      row.setAttribute("role", "menuitem");
+      if (!item.enabled) row.setAttribute("aria-disabled", "true");
+      var label = document.createElement("span");
+      label.className = "ctx-label";
+      label.textContent = item.label || "";
+      row.appendChild(label);
+      if (item.shortcut) {
+        var key = document.createElement("span");
+        key.className = "ctx-key";
+        key.textContent = item.shortcut;
+        row.appendChild(key);
+      }
+      if (item.enabled) {
+        row.addEventListener("click", function () {
+          send({ t: "ctx_pick", id: item.id });
+        });
+      }
+      el.appendChild(row);
+    });
+  }
+  el.classList.add("on");
+  ctxOpen = true;
+}
+
 /* --- commands ------------------------------------------------------- */
 newtabBtn.addEventListener("click", function () { send({ t: "new_tab" }); });
 document.getElementById("back").addEventListener("click", function () { send({ t: "back" }); });
@@ -1133,6 +1845,8 @@ addr.addEventListener("keydown", function (ev) {
 addr.addEventListener("focus", function () { addr.select(); });
 
 document.addEventListener("keydown", function (ev) {
+  if (ev.key === "Escape" && ctxOpen) { closeCtxMenu(); return; }
+  if (ev.key === "Escape" && dpOpen) { closeDownloads(); return; }
   if (ev.key === "Escape" && ppOpen) { closePalette(); return; }
   if (ev.key === "Escape" && (tpOpen || tpAwaiting)) { closeTeleport(); return; }
   var mod = ev.ctrlKey || ev.metaKey;
@@ -1144,6 +1858,7 @@ document.addEventListener("keydown", function (ev) {
   else if (mod && ev.key === "Tab") { ev.preventDefault(); send({ t: "cycle_tab", dir: ev.shiftKey ? -1 : 1 }); }
   else if (mod && (ev.key === "l" || ev.key === "L")) { ev.preventDefault(); addr.focus(); addr.select(); }
   else if (mod && (ev.key === "r" || ev.key === "R")) { ev.preventDefault(); send({ t: "reload" }); }
+  else if (mod && (ev.key === "j" || ev.key === "J")) { ev.preventDefault(); sendDl({ action: "open-page" }); }
   else if (ev.key === "F5") { ev.preventDefault(); send({ t: "reload" }); }
   else if (ev.altKey && ev.key === "ArrowLeft") { ev.preventDefault(); send({ t: "back" }); }
   else if (ev.altKey && ev.key === "ArrowRight") { ev.preventDefault(); send({ t: "forward" }); }
@@ -1159,7 +1874,10 @@ addr.focus();
 setTimeout(function () {
   if (!window.__picoGotSnapshot) {
     var warn = document.getElementById("shellwarn");
-    if (warn) warn.classList.add("on");
+    if (warn) {
+      warn.dataset.kind = "nosnap";
+      warn.classList.add("on");
+    }
   }
 }, 2000);
 </script>

@@ -983,6 +983,16 @@ fn v31_userinfo_nav_allowed_decision_table() {
     assert!(userinfo_nav_allowed("https://example.com/@user", None));
 }
 
+// ---------------------------------------------------------------------------
+// Downloads commands (0.34): the downloads variants of the chrome
+// `Command` enum were deleted by design in the 0.34 rebuild — every
+// downloads verb on every surface now travels as a canonical
+// `{"kind":"dl", ...}` body, and its parse contract lives in
+// `core::dlcmd`'s unit tests plus `tests/dl_replay.rs` (dispatch)
+// and `tests/dl_pair.rs` (the JS/Rust pair law). Nothing downloads-
+// shaped remains for `parse_command` to assert here.
+// ---------------------------------------------------------------------------
+
 #[test]
 fn v28_parse_input_direct_over_cap_prose_searches_without_panic() {
     // A6-14 gap: parse_input called directly (no IPC cap in the
@@ -996,4 +1006,70 @@ fn v28_parse_input_direct_over_cap_prose_searches_without_panic() {
         }
         other => panic!("expected a search URL, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------
+// 0.32.1: userinfo helpers + shield_prune strictness
+// ---------------------------------------------------------------------
+
+use pico_core::core::ipc::{url_has_userinfo, userinfo_adoption_allowed};
+
+#[test]
+fn url_has_userinfo_reads_the_authority_only() {
+    assert!(url_has_userinfo("https://user:pass@h.example/x"));
+    assert!(url_has_userinfo("https://user@h.example/"));
+    assert!(!url_has_userinfo("https://h.example/x@y"));
+    assert!(!url_has_userinfo("https://h.example/x"));
+    assert!(!url_has_userinfo("about:blank"));
+}
+
+#[test]
+fn userinfo_adoption_requires_an_exact_marker() {
+    // AUDIT 0.32.1 (P3-1): on_page_load is the second layer
+    // behind the navigation handler. A credentialed URL may
+    // be ADOPTED into tab state only when the navigation
+    // handler recorded an exact expectation match for it —
+    // a redirect chain that lands on a credentialed URL
+    // without the handler's blessing is refused adoption.
+    let url = "https://google.com:443@evil.example/x";
+    assert!(!userinfo_adoption_allowed(url, None));
+    assert!(!userinfo_adoption_allowed(
+        url,
+        Some("https://other.example/")
+    ));
+    assert!(userinfo_adoption_allowed(url, Some(url)));
+    // Non-credentialed URLs adopt freely, marker or not.
+    assert!(userinfo_adoption_allowed("https://h.example/", None));
+}
+
+#[test]
+fn shield_prune_rejects_unknown_fields() {
+    // AUDIT 0.32.1 (P3-4): parse_shield_prune was the one
+    // report parser without deny_unknown_fields — its two
+    // siblings (lite_chosen, shield_pruned) both reject.
+    assert!(
+        parse_shield_prune(r#"{"kind":"shield_prune","items":[{"p":"a.b","n":1}],"extra":1}"#)
+            .is_none()
+    );
+    assert!(
+        parse_shield_prune(r#"{"kind":"shield_prune","items":[{"p":"a.b","n":1,"x":2}]}"#)
+            .is_none()
+    );
+    // The exact shape still parses.
+    assert!(parse_shield_prune(r#"{"kind":"shield_prune","items":[{"p":"a.b","n":1}]}"#).is_some());
+}
+
+#[test]
+fn shield_prune_paths_are_cut_at_query_and_fragment() {
+    // AUDIT 0.32.1 (P3-4): item paths are page-controlled
+    // text logged verbatim under a trusted-looking prefix.
+    // A JS property path never contains '?' or '#', so the
+    // path is cut there — a forged URL-with-query can no
+    // longer land in pico.log dressed as Shield telemetry.
+    let body = r#"{"kind":"shield_prune","items":[{"p":"https://x.example/a?code=SECRET#tok","n":1},{"p":"real.prop.path","n":2}]}"#;
+    let items = parse_shield_prune(body).expect("well-formed");
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].path, "https://x.example/a");
+    assert!(!items[0].path.contains("SECRET"));
+    assert_eq!(items[1].path, "real.prop.path");
 }

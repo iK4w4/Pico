@@ -969,7 +969,12 @@ fn ipv6_forms_classify_loopback() {
     // address inherits its embedded v4 verdict — the rule
     // Teleport always applied, now part of the one definition.
     use pico_core::core::shield::is_local_host;
-    for host in ["::1", "0:0:0:0:0:0:0:1", "::ffff:127.0.0.1", "::ffff:7f00:1"] {
+    for host in [
+        "::1",
+        "0:0:0:0:0:0:0:1",
+        "::ffff:127.0.0.1",
+        "::ffff:7f00:1",
+    ] {
         assert!(is_local_host(host), "{host} must be local");
     }
     for host in ["::ffff:8.8.8.8", "2001:db8::1", "fe80::1"] {

@@ -319,7 +319,13 @@ pub fn web_origin(url: &str) -> Option<(String, String, u16)> {
 /// or Pico's exact internal start URL. Nothing else may ever be
 /// loaded as a document.
 pub fn is_allowed_navigation_url(url: &str) -> bool {
-    url == START_URL || url == "pico://start/" || web_origin(url).is_some()
+    url == START_URL
+        || url == "pico://start/"
+        // AUDIT 0.33: the downloads page is the second internal
+        // document; same exact-spelling rule as the start page.
+        || url == "pico://downloads"
+        || url == "pico://downloads/"
+        || web_origin(url).is_some()
 }
 
 /// Fold wry's internal rewrite of Pico's custom scheme back to
@@ -352,6 +358,7 @@ pub fn normalize_pico_url(u: &str) -> String {
             let internal = !host.contains('.')
                 && (host == "chrome"
                     || host == "start"
+                    || host == "downloads"
                     || host == "recent"
                     || host == "social"
                     || host == "recent-remove"
@@ -420,6 +427,20 @@ pub fn route_new_window(raw_url: &str) -> NewWindowRoute {
     // only on the page-initiated path.
     if has_userinfo(&url) {
         return NewWindowRoute::Deny("credentialed-url");
+    }
+    // AUDIT 0.40.1: a page must not mint a tab showing the
+    // downloads page — it renders the user's download
+    // history. The start page is the one deliberate exception
+    // (pinned in newwindow_tests); every other `pico://`
+    // document is refused by the allowlist fallthrough below
+    // with "scheme-not-allowed", but the downloads spellings
+    // ARE in the shared navigation allowlist (typed input and
+    // Pico's own UI admit them), so they need this explicit
+    // refusal here. (Pre-0.40.1 they rode the allowlist into
+    // OpenTab.) Any future internal page added to the
+    // allowlist needs the same treatment in this function.
+    if url == "pico://downloads" || url == "pico://downloads/" {
+        return NewWindowRoute::Deny("internal-page");
     }
     if is_allowed_navigation_url(&url) {
         // Canonicalize the start page's trailing-slash spelling

@@ -262,6 +262,109 @@ fn v29_migration_with_a_failed_profile_file_withholds_the_state_marker() {
 }
 
 #[test]
+fn migration_details_name_the_failed_profile_file() {
+    // AUDIT 0.34.1 (field addition): the 0.34 field log
+    // could only say "1 failed, 1 skipped" — the report now
+    // itemizes the failure with its source-root-relative
+    // path and the captured error, and the counters stay
+    // consistent with the details. The failure shape is
+    // the v29 one: a directory squats the Cookies
+    // destination.
+    let root = tmp("mig-details");
+    let appdata = seed_appdata(&root);
+    let portable = root.join("exe").join("data");
+    let squat = portable
+        .join("WebView2")
+        .join("EBWebView")
+        .join("Default")
+        .join("Cookies");
+    fs::create_dir_all(&squat).expect("squat the Cookies destination");
+    let plan = MigrationPlan::Copy {
+        from: appdata,
+        to: portable.clone(),
+    };
+    let report = pico_core::core::state::perform_migration(&plan);
+    assert_eq!(report.failed, 1, "{report:?}");
+    assert_eq!(report.skipped, 1, "{report:?}");
+    assert_eq!(report.profile_files, 1, "History still copies: {report:?}");
+    assert!(!report.state_copied, "state marker withheld on failure");
+    assert_eq!(report.details.len(), 1, "{report:?}");
+    let detail = &report.details[0];
+    assert_eq!(detail.kind, "profile file");
+    assert_eq!(detail.path, "WebView2/EBWebView/Default/Cookies");
+    assert!(
+        detail.error.as_deref().is_some_and(|e| !e.is_empty()),
+        "the detail carries the captured io error: {detail:?}"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn migration_details_record_a_symlink_as_a_pure_skip() {
+    // A symlink inside the profile tree is a deliberate
+    // skip: itemized with error None, counted in `skipped`
+    // only, and it must NOT withhold the state marker.
+    let root = tmp("mig-symlink-detail");
+    let appdata = seed_appdata(&root);
+    let profile_default = appdata.join("WebView2").join("EBWebView").join("Default");
+    std::os::unix::fs::symlink("/nonexistent-pico-target", profile_default.join("link"))
+        .expect("seed symlink");
+    let portable = root.join("exe").join("data");
+    let plan = MigrationPlan::Copy {
+        from: appdata,
+        to: portable.clone(),
+    };
+    let report = pico_core::core::state::perform_migration(&plan);
+    assert_eq!(report.failed, 0, "{report:?}");
+    assert!(report.state_copied, "a pure skip never withholds state");
+    assert_eq!(report.details.len(), 1, "{report:?}");
+    let detail = &report.details[0];
+    assert!(detail.kind.contains("symlink"), "{detail:?}");
+    assert_eq!(detail.path, "WebView2/EBWebView/Default/link");
+    assert_eq!(detail.error, None);
+    assert_eq!(report.skipped, 1, "{report:?}");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn migration_replaces_a_readonly_state_destination() {
+    // AUDIT 0.34.1 (retry poisoning, state half): a
+    // state.json a partial earlier run left read-only at
+    // the destination must not make copy_atomic's rename
+    // fail forever — the fresh state lands. (On the Linux
+    // host a rename ignores the file mode, so this pins
+    // the outcome; the Windows read-only semantics are
+    // reasoned, per BUILD_NOTES.)
+    let root = tmp("mig-readonly-state");
+    let appdata = seed_appdata(&root);
+    let portable = root.join("exe").join("data");
+    fs::create_dir_all(&portable).expect("portable dir");
+    let stale = portable.join("state.json");
+    fs::write(&stale, br#"{"theme":"stale"}"#).expect("seed stale state");
+    let mut perms = fs::metadata(&stale).expect("stale meta").permissions();
+    perms.set_readonly(true);
+    fs::set_permissions(&stale, perms).expect("make stale read-only");
+    // Profile already present + no portable state would
+    // plan CopyStateOnly; a full Copy exercises the same
+    // copy_atomic either way — use the planner's own shape:
+    // portable state EXISTS here (the stale file), so call
+    // perform directly on a state-only plan.
+    let plan = MigrationPlan::CopyStateOnly {
+        from: appdata,
+        to: portable.clone(),
+    };
+    let report = pico_core::core::state::perform_migration(&plan);
+    assert!(report.state_copied, "{report:?}");
+    assert_eq!(report.failed, 0, "{report:?}");
+    assert_eq!(
+        fs::read(portable.join("state.json")).expect("state landed"),
+        br#"{"theme":"dark"}"#
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
 fn v29_load_never_deletes_a_fresh_foreign_temp_but_reaps_an_old_one() {
     // A5-2: temp names are per-process and there is no
     // single-instance guard — a second instance's in-flight

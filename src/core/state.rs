@@ -57,6 +57,14 @@
 //! in 0.30 (AUDIT 0.30, A2): the BOOK is now the source of
 //! truth — a hand-edit to `blocked_total` alone is
 //! overwritten from the book on the next save.
+//!
+//! 0.32 adds `download_connections` (the download manager's
+//! global default connection count) the same structural way:
+//! serde-defaulted to 8, and sanitized by clamping — 0 becomes
+//! 8 and anything above 32 becomes 32 (the bounds are
+//! `core::download`'s `DEFAULT_CONNECTIONS`/`MAX_CONNECTIONS`,
+//! named here as literals so this module stays independent of
+//! the download module).
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -175,10 +183,41 @@ pub struct PersistState {
     /// Serde-defaulted: pre-0.30 files load with a zero book.
     #[serde(default)]
     pub stats: crate::core::stats::Savings,
+    /// The download manager's global default connection count
+    /// (0.32): the count every newly added task starts with.
+    /// Serde-defaulted to 8, so every pre-0.32 file loads with
+    /// the standard default; `sanitized()` clamps it into the
+    /// core range (0 → 8, > 32 → 32).
+    #[serde(default = "default_download_connections")]
+    pub download_connections: u32,
+    /// How many downloads may run at once (0.33): the
+    /// manager's concurrency cap, user-settable from the
+    /// downloads page. Serde-defaulted to 3, so every
+    /// pre-0.33 file loads with the standard default;
+    /// `sanitized()` maps 0 → 3 and clamps into 1..=5.
+    #[serde(default = "default_downloads_max_concurrent")]
+    pub downloads_max_concurrent: u32,
+    /// The global download speed limit in KiB/s (0.33);
+    /// 0 = off. Serde-defaulted, so pre-0.33 files load
+    /// unlimited; `sanitized()` caps it at 1_000_000.
+    #[serde(default)]
+    pub downloads_speed_limit_kbps: u64,
 }
 
 fn default_theme() -> String {
     "light".to_string()
+}
+
+/// The download manager's default connection count (0.32) —
+/// `core::download::DEFAULT_CONNECTIONS`, as a literal so this
+/// module does not depend on the download module.
+fn default_download_connections() -> u32 {
+    8
+}
+
+/// The downloads concurrency default (0.33).
+fn default_downloads_max_concurrent() -> u32 {
+    3
 }
 
 fn default_true() -> bool {
@@ -199,6 +238,9 @@ impl Default for PersistState {
             theme_id: crate::core::themes::DEFAULT_PALETTE_ID.to_string(),
             theme_id_replaced: false,
             stats: crate::core::stats::Savings::default(),
+            download_connections: default_download_connections(),
+            downloads_max_concurrent: default_downloads_max_concurrent(),
+            downloads_speed_limit_kbps: 0,
         }
     }
 }
@@ -242,6 +284,24 @@ impl PersistState {
         // their own sample counts can support, engine figures
         // at the plausibility ceiling — see core::stats.
         self.stats = self.stats.sanitized();
+        // Download connections (0.32): clamp into the core
+        // range — 0 is the "unset" shape and becomes the
+        // default 8; anything above the 32 ceiling clamps
+        // down to it (core::download::MIN/MAX_CONNECTIONS).
+        self.download_connections = match self.download_connections {
+            0 => default_download_connections(),
+            n if n > 32 => 32,
+            n => n,
+        };
+        // Downloads settings (0.33): 0 is the "unset" shape
+        // for the concurrency cap and becomes the default 3;
+        // anything else clamps into 1..=5. The speed limit
+        // is 0 = off, capped at 1_000_000 KiB/s.
+        self.downloads_max_concurrent = match self.downloads_max_concurrent {
+            0 => default_downloads_max_concurrent(),
+            n => n.clamp(1, 5),
+        };
+        self.downloads_speed_limit_kbps = self.downloads_speed_limit_kbps.min(1_000_000);
         self
     }
 }
@@ -469,12 +529,77 @@ pub fn plan_migration(
 /// V29, A5-1/A5-8: the completion-marker gate keys on
 /// failures — a deliberately-uncopied symlink is honest in
 /// `skipped` but must not stall migration forever).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+///
+/// AUDIT 0.34.1 (field addition): `details` itemizes the
+/// FAILURES and the PURE SKIPS (never the successes — a
+/// profile tree is thousands of files). Through 0.34 the
+/// report was counts only, so a field log could say
+/// "1 failed, 1 skipped" without naming WHAT failed; the
+/// per-item lines the app logs from `details` are the fix.
+/// (The `Copy` derive goes with this change: a `Vec` field
+/// cannot be `Copy`.)
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MigrationReport {
     pub state_copied: bool,
     pub profile_files: usize,
     pub skipped: usize,
     pub failed: usize,
+    pub details: Vec<MigrationDetail>,
+}
+
+/// One itemized migration outcome (0.34.1): a single failed
+/// copy or a single deliberate skip. `path` is RELATIVE to
+/// the migration source root (e.g.
+/// `WebView2/Default/Network/Cookies`; `.` for the tree
+/// root itself) — never an absolute path, never contents.
+/// `error` is the io error's Display for a failure and
+/// `None` for a deliberate skip; for skips the reason rides
+/// in `kind` (`(symlink)` / `(depth cap)` / `(exotic)`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrationDetail {
+    pub kind: &'static str,
+    pub path: String,
+    pub error: Option<String>,
+}
+
+impl MigrationReport {
+    /// Record one FAILED item: counts as failed AND
+    /// skipped (the standing counting rule) and itemized.
+    fn note_failure(&mut self, kind: &'static str, path: String, error: std::io::Error) {
+        self.skipped += 1;
+        self.failed += 1;
+        self.details.push(MigrationDetail {
+            kind,
+            path,
+            error: Some(error.to_string()),
+        });
+    }
+
+    /// Record one PURE SKIP: counted as skipped only (it
+    /// must not stall the completion marker) and itemized.
+    fn note_skip(&mut self, kind: &'static str, path: String) {
+        self.skipped += 1;
+        self.details.push(MigrationDetail {
+            kind,
+            path,
+            error: None,
+        });
+    }
+}
+
+/// A path rendered relative to the migration source root,
+/// with `/` separators on every platform (the log form).
+/// Anything outside the root (never expected) falls back
+/// to its file name rather than leaking an absolute path.
+fn migration_rel(root: &Path, path: &Path) -> String {
+    match path.strip_prefix(root) {
+        Ok(rel) if rel.as_os_str().is_empty() => ".".to_string(),
+        Ok(rel) => rel.to_string_lossy().replace('\\', "/"),
+        Err(_) => path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| ".".to_string()),
+    }
 }
 
 /// Perform a planned migration. Best-effort per file — a file
@@ -509,7 +634,9 @@ pub fn perform_migration(plan: &MigrationPlan) -> MigrationReport {
         let _ = std::fs::write(&pending, b"pico migration in progress\n");
         let src_profile = from.join("WebView2");
         if src_profile.is_dir() {
-            copy_tree(&src_profile, &to.join("WebView2"), &mut report);
+            // Rooted at `from` so detail paths read
+            // `WebView2/...` (0.34.1).
+            copy_tree_rooted(&src_profile, &to.join("WebView2"), from, &mut report);
         }
     }
     // AUDIT V29 (A5-1): state is the planner's completion
@@ -528,9 +655,11 @@ pub fn perform_migration(plan: &MigrationPlan) -> MigrationReport {
     if src_state.is_file() {
         match copy_atomic(&src_state, &to.join("state.json")) {
             Ok(()) => report.state_copied = true,
-            Err(_) => {
-                report.skipped += 1;
-                report.failed += 1;
+            Err(e) => {
+                // 0.34.1: the error is CAPTURED into the
+                // detail, not discarded — a failed state
+                // copy is itemized like any profile failure.
+                report.note_failure("state file", "state.json".to_string(), e);
             }
         }
     }
@@ -561,7 +690,35 @@ fn copy_atomic(src: &Path, dst: &Path) -> std::io::Result<()> {
         let f = std::fs::File::open(&tmp)?;
         f.sync_all()?;
     }
+    // AUDIT 0.34.1 (retry poisoning): a previous partial
+    // migration can leave the destination state.json
+    // READ-ONLY (fs::copy copies the source's permissions);
+    // on Windows a rename over a read-only destination
+    // fails with access denied, so every retry would fail
+    // forever even after the original cause cleared. Clear
+    // the attribute first, best-effort. (The Windows
+    // read-only rename semantics are reasoned from the
+    // platform docs, not verifiable on the Linux build
+    // host, where rename ignores the file's mode.)
+    clear_readonly(dst);
     std::fs::rename(&tmp, dst)
+}
+
+/// Best-effort: if `path` exists and is read-only, clear
+/// its read-only attribute (0.34.1 retry-poisoning fix).
+/// The `set_readonly(false)` call is the point — on
+/// Windows it clears exactly the one attribute; the
+/// clippy lint against it assumes a unix mode rewrite,
+/// which `Permissions::set_readonly` is not.
+#[allow(clippy::permissions_set_readonly_false)]
+fn clear_readonly(path: &Path) {
+    if let Ok(meta) = std::fs::metadata(path) {
+        if meta.permissions().readonly() {
+            let mut perms = meta.permissions();
+            perms.set_readonly(false);
+            let _ = std::fs::set_permissions(path, perms);
+        }
+    }
 }
 
 /// Deepest directory nesting `copy_tree` will follow
@@ -571,50 +728,103 @@ fn copy_atomic(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// and counted like every other skip.
 const COPY_TREE_MAX_DEPTH: usize = 32;
 
+/// Test-only convenience (0.34.1): the performer calls
+/// `copy_tree_rooted` with the migration source root; the
+/// in-module pins call this wrapper, whose detail paths
+/// are relative to the tree root itself.
+#[cfg(test)]
 fn copy_tree(src: &Path, dst: &Path, report: &mut MigrationReport) {
-    copy_tree_at_depth(src, dst, report, 0)
+    copy_tree_at_depth(src, dst, src, report, 0)
 }
 
-fn copy_tree_at_depth(src: &Path, dst: &Path, report: &mut MigrationReport, depth: usize) {
+/// The migration performer's entry: detail paths are
+/// relative to the migration SOURCE root, so a profile
+/// file reads `WebView2/...` in the log (0.34.1).
+fn copy_tree_rooted(src: &Path, dst: &Path, root: &Path, report: &mut MigrationReport) {
+    copy_tree_at_depth(src, dst, root, report, 0)
+}
+
+fn copy_tree_at_depth(
+    src: &Path,
+    dst: &Path,
+    root: &Path,
+    report: &mut MigrationReport,
+    depth: usize,
+) {
     // AUDIT 0.31 (A5-L10): depth cap — deeper entries are
     // skipped (and counted), never followed.
     if depth > COPY_TREE_MAX_DEPTH {
-        report.skipped += 1;
+        // 0.34.1: the skip is itemized, with its reason.
+        report.note_skip("profile dir (depth cap)", migration_rel(root, src));
         return;
     }
-    if std::fs::create_dir_all(dst).is_err() {
-        report.skipped += 1;
-        report.failed += 1;
+    if let Err(e) = std::fs::create_dir_all(dst) {
+        // 0.34.1: the error is captured, not discarded.
+        report.note_failure("profile dir", migration_rel(root, src), e);
         return;
     }
-    let Ok(entries) = std::fs::read_dir(src) else {
-        report.skipped += 1;
-        report.failed += 1;
-        return;
+    let entries = match std::fs::read_dir(src) {
+        Ok(entries) => entries,
+        Err(e) => {
+            report.note_failure("profile dir", migration_rel(root, src), e);
+            return;
+        }
     };
     for entry in entries {
         // AUDIT V28 (A5-H1): a per-entry read_dir error is
         // counted as skipped — through v27 `flatten()` dropped
         // them silently and the report overstated the copy.
-        let Ok(entry) = entry else {
-            report.skipped += 1;
-            report.failed += 1;
-            continue;
+        // (0.34.1: the entry has no name to itemize, so the
+        // detail names the directory being read.)
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                report.note_failure("entry", migration_rel(root, src), e);
+                continue;
+            }
         };
         let (s, d) = (entry.path(), dst.join(entry.file_name()));
-        let Ok(kind) = entry.file_type() else {
-            report.skipped += 1;
-            report.failed += 1;
-            continue;
+        let kind = match entry.file_type() {
+            Ok(kind) => kind,
+            Err(e) => {
+                report.note_failure("entry", migration_rel(root, &s), e);
+                continue;
+            }
         };
         if kind.is_dir() {
-            copy_tree_at_depth(&s, &d, report, depth + 1);
+            copy_tree_at_depth(&s, &d, root, report, depth + 1);
         } else if kind.is_file() {
             match std::fs::copy(&s, &d) {
                 Ok(_) => report.profile_files += 1,
-                Err(_) => {
-                    report.skipped += 1;
-                    report.failed += 1;
+                Err(first) => {
+                    // AUDIT 0.34.1 (retry poisoning): a
+                    // partial earlier copy may have left
+                    // the destination READ-ONLY (fs::copy
+                    // copies the source's permissions); on
+                    // Windows the retry then fails with
+                    // access denied forever, even after the
+                    // original lock clears. If a destination
+                    // exists, clear its read-only attribute
+                    // and retry ONCE; a successful retry is
+                    // a copy, not a failure, and a failed
+                    // retry records the SECOND error. (The
+                    // Windows semantics are reasoned, not
+                    // verifiable on the Linux build host.)
+                    if d.exists() {
+                        clear_readonly(&d);
+                        match std::fs::copy(&s, &d) {
+                            Ok(_) => report.profile_files += 1,
+                            Err(second) => {
+                                report.note_failure(
+                                    "profile file",
+                                    migration_rel(root, &s),
+                                    second,
+                                );
+                            }
+                        }
+                    } else {
+                        report.note_failure("profile file", migration_rel(root, &s), first);
+                    }
                 }
             }
         } else {
@@ -622,7 +832,13 @@ fn copy_tree_at_depth(src: &Path, dst: &Path, report: &mut MigrationReport, dept
             // are not copied, but they are COUNTED — through
             // v28 they vanished silently and the report (and
             // now the completion marker) overstated the copy.
-            report.skipped += 1;
+            // 0.34.1: itemized as pure skips (error None),
+            // with the reason in the kind.
+            if kind.is_symlink() {
+                report.note_skip("profile entry (symlink)", migration_rel(root, &s));
+            } else {
+                report.note_skip("profile entry (exotic)", migration_rel(root, &s));
+            }
         }
     }
 }
@@ -942,6 +1158,140 @@ mod audit_031_tests {
         copy_tree(&src, &dst, &mut report);
         assert!(report.skipped >= 1, "symlink counted as skipped");
         assert!(!dst.join("link").join("x.txt").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------
+    // AUDIT 0.34.1 (field addition): per-item migration details.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn copy_tree_details_name_a_failed_file() {
+        // A directory squatting the destination makes the
+        // file copy fail portably (the v29 test's shape, at
+        // copy_tree level): the failure is itemized with the
+        // file's root-relative path and the captured error,
+        // and the counters stay consistent with the details
+        // (one failure = failed 1, skipped 1, one detail).
+        let dir = scratch("detailfail");
+        let src = dir.join("src");
+        let dst = dir.join("dst");
+        std::fs::create_dir_all(src.join("sub")).unwrap_or_else(|e| panic!("mkdir src: {e}"));
+        std::fs::write(src.join("sub").join("Cookies"), b"cookies")
+            .unwrap_or_else(|e| panic!("write: {e}"));
+        std::fs::write(src.join("ok.txt"), b"ok").unwrap_or_else(|e| panic!("write: {e}"));
+        std::fs::create_dir_all(dst.join("sub").join("Cookies"))
+            .unwrap_or_else(|e| panic!("squat: {e}"));
+        let mut report = MigrationReport::default();
+        copy_tree(&src, &dst, &mut report);
+        assert_eq!(report.profile_files, 1, "the clean file still copies");
+        assert_eq!(report.failed, 1, "{report:?}");
+        assert_eq!(report.skipped, 1, "{report:?}");
+        assert_eq!(report.details.len(), 1, "{report:?}");
+        let detail = &report.details[0];
+        assert_eq!(detail.kind, "profile file");
+        assert_eq!(detail.path, "sub/Cookies");
+        assert!(
+            detail.error.as_deref().is_some_and(|e| !e.is_empty()),
+            "the failure detail carries the captured error: {detail:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_tree_details_name_a_symlink_skip_without_an_error() {
+        // A pure skip is itemized with error None (it is
+        // deliberate, not a failure) and never moves the
+        // failed counter.
+        let dir = scratch("detailskip");
+        let src = dir.join("src");
+        let dst = dir.join("dst");
+        let real = dir.join("real");
+        std::fs::create_dir_all(&src).unwrap_or_else(|e| panic!("mkdir src: {e}"));
+        std::fs::create_dir_all(&real).unwrap_or_else(|e| panic!("mkdir real: {e}"));
+        std::fs::write(real.join("x.txt"), "x").unwrap_or_else(|e| panic!("write: {e}"));
+        std::os::unix::fs::symlink(&real, src.join("link"))
+            .unwrap_or_else(|e| panic!("symlink: {e}"));
+        let mut report = MigrationReport::default();
+        copy_tree(&src, &dst, &mut report);
+        assert_eq!(report.failed, 0, "{report:?}");
+        assert_eq!(report.skipped, 1, "{report:?}");
+        assert_eq!(report.details.len(), 1, "{report:?}");
+        let detail = &report.details[0];
+        assert!(
+            detail.kind.contains("symlink"),
+            "the skip detail names its reason: {detail:?}"
+        );
+        assert_eq!(detail.path, "link");
+        assert_eq!(detail.error, None, "a deliberate skip has no error");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn copy_tree_details_name_the_depth_cap_skip() {
+        // Past the depth cap, the skip detail names the
+        // capped directory with the reason in its kind and
+        // no error — and it stays a pure skip (failed 0 for
+        // the capped entry itself).
+        let dir = scratch("detaildepth");
+        let src = dir.join("src");
+        let dst = dir.join("dst");
+        std::fs::create_dir_all(&src).unwrap_or_else(|e| panic!("mkdir src: {e}"));
+        let mut deep = src.clone();
+        for _ in 0..40 {
+            deep = deep.join("d");
+        }
+        std::fs::create_dir_all(&deep).unwrap_or_else(|e| panic!("mkdir deep: {e}"));
+        let mut report = MigrationReport::default();
+        copy_tree(&src, &dst, &mut report);
+        assert_eq!(report.failed, 0, "{report:?}");
+        let cap_details: Vec<&MigrationDetail> = report
+            .details
+            .iter()
+            .filter(|d| d.kind.contains("depth cap"))
+            .collect();
+        assert_eq!(cap_details.len(), 1, "{report:?}");
+        assert_eq!(cap_details[0].error, None);
+        assert!(
+            report.details.len() == report.skipped,
+            "every counted item is itemized exactly once: {report:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn copy_tree_retries_once_over_a_readonly_destination() {
+        // AUDIT 0.34.1 (retry poisoning): a destination a
+        // partial earlier copy left read-only must not doom
+        // every retry. The stale read-only file is replaced
+        // by the fresh copy and counts as a copy, not a
+        // failure. (On hosts where the first copy already
+        // succeeds — e.g. a privileged test runner — the
+        // same outcome assertions hold trivially.)
+        let dir = scratch("retrypoison");
+        let src = dir.join("src");
+        let dst = dir.join("dst");
+        std::fs::create_dir_all(&src).unwrap_or_else(|e| panic!("mkdir src: {e}"));
+        std::fs::create_dir_all(&dst).unwrap_or_else(|e| panic!("mkdir dst: {e}"));
+        std::fs::write(src.join("f.txt"), b"fresh").unwrap_or_else(|e| panic!("write src: {e}"));
+        let stale = dst.join("f.txt");
+        std::fs::write(&stale, b"stale").unwrap_or_else(|e| panic!("write dst: {e}"));
+        let mut perms = std::fs::metadata(&stale).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&stale, perms).unwrap_or_else(|e| panic!("readonly: {e}"));
+        let mut report = MigrationReport::default();
+        copy_tree(&src, &dst, &mut report);
+        assert_eq!(report.failed, 0, "{report:?}");
+        assert_eq!(report.profile_files, 1, "{report:?}");
+        assert!(report.details.is_empty(), "{report:?}");
+        assert_eq!(
+            std::fs::read(&stale).unwrap_or_else(|e| panic!("read back: {e}")),
+            b"fresh",
+            "the fresh bytes replaced the stale read-only file"
+        );
+        // Leave the tree removable on every platform.
+        clear_readonly(&stale);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

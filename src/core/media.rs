@@ -250,6 +250,15 @@ impl MediaProbeBudget {
         }
     }
 
+    /// Forget a closed tab's budget (AUDIT 0.32.1, P3-5):
+    /// through 0.32 nothing ever removed an entry, so the map
+    /// grew by one per tab ever opened, for the whole
+    /// session — and a recycled tab id inherited a stranger's
+    /// spent budget.
+    pub fn forget_tab(&mut self, tab: u64) {
+        self.used.remove(&tab);
+    }
+
     /// May one more probe line be logged for `tab`? Consumes the
     /// slot when it answers yes.
     pub fn should_log(&mut self, tab: u64) -> bool {

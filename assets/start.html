@@ -127,6 +127,8 @@ body { min-height: 100vh; }
   box-shadow: var(--neu-inset);
 }
 .card .scheme.https { color: var(--accent); }
+.card .scheme.warn { color: var(--warn); }
+.card .scheme.muted { color: var(--faint); }
 .card .name {
   margin-top: 6px; font-size: 13.5px; font-weight: 600;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -200,7 +202,7 @@ body { min-height: 100vh; }
 <div class="page">
   <div class="hero">
     <div class="ring"><span>P</span></div>
-    <h1>Pico <span class="v">0.31.1</span></h1>
+    <h1>Pico <span class="v">0.40.1</span></h1>
     <p>A tiny browser for local development. Your dev servers, files and pages — nothing else.</p>
   </div>
 
@@ -237,6 +239,18 @@ body { min-height: 100vh; }
     <b>Nothing blocked yet — happy browsing.</b><br>
     Browse with the Shield or Lite on and the waste they prevent will be counted here.
     Requests are counted exactly; the data and time figures are calibrated estimates from your own traffic.
+  </div>
+
+  <div class="sec-head" id="dl-sec-head">
+    <h2>Downloads</h2>
+    <span class="line"></span>
+  </div>
+  <div class="grid" id="dl-grid">
+    <a class="card" id="dl-card" href="pico://downloads" title="Open the Downloads page">
+      <div class="top" id="dl-card-top"><span class="port" id="dl-card-active">0</span><span class="scheme" id="dl-card-badge">active</span></div>
+      <div class="name">Downloads</div>
+      <div class="proc" id="dl-card-total">No downloads yet</div>
+    </a>
   </div>
 
   <div class="sec-head">
@@ -285,7 +299,7 @@ body { min-height: 100vh; }
         YouTube
       </a>
     </div>
-    Pico 0.31.1 · by @iK4w4
+    Pico 0.40.1 · by @iK4w4
   </div>
 </div>
 
@@ -294,7 +308,10 @@ body { min-height: 100vh; }
 /* Pico v24 start page. Initial data is rendered server-side into
    the INIT object; live updates arrive through the __picoSet*
    hooks. Every server-supplied string is placed with
-   textContent only.
+   textContent only. Theme has exactly ONE channel story:
+   INIT at serve gives the first paint, and live theme pushes
+   arrive only through window.__picoTheme with the versioned
+   object payload — no other hook carries theme data.
    v24: the Recents section is MANAGEABLE from here — a per-row
    remove (x), Clear all, and a Hide/Show toggle — all posted as
    actions through the same single dispatch as every other
@@ -336,6 +353,74 @@ function applyTheme(t, p) {
      attribute untouched. */
   if (p) document.documentElement.setAttribute("data-palette", p);
 }
+
+/* 0.40.1: the ONE theme entry point. The app pushes only
+   window.__picoTheme(payload) with payload =
+   {"v":1,"mode":"dark"|"light","palette":"<id>"}; every other
+   theme input was removed. The hook is defensive: any invalid
+   payload changes nothing, logs one console.warn line, returns
+   false, and never throws. Extra fields are ignored. */
+var _knownPalettes = null;
+var _paletteScanFailed = false;
+function probeKnownPalettes() {
+  if (_knownPalettes !== null || _paletteScanFailed) return _knownPalettes;
+  var found = {};
+  var readable = false;
+  try {
+    var sheets = document.styleSheets;
+    for (var i = 0; i < sheets.length; i++) {
+      var rules = null;
+      try { rules = sheets[i].cssRules; } catch (e) { continue; }
+      if (!rules) continue;
+      readable = true;
+      for (var j = 0; j < rules.length; j++) {
+        var sel = rules[j] && rules[j].selectorText;
+        if (!sel) continue;
+        var re = /\[data-palette="([a-z0-9-]+)"\]/g;
+        var m;
+        while ((m = re.exec(sel)) !== null) found[m[1]] = true;
+      }
+    }
+  } catch (e) {
+    _paletteScanFailed = true;
+    _knownPalettes = null;
+    return null;
+  }
+  if (!readable || Object.keys(found).length === 0) {
+    /* Fallback: the stylesheet scan itself failed (no readable
+       sheet or no palette selectors found), so palette ids are
+       accepted by shape only — see __picoTheme below. */
+    _paletteScanFailed = true;
+    _knownPalettes = null;
+    return null;
+  }
+  _knownPalettes = found;
+  return _knownPalettes;
+}
+function warnInvalidTheme() {
+  try { console.warn("pico: ignored invalid theme payload"); } catch (e) {}
+}
+window.__picoTheme = function (payload) {
+  try {
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) { warnInvalidTheme(); return false; }
+    if (payload.v !== 1) { warnInvalidTheme(); return false; }
+    if (payload.mode !== "dark" && payload.mode !== "light") { warnInvalidTheme(); return false; }
+    if (typeof payload.palette !== "string") { warnInvalidTheme(); return false; }
+    var known = probeKnownPalettes();
+    if (known) {
+      if (!known[payload.palette]) { warnInvalidTheme(); return false; }
+    } else {
+      /* Fallback when the stylesheet scan fails: accept only
+         ids matching the palette-id shape. */
+      if (!/^[a-z][a-z0-9-]{0,31}$/.test(payload.palette)) { warnInvalidTheme(); return false; }
+    }
+    applyTheme(payload.mode, payload.palette);
+    return true;
+  } catch (e) {
+    warnInvalidTheme();
+    return false;
+  }
+};
 
 function renderServices(list) {
   while (servicesEl.firstChild) servicesEl.removeChild(servicesEl.firstChild);
@@ -534,10 +619,76 @@ function renderStats(s) {
   }
 }
 
+/* ------------------------------------------------------------
+   0.40.1: the Downloads card. The model rides the start INIT
+   JSON's `downloads` field and __picoSetDownloadsCard pushes,
+   in the contract shape {state, count, speed_bps, paused,
+   queued, newest_name, unseen} with state one of "empty",
+   "active", "waiting", "failed", "finished"; the card is a
+   plain anchor to pico://downloads — the app funnels the
+   navigation to the Downloads page. An absent model or an
+   unknown state renders the empty state; rendering never
+   throws. Names are placed with textContent only (setText).
+   ------------------------------------------------------------ */
+function dlCardCount(x) {
+  return typeof x === "number" && isFinite(x) && x > 0 ? Math.floor(x) : 0;
+}
+function renderDownloadsCard(d) {
+  try {
+    var model = d && typeof d === "object" ? d : {};
+    var state = typeof model.state === "string" ? model.state : "empty";
+    if (state !== "empty" && state !== "active" && state !== "waiting" &&
+        state !== "failed" && state !== "finished") state = "empty";
+    var topEl = document.getElementById("dl-card-top");
+    var badgeEl = document.getElementById("dl-card-badge");
+    if (state === "empty") {
+      if (topEl) topEl.hidden = true;
+      setText("dl-card-total", "No downloads yet");
+      return;
+    }
+    if (topEl) topEl.hidden = false;
+    setText("dl-card-active", String(dlCardCount(model.count)));
+    if (state === "active") {
+      setText("dl-card-badge", "ACTIVE");
+      if (badgeEl) badgeEl.className = "scheme";
+      var speed = typeof model.speed_bps === "number" && isFinite(model.speed_bps) ? model.speed_bps : null;
+      setText("dl-card-total", speed !== null
+        ? "Downloading · " + humanizeBytes(speed) + "/s"
+        : "Downloading");
+    } else if (state === "waiting") {
+      var paused = dlCardCount(model.paused);
+      var queued = dlCardCount(model.queued);
+      setText("dl-card-badge", queued === 0 ? "PAUSED" : (paused === 0 ? "QUEUED" : "WAITING"));
+      if (badgeEl) badgeEl.className = "scheme muted";
+      var parts = [];
+      if (paused > 0) parts.push(paused + " paused");
+      if (queued > 0) parts.push(queued + " queued");
+      setText("dl-card-total", parts.join(" · "));
+    } else if (state === "failed") {
+      var unseen = !!model.unseen;
+      setText("dl-card-badge", "FAILED");
+      if (badgeEl) badgeEl.className = unseen ? "scheme warn" : "scheme muted";
+      setText("dl-card-total", model.newest_name ? String(model.newest_name)
+        : (unseen ? "Needs attention" : "Download failed"));
+    } else if (state === "finished") {
+      setText("dl-card-badge", "FINISHED");
+      if (badgeEl) badgeEl.className = "scheme muted";
+      setText("dl-card-total", model.newest_name ? String(model.newest_name)
+        : "All downloads finished");
+    }
+  } catch (e) {
+    try {
+      var topOnError = document.getElementById("dl-card-top");
+      if (topOnError) topOnError.hidden = true;
+      setText("dl-card-total", "No downloads yet");
+    } catch (ignored) {}
+  }
+}
+
+window.__picoSetDownloadsCard = renderDownloadsCard;
 window.__picoSetServices = renderServices;
 window.__picoSetRecents = renderRecents;
 window.__picoSetRecentsHidden = setRecentsHidden;
-window.__picoSetTheme = applyTheme;
 window.__picoSetOthers = renderOthers;
 window.__picoSetStats = renderStats;
 
@@ -574,6 +725,7 @@ if (statsReset) {
 }
 
 applyTheme(INIT.theme, INIT.palette);
+renderDownloadsCard(INIT.downloads);
 renderServices(INIT.services);
 renderOthers(INIT.otherListeners);
 renderRecents(INIT.recents);

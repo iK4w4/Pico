@@ -14,6 +14,12 @@
 pub const CHROME_TEMPLATE: &str = include_str!("../../assets/chrome.html");
 /// The raw start-page template (assets/start.html).
 pub const START_TEMPLATE: &str = include_str!("../../assets/start.html");
+/// The raw downloads-page template (assets/downloads.html, 0.33).
+pub const DOWNLOADS_TEMPLATE: &str = include_str!("../../assets/downloads.html");
+/// The shared downloads row renderer (assets/dlrows.js, 0.34):
+/// ONE implementation spliced into BOTH the chrome document
+/// and the downloads page — never duplicated in a template.
+pub const DLROWS: &str = include_str!("../../assets/dlrows.js");
 /// The design system shared by both pages (assets/style.css).
 pub const SHARED_CSS: &str = include_str!("../../assets/style.css");
 
@@ -31,6 +37,10 @@ pub const CSS_TOKEN: &str = "/*__SHARED_CSS__*/";
 /// Token in the start template where the initial-data JSON is
 /// injected.
 pub const INIT_TOKEN: &str = "__PICO_INIT_JSON__";
+/// Token in the chrome and downloads templates (inside their
+/// single inline `<script>`) where the shared DlRows renderer
+/// is spliced by the assemble functions.
+pub const DLROWS_TOKEN: &str = "/*__DLROWS__*/";
 
 /// Control ids the chrome page must contain for the shell to be
 /// operable. The asset tests assert every one survives assembly.
@@ -56,7 +66,6 @@ pub const REQUIRED_CHROME_IDS: &[&str] = &[
     "win-max",
     "win-close",
     "svc-badge",
-    "dl-badge",
     "errbar",
     "shellwarn",
     "ver",
@@ -85,6 +94,41 @@ pub const REQUIRED_CHROME_IDS: &[&str] = &[
     "pp-grid",
     "pp-close",
     "pp-backdrop",
+    // Downloads button + count badge + panel (0.32).
+    "downloads",
+    "dl-count",
+    "dpanel",
+    "dp-close",
+    "dl-add-url",
+    "dl-add-btn",
+    "dl-default-conn",
+    "dl-list",
+    "dl-empty",
+    // Download toast (0.32.3): the pill + its two text spans.
+    "dl-toast",
+    "dl-toast-lead",
+    "dl-toast-name",
+    // Downloads popover footer (0.33): the All-downloads
+    // button that opens the full downloads page.
+    "dl-all",
+];
+
+/// Control ids the downloads page must contain (0.33). The
+/// asset tests assert every one survives assembly.
+pub const REQUIRED_DOWNLOADS_IDS: &[&str] = &[
+    "dl-search",
+    "dl-chips",
+    "dl-add-url",
+    "dl-add-btn",
+    "dl-max-concurrent",
+    "dl-speed-limit",
+    "dl-clear-completed",
+    "dl-clear-all",
+    "dl-page-list",
+    "dl-page-empty",
+    "dl-page-nomatch",
+    "dl-count-line",
+    "dl-ver",
 ];
 
 /// The full shared stylesheet as served: the hand-written
@@ -102,7 +146,9 @@ pub fn shared_css_full() -> &'static str {
 /// substitution silently no-ops and the integrity tests (which
 /// require the `--bg:` definitions in the output) fail instead.
 pub fn assemble_chrome_html() -> String {
-    CHROME_TEMPLATE.replacen(CSS_TOKEN, shared_css_full(), 1)
+    CHROME_TEMPLATE
+        .replacen(CSS_TOKEN, shared_css_full(), 1)
+        .replacen(DLROWS_TOKEN, DLROWS, 1)
 }
 
 /// Build the start-page document: template + shared CSS +
@@ -114,6 +160,18 @@ pub fn assemble_start_html(init_json: &str) -> String {
     let safe_json = init_json.replace("</", "<\\/");
     START_TEMPLATE
         .replacen(CSS_TOKEN, shared_css_full(), 1)
+        .replacen(INIT_TOKEN, &safe_json, 1)
+}
+
+/// Build the downloads-page document (0.33): template +
+/// shared CSS + initial data, exactly like
+/// [`assemble_start_html`] — including the `</`
+/// neutralization of the init JSON.
+pub fn assemble_downloads_html(init_json: &str) -> String {
+    let safe_json = init_json.replace("</", "<\\/");
+    DOWNLOADS_TEMPLATE
+        .replacen(CSS_TOKEN, shared_css_full(), 1)
+        .replacen(DLROWS_TOKEN, DLROWS, 1)
         .replacen(INIT_TOKEN, &safe_json, 1)
 }
 
@@ -170,6 +228,14 @@ mod tests {
         let html = assemble_chrome_html();
         assert!(html.len() > 10_000, "chrome html too small: {}", html.len());
         assert!(!html.contains(CSS_TOKEN), "CSS token survived assembly");
+        assert!(
+            !html.contains(DLROWS_TOKEN),
+            "DlRows token survived chrome assembly"
+        );
+        assert!(
+            html.contains("renderTaskList"),
+            "chrome is missing the spliced DlRows renderer"
+        );
         assert!(html.contains("--bg:"), "shared CSS variables missing");
         assert!(html.trim_end().ends_with("</html>"));
         for id in REQUIRED_CHROME_IDS {
@@ -198,6 +264,48 @@ mod tests {
                 "start page is missing id {id}"
             );
         }
+    }
+
+    #[test]
+    fn downloads_assembly_is_complete_and_escapes_script_breakout() {
+        let html = assemble_downloads_html("{\"theme\":\"dark\",\"x\":\"</script>\"}");
+        assert!(
+            html.len() > 1_000,
+            "downloads html too small: {}",
+            html.len()
+        );
+        assert!(!html.contains(CSS_TOKEN), "CSS token survived assembly");
+        assert!(
+            !html.contains(DLROWS_TOKEN),
+            "DlRows token survived downloads assembly"
+        );
+        assert!(
+            html.contains("renderTaskList"),
+            "downloads page is missing the spliced DlRows renderer"
+        );
+        assert!(!html.contains(INIT_TOKEN), "init token survived assembly");
+        assert!(html.contains("--bg:"), "shared CSS variables missing");
+        assert!(
+            html.contains("<\\/script>"),
+            "init JSON was not neutralized"
+        );
+        assert!(html.trim_end().ends_with("</html>"));
+        for id in REQUIRED_DOWNLOADS_IDS {
+            assert!(
+                html.contains(&format!("id=\"{id}\"")),
+                "downloads page is missing control id {id}"
+            );
+        }
+        let scripts = extract_inline_scripts(&html);
+        assert_eq!(
+            scripts.len(),
+            1,
+            "downloads page ships exactly one inline script"
+        );
+        assert!(
+            scripts[0].contains("__picoSetDownloads"),
+            "downloads renderer missing __picoSetDownloads"
+        );
     }
 
     #[test]

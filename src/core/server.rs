@@ -1331,6 +1331,8 @@ fn serve_events(writer: &mut TcpStream, hub: &Arc<ReloadHub>, root_id: u64) {
 const WINDOWS_DEVICE_NAMES: &[&str] = &[
     "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
     "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    // AUDIT 0.40.1: the console device aliases are reserved too.
+    "CONIN$", "CONOUT$",
 ];
 
 /// Normalize a once-percent-decoded relative path into safe

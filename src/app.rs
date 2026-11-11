@@ -118,12 +118,15 @@ use pico_core::core::addr::{
 };
 use pico_core::core::assets;
 use pico_core::core::detect::{signature, Listener, ScanOutcome, Service, TitleCache};
+use pico_core::core::dlcmd::DOWNLOADS_URL;
+use pico_core::core::dlcoord::{Coordinator, DlSettings};
 use pico_core::core::fileopen::{resolve_open_target, OpenResolveError};
 use pico_core::core::history::TabHistory;
 use pico_core::core::ipc::{
     looks_like_lite_chosen, looks_like_shield_prune, looks_like_shield_pruned, parse_command,
-    parse_lite_chosen, parse_nav_note, parse_shield_prune, parse_shield_pruned,
-    userinfo_nav_allowed, Command, Dedupe, NavNote, PruneItem, SocialSite, NAV_OBSERVER_SCRIPT,
+    parse_lite_chosen, parse_nav_note, parse_shield_prune, parse_shield_pruned, url_has_userinfo,
+    userinfo_adoption_allowed, userinfo_nav_allowed, Command, Dedupe, Envelope, NavNote, PruneItem,
+    SocialSite, NAV_OBSERVER_SCRIPT,
 };
 use pico_core::core::layout;
 use pico_core::core::lite::LiteRuntime;
@@ -207,6 +210,23 @@ struct SharedData {
     /// 0.30: the savings band's figures, mirrored for start
     /// renders (live updates ride `__picoSetStats`).
     stats: pico_core::core::stats::StatsView,
+    /// 0.33: the Downloads page's init JSON (the one page-data
+    /// shape from the 0.33 contract), mirrored for downloads
+    /// renders. `render_downloads` assembles the page from
+    /// this string; `push_downloads_page` refreshes it
+    /// whenever it rebuilds the JSON, so a fresh page load
+    /// renders current data. 0.35.1: this JSON carries NO
+    /// theme — an internal page has exactly two theme
+    /// inputs, the INIT bake `render_downloads` merges in
+    /// at serve time and the live `__picoTheme` push.
+    downloads_init: String,
+    /// 0.35.1: the start page's Downloads card model (the
+    /// coordinator snapshot's `card`, [`DlCardView`]),
+    /// mirrored whenever the app pushes state, so
+    /// `render_start`'s INIT JSON carries the live card.
+    /// Live updates ride `__picoSetDownloadsCard` pushes
+    /// from `push_state`.
+    downloads_card: pico_core::core::dlcoord::DlCardView,
 }
 type Shared = Arc<Mutex<SharedData>>;
 
@@ -228,13 +248,49 @@ fn render_start(shared: &Shared) -> String {
         "theme": data.theme,
         "palette": data.palette,
         "stats": data.stats,
+        "downloads": data.downloads_card.clone(),
     });
     let init_json = serde_json::to_string(&init).unwrap_or_else(|_| "null".to_string());
     assets::assemble_start_html(&init_json)
 }
 
+/// The Downloads page's initial render (0.33): mirrors
+/// `render_start` — the shared init JSON (already the one
+/// page-data shape) is assembled into the page document.
+/// 0.35.1: the CURRENT theme/palette are merged into the
+/// INIT here, at assembly time, from the shared mirror
+/// (`sync_shared` keeps them current) — exactly like
+/// `render_start` bakes them. This serve-time bake and
+/// the live `__picoTheme` push are the ONLY two theme
+/// inputs an internal page has; the stored init JSON and
+/// every data push carry no theme at all. A stored init
+/// that fails to parse is served raw (never a panic).
+fn render_downloads(shared: &Shared) -> String {
+    let data = shared
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let init_json = match serde_json::from_str::<serde_json::Value>(&data.downloads_init) {
+        Ok(mut v) => {
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert(
+                    "theme".to_string(),
+                    serde_json::Value::String(data.theme.clone()),
+                );
+                obj.insert(
+                    "palette".to_string(),
+                    serde_json::Value::String(data.palette.clone()),
+                );
+            }
+            serde_json::to_string(&v).unwrap_or_else(|_| data.downloads_init.clone())
+        }
+        Err(_) => data.downloads_init.clone(),
+    };
+    assets::assemble_downloads_html(&init_json)
+}
+
 /// Handler for the `pico://` custom protocol, registered on every
-/// webview. Serves only two documents: the chrome and the start page.
+/// webview. Serves only three documents: the chrome, the start
+/// page and (0.33) the Downloads page.
 /// (AUDIT L11: it intentionally does not distinguish webviews — the
 /// documents carry no secrets, and content navigation to them is
 /// denied by the navigation handler.)
@@ -249,6 +305,8 @@ fn pico_protocol_handler(
             (200, render_chrome())
         } else if route == START_URL {
             (200, render_start(&shared))
+        } else if route == DOWNLOADS_URL {
+            (200, render_downloads(&shared))
         } else {
             (404, "Pico: unknown internal page".to_string())
         };
@@ -343,6 +401,741 @@ fn harden_webview_profile(view: &WebView, label: &str) {
 
 #[cfg(not(windows))]
 fn harden_webview_profile(_view: &WebView, _label: &str) {}
+
+/// Register the outside-click panel dismissal on one content
+/// view (0.32.4, Fix A): when the view's controller gains
+/// focus, the user has clicked (or tabbed) INTO the page —
+/// every chrome panel closes. This is the one signal that
+/// can see that click: the panels live in the CHROME
+/// webview's DOM, a plain click into the page goes to the
+/// CONTENT webview (a separate HWND) and produces no
+/// navigation, so no chrome-DOM handler or navigation event
+/// ever observes it. The handler only forwards the fact as
+/// [`UserEvent::ContentFocus`]; the event arm is the funnel.
+/// Failures are logged, never fatal (the media probe's
+/// outcome style): an older runtime may lack the event, and
+/// the browser must not die for a panel law.
+#[cfg(windows)]
+fn attach_panel_focus_close(view: &WebView, tab: u64, proxy: EventLoopProxy<UserEvent>) {
+    use webview2_com::FocusChangedEventHandler;
+    use wry::WebViewExtWindows;
+
+    let outcome = (|| -> Result<(), String> {
+        let controller = view.controller();
+        let handler = FocusChangedEventHandler::create(Box::new(move |_controller, _args| {
+            let _ = proxy.send_event(UserEvent::ContentFocus { tab });
+            Ok(())
+        }));
+        let mut token: i64 = 0;
+        // SAFETY: the handler is a webview2-com callback
+        // object kept alive by the controller's event table
+        // once registered; the token cell is a plain local.
+        unsafe {
+            controller
+                .add_GotFocus(&handler, &mut token)
+                .map_err(|e| format!("GotFocus registration: {e}"))?;
+        }
+        Ok(())
+    })();
+    if let Err(why) = outcome {
+        log::info(&format!(
+            "panel focus close unavailable for tab {tab}: {why}"
+        ));
+    }
+}
+
+#[cfg(not(windows))]
+fn attach_panel_focus_close(_view: &WebView, _tab: u64, _proxy: EventLoopProxy<UserEvent>) {}
+
+/// Register the Ctrl+J downloads accelerator on one content
+/// view (0.35, WS5): the controller's AcceleratorKeyPressed
+/// event is the one signal that sees a key chord while the
+/// PAGE holds focus — through 0.34 Ctrl+J lived only in the
+/// chrome document's own key handler, so the chord did
+/// nothing from content focus. The handler matches exactly
+/// one chord (a KEY_DOWN with virtual key 0x4A — VK_J —
+/// while Ctrl is held), marks it handled so the page never
+/// sees it, and forwards [`UserEvent::DownloadsPageShortcut`];
+/// key-up and system-key kinds are ignored, and every other
+/// key passes through untouched. Registered ONLY on content
+/// views (build_content_view) — the chrome keeps its own
+/// handler, so the chord cannot double-fire. Failures are
+/// logged, never fatal (the focus-close attach's outcome
+/// style): an older runtime may lack the event, and the
+/// browser must not die for a shortcut.
+#[cfg(windows)]
+fn attach_downloads_shortcut(view: &WebView, proxy: EventLoopProxy<UserEvent>) {
+    use webview2_com::AcceleratorKeyPressedEventHandler;
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        COREWEBVIEW2_KEY_EVENT_KIND, COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN,
+    };
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        GetKeyState, VK_CONTROL, VK_MENU, VK_SHIFT,
+    };
+    use wry::WebViewExtWindows;
+
+    let outcome = (|| -> Result<(), String> {
+        let controller = view.controller();
+        let handler =
+            AcceleratorKeyPressedEventHandler::create(Box::new(move |_controller, args| {
+                let Some(args) = args else {
+                    return Ok(());
+                };
+                // SAFETY: the event args are valid for the
+                // duration of this synchronous callback; every
+                // call below is a documented getter/setter on
+                // them, and a failed read simply leaves the key
+                // untouched — the page keeps every chord this
+                // handler does not positively identify as
+                // Ctrl+J.
+                unsafe {
+                    let _ = (|| -> Result<(), String> {
+                        let mut kind = COREWEBVIEW2_KEY_EVENT_KIND(0);
+                        args.KeyEventKind(&mut kind)
+                            .map_err(|e| format!("KeyEventKind(): {e}"))?;
+                        if kind != COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN {
+                            return Ok(()); // key-up / system-key: not ours
+                        }
+                        let mut vk: u32 = 0;
+                        args.VirtualKey(&mut vk)
+                            .map_err(|e| format!("VirtualKey(): {e}"))?;
+                        if vk != 0x4A {
+                            return Ok(()); // not VK_J
+                        }
+                        // Ctrl held reads as a negative i16 (the
+                        // high bit is the "down" bit).
+                        if GetKeyState(i32::from(VK_CONTROL)) >= 0 {
+                            return Ok(());
+                        }
+                        // AUDIT 0.40.1: the chord is Ctrl+J
+                        // exactly — with Shift or Alt also down
+                        // it is a different chord (a page or
+                        // DevTools shortcut) and stays the page's.
+                        if GetKeyState(i32::from(VK_SHIFT)) < 0
+                            || GetKeyState(i32::from(VK_MENU)) < 0
+                        {
+                            return Ok(());
+                        }
+                        args.SetHandled(true)
+                            .map_err(|e| format!("SetHandled(): {e}"))?;
+                        let _ = proxy.send_event(UserEvent::DownloadsPageShortcut);
+                        Ok(())
+                    })();
+                }
+                Ok(())
+            }));
+        let mut token: i64 = 0;
+        // SAFETY: the handler is a webview2-com callback
+        // object kept alive by the controller's event table
+        // once registered; the token cell is a plain local.
+        unsafe {
+            controller
+                .add_AcceleratorKeyPressed(&handler, &mut token)
+                .map_err(|e| format!("AcceleratorKeyPressed registration: {e}"))?;
+        }
+        Ok(())
+    })();
+    if let Err(why) = outcome {
+        log::info(&format!("downloads shortcut unavailable: {why}"));
+    }
+}
+
+#[cfg(not(windows))]
+fn attach_downloads_shortcut(_view: &WebView, _proxy: EventLoopProxy<UserEvent>) {}
+
+/// Register Pico's own context menu on one content view
+/// (0.34.1): WebView2's `ContextMenuRequested` is intercepted
+/// and the stock menu is ALWAYS suppressed (`SetHandled`
+/// first, unconditionally — even a failed fact read must
+/// never fall back to the unthemed stock menu with its
+/// "Save as" / "Print" verbs). The handler only reads the
+/// target facts (kind, page/link/source URLs, selection,
+/// editable, clipboard-text presence) and forwards them as
+/// [`UserEvent::ContextMenu`]; the event loop owns the menu
+/// (core::ctxmenu decides the items, the chrome draws them,
+/// picks return as `ctx_pick` commands). Failures are
+/// logged, never fatal (the focus-close attach's outcome
+/// style): an older runtime may lack the event, and the
+/// browser must not die for a menu.
+#[cfg(windows)]
+fn attach_context_menu(view: &WebView, tab: u64, proxy: EventLoopProxy<UserEvent>) {
+    use pico_core::core::ctxmenu::{CtxKind, CtxTarget};
+    use webview2_com::ContextMenuRequestedEventHandler;
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2_11, COREWEBVIEW2_CONTEXT_MENU_TARGET_KIND,
+    };
+    use windows_core::Interface;
+    use wry::WebViewExtWindows;
+
+    let outcome = (|| -> Result<(), String> {
+        // The ContextMenuRequested event hangs off
+        // ICoreWebView2_11 (not the base interface) in the
+        // WebView2 API.
+        let core = view
+            .webview()
+            .cast::<ICoreWebView2_11>()
+            .map_err(|e| format!("cast to ICoreWebView2_11: {e}"))?;
+        let handler = ContextMenuRequestedEventHandler::create(Box::new(move |_sender, args| {
+            let Some(args) = args else {
+                return Ok(());
+            };
+            // SAFETY: the event args and the target object they
+            // hand out are valid for the duration of this
+            // synchronous callback; every PWSTR getter follows
+            // the established pattern (`take_pwstr` takes
+            // ownership of the CoTaskMem string), and a failed
+            // read degrades to an empty/absent fact rather than
+            // an error — the stock menu stays handled no matter
+            // what happens after it.
+            unsafe {
+                // FIRST, unconditionally: the stock menu must
+                // never render, even if every read below fails.
+                let _ = args.SetHandled(true);
+                let _ = (|| -> Result<(), String> {
+                    let target = args
+                        .ContextMenuTarget()
+                        .map_err(|e| format!("ContextMenuTarget(): {e}"))?;
+                    let mut kind_raw = COREWEBVIEW2_CONTEXT_MENU_TARGET_KIND(0);
+                    target
+                        .Kind(&mut kind_raw)
+                        .map_err(|e| format!("Kind(): {e}"))?;
+                    // One PWSTR getter, the established pattern
+                    // (see fetch_download_cookies): a failed/null
+                    // read is an empty string, never fatal.
+                    macro_rules! target_str {
+                        ($getter:ident) => {{
+                            let mut ptr = windows_core::PWSTR::null();
+                            match target.$getter(&mut ptr) {
+                                Ok(()) if !ptr.is_null() => webview2_com::take_pwstr(ptr),
+                                _ => String::new(),
+                            }
+                        }};
+                    }
+                    // One BOOL getter, same discipline: a failed
+                    // read is false.
+                    macro_rules! target_bool {
+                        ($getter:ident) => {{
+                            let mut v = windows_core::BOOL::default();
+                            match target.$getter(&mut v) {
+                                Ok(()) => v.as_bool(),
+                                Err(_) => false,
+                            }
+                        }};
+                    }
+                    let has_link = target_bool!(HasLinkUri);
+                    let has_source = target_bool!(HasSourceUri);
+                    let mut pt = windows_sys::Win32::Foundation::POINT { x: 0, y: 0 };
+                    // The Location out-pointer is typed in the
+                    // `windows` crate's POINT; the windows-sys
+                    // POINT above is the same repr(C) {x, y} pair,
+                    // so the cast only reinterprets that layout.
+                    args.Location((&mut pt as *mut windows_sys::Win32::Foundation::POINT).cast())
+                        .map_err(|e| format!("Location(): {e}"))?;
+                    let facts = CtxTarget {
+                        kind: CtxKind::from_webview2(kind_raw.0),
+                        page_url: target_str!(PageUri),
+                        link_url: if has_link {
+                            Some(target_str!(LinkUri))
+                        } else {
+                            None
+                        },
+                        source_url: if has_source {
+                            Some(target_str!(SourceUri))
+                        } else {
+                            None
+                        },
+                        has_selection: target_bool!(HasSelection),
+                        is_editable: target_bool!(IsEditable),
+                        has_clipboard_text:
+                            windows_sys::Win32::System::DataExchange::IsClipboardFormatAvailable(
+                                13, // CF_UNICODETEXT
+                            ) != 0,
+                    };
+                    let _ = proxy.send_event(UserEvent::ContextMenu {
+                        tab,
+                        target: facts,
+                        location: (pt.x, pt.y),
+                    });
+                    Ok(())
+                })();
+            }
+            Ok(())
+        }));
+        let mut token: i64 = 0;
+        // SAFETY: the handler is a webview2-com callback object
+        // kept alive by the core's event table once registered;
+        // the token cell is a plain local.
+        unsafe {
+            core.add_ContextMenuRequested(&handler, &mut token)
+                .map_err(|e| format!("ContextMenuRequested registration: {e}"))?;
+        }
+        Ok(())
+    })();
+    if let Err(why) = outcome {
+        log::info(&format!("context menu unavailable for tab {tab}: {why}"));
+    }
+}
+
+#[cfg(not(windows))]
+fn attach_context_menu(_view: &WebView, _tab: u64, _proxy: EventLoopProxy<UserEvent>) {}
+
+/// Set the system clipboard's Unicode text (0.34.1): the
+/// context menu's Copy Link / Copy Image Address verbs. The
+/// Win32 sequence is the documented one — open, empty, hand
+/// over a moveable global allocation holding the UTF-16 text
+/// plus its NUL. Once `SetClipboardData` succeeds the SYSTEM
+/// owns the handle and it must NOT be freed here; every
+/// failure path before that still owns it and frees it.
+/// Outcome-logged like harden_webview_profile; the text
+/// itself never reaches the log (a copied link can carry a
+/// query) — only its length does.
+#[cfg(windows)]
+fn clipboard_set_text(text: &str) -> Result<(), String> {
+    use windows_sys::Win32::Foundation::GlobalFree;
+    use windows_sys::Win32::System::DataExchange::{
+        CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+    };
+    use windows_sys::Win32::System::Memory::{
+        GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE,
+    };
+
+    const CF_UNICODETEXT: u32 = 13;
+    let outcome = (|| -> Result<(), String> {
+        let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+        // SAFETY: every handle is null-checked before use; the
+        // clipboard is closed on every path past a successful
+        // open; the allocation is freed on every failure path
+        // and deliberately NOT freed once SetClipboardData
+        // succeeds (ownership moves to the system with it).
+        unsafe {
+            if OpenClipboard(std::ptr::null_mut()) == 0 {
+                return Err("OpenClipboard failed".to_string());
+            }
+            let result = (|| -> Result<(), String> {
+                if EmptyClipboard() == 0 {
+                    return Err("EmptyClipboard failed".to_string());
+                }
+                let handle = GlobalAlloc(GMEM_MOVEABLE, wide.len() * 2);
+                if handle.is_null() {
+                    return Err("GlobalAlloc failed".to_string());
+                }
+                let lock = GlobalLock(handle) as *mut u16;
+                if lock.is_null() {
+                    GlobalFree(handle);
+                    return Err("GlobalLock failed".to_string());
+                }
+                std::ptr::copy_nonoverlapping(wide.as_ptr(), lock, wide.len());
+                GlobalUnlock(handle);
+                if SetClipboardData(CF_UNICODETEXT, handle).is_null() {
+                    GlobalFree(handle);
+                    return Err("SetClipboardData failed".to_string());
+                }
+                Ok(())
+            })();
+            CloseClipboard();
+            result
+        }
+    })();
+    match outcome {
+        Ok(()) => {
+            log::info(&format!(
+                "clipboard: text set ({} chars)",
+                text.chars().count()
+            ));
+            Ok(())
+        }
+        Err(why) => {
+            log::info(&format!("clipboard set unavailable: {why}"));
+            Err(why)
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn clipboard_set_text(_text: &str) -> Result<(), String> {
+    Err("clipboard is Windows-only".to_string())
+}
+
+/// Read the system clipboard's Unicode text (0.34.1): the
+/// context menu's Paste verb. `None` for "no text format", a
+/// failed open, or an unreadable handle alike — Paste simply
+/// does nothing then. The text is page-bound input the
+/// caller inserts through a JSON-escaped script argument,
+/// and it never reaches the log.
+#[cfg(windows)]
+fn clipboard_get_text() -> Option<String> {
+    use windows_sys::Win32::System::DataExchange::{
+        CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
+    };
+    use windows_sys::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+
+    const CF_UNICODETEXT: u32 = 13;
+    // SAFETY: the format gate runs before the open; every
+    // handle is null-checked before use; the lock is released
+    // and the clipboard closed on every path past a successful
+    // open; and the read is bounded by the allocation's own
+    // size (plus a hard cap), never by trusting the buffer to
+    // be NUL-terminated — though CF_UNICODETEXT data is by
+    // contract.
+    unsafe {
+        if IsClipboardFormatAvailable(CF_UNICODETEXT) == 0 {
+            return None;
+        }
+        if OpenClipboard(std::ptr::null_mut()) == 0 {
+            log::info("clipboard get unavailable: OpenClipboard failed");
+            return None;
+        }
+        let result = (|| -> Option<String> {
+            let handle = GetClipboardData(CF_UNICODETEXT);
+            if handle.is_null() {
+                return None;
+            }
+            let lock = GlobalLock(handle) as *const u16;
+            if lock.is_null() {
+                return None;
+            }
+            let cap = (GlobalSize(handle) / 2).min(1_000_000);
+            let mut len = 0usize;
+            while len < cap && *lock.add(len) != 0 {
+                len += 1;
+            }
+            let text = String::from_utf16_lossy(std::slice::from_raw_parts(lock, len));
+            GlobalUnlock(handle);
+            Some(text)
+        })();
+        CloseClipboard();
+        result
+    }
+}
+
+#[cfg(not(windows))]
+fn clipboard_get_text() -> Option<String> {
+    None
+}
+
+/// The cursor's position in window DIP (0.34.1): the ground
+/// truth `core::ctxmenu::resolve_anchor` resolves the
+/// WebView2 location against. Screen-physical cursor minus
+/// the client area's screen origin, divided by the scale —
+/// exactly ScreenToClient's translation, computed from tao's
+/// `inner_position` (the client area's own screen origin)
+/// because windows-sys 0.59 gates ScreenToClient itself
+/// behind the not-enabled Win32_Graphics_Gdi feature.
+/// `None` on any failure (no cursor read, no window
+/// position, a degenerate scale): the anchor resolution
+/// then falls back to its documented default reading.
+#[cfg(windows)]
+fn cursor_client_dip(window: &Window, scale: f64) -> Option<(f64, f64)> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+
+    if !scale.is_finite() || scale <= 0.0 {
+        return None;
+    }
+    let mut pt = windows_sys::Win32::Foundation::POINT { x: 0, y: 0 };
+    // SAFETY: `pt` is a plain local out-cell — the documented
+    // GetCursorPos pattern, nothing else is touched.
+    if unsafe { GetCursorPos(&mut pt) } == 0 {
+        return None;
+    }
+    let origin = window.inner_position().ok()?;
+    Some((
+        (pt.x - origin.x) as f64 / scale,
+        (pt.y - origin.y) as f64 / scale,
+    ))
+}
+
+#[cfg(not(windows))]
+fn cursor_client_dip(_window: &Window, _scale: f64) -> Option<(f64, f64)> {
+    None
+}
+
+/// Fetch a captured download's cookies from its tab's
+/// WebView (0.32; token shape 0.34): the page's session
+/// cookies for the download URL are what let logged-in
+/// downloads work. The chain is the profile route —
+/// `view.webview()` → `ICoreWebView2_13::Profile()` →
+/// `ICoreWebView2Profile5::CookieManager()` → `GetCookies` —
+/// with webview2-com's own `GetCookiesCompletedHandler` wrapper
+/// (the crate ships one, so no hand-rolled `implement` is
+/// needed). The handler normalizes each cookie into a core
+/// `CookiePair` (domain: leading `.` stripped, lowercased;
+/// cookies with an empty name skipped) and posts it back as
+/// [`UserEvent::DownloadCookies`], carrying the capture
+/// `token` the coordinator minted and the source `tab` (the
+/// landing revalidation needs the tab's current facts).
+/// `host_only` is derived from
+/// the RAW domain: WebView2 exposes no host-only getter, and a
+/// domain cookie is the one whose raw domain carries the
+/// leading dot (a domain cookie is sent to subdomains; a
+/// host-only cookie's domain is the bare host). Cookie VALUES
+/// never touch the log — this function's errors name only the
+/// failed step.
+///
+/// Any failure returns `Err` and the caller lands the capture
+/// immediately with no cookies: a download must never hang on
+/// its session fetch.
+#[cfg(windows)]
+fn fetch_download_cookies(
+    view: &WebView,
+    uri: &str,
+    tab: u64,
+    token: u64,
+    proxy: EventLoopProxy<UserEvent>,
+) -> Result<(), String> {
+    use webview2_com::GetCookiesCompletedHandler;
+    use webview2_com::Microsoft::Web::WebView2::Win32::{ICoreWebView2Profile5, ICoreWebView2_13};
+    use windows_core::Interface;
+    use wry::WebViewExtWindows;
+
+    let core = view
+        .webview()
+        .cast::<ICoreWebView2_13>()
+        .map_err(|e| format!("cast to ICoreWebView2_13: {e}"))?;
+    // SAFETY: `Profile()` on the live core returns the profile
+    // object for this view's environment (same getter the
+    // profile-hardening path above uses).
+    let profile = unsafe { core.Profile() }.map_err(|e| format!("Profile(): {e}"))?;
+    let profile5 = profile
+        .cast::<ICoreWebView2Profile5>()
+        .map_err(|e| format!("cast to ICoreWebView2Profile5: {e}"))?;
+    // SAFETY: `CookieManager()` is a documented getter on the
+    // live profile just obtained from the core.
+    let manager =
+        unsafe { profile5.CookieManager() }.map_err(|e| format!("CookieManager(): {e}"))?;
+    let handler = GetCookiesCompletedHandler::create(Box::new(move |error_code, cookies| {
+        let mut out: Vec<pico_core::core::download::CookiePair> = Vec::new();
+        if error_code.is_ok() {
+            if let Some(list) = cookies {
+                // SAFETY: the cookie list and its entries are
+                // valid for the duration of this synchronous
+                // completion callback; every getter follows the
+                // established PWSTR pattern (`take_pwstr` takes
+                // ownership of the CoTaskMem string).
+                unsafe {
+                    let mut count: u32 = 0;
+                    if list.Count(&mut count).is_ok() {
+                        for i in 0..count {
+                            let Ok(cookie) = list.GetValueAtIndex(i) else {
+                                continue;
+                            };
+                            // One PWSTR getter, the established
+                            // pattern: a failed/null read is an
+                            // empty string, never a fatal error.
+                            macro_rules! cookie_str {
+                                ($getter:ident) => {{
+                                    let mut ptr = windows_core::PWSTR::null();
+                                    match cookie.$getter(&mut ptr) {
+                                        Ok(()) if !ptr.is_null() => webview2_com::take_pwstr(ptr),
+                                        _ => String::new(),
+                                    }
+                                }};
+                            }
+                            let name = cookie_str!(Name);
+                            if name.is_empty() {
+                                continue;
+                            }
+                            let value = cookie_str!(Value);
+                            let raw_domain = cookie_str!(Domain);
+                            let path = cookie_str!(Path);
+                            let mut secure = windows_core::BOOL::default();
+                            let _ = cookie.IsSecure(&mut secure);
+                            // AUDIT 0.32.1 (P2-4): the expiry
+                            // rides along (OLE DATE → unix ms in
+                            // core) so an already-deleted cookie
+                            // (Expires in the past is how servers
+                            // delete) is never replayed by the
+                            // download engine.
+                            let mut expires_raw: f64 = 0.0;
+                            let _ = cookie.Expires(&mut expires_raw);
+                            out.push(pico_core::core::download::CookiePair {
+                                name,
+                                value,
+                                domain: raw_domain
+                                    .strip_prefix('.')
+                                    .unwrap_or(&raw_domain)
+                                    .to_lowercase(),
+                                host_only: !raw_domain.starts_with('.'),
+                                secure: secure.as_bool(),
+                                path,
+                                expires_unix_ms: pico_core::core::download::cookie_expiry_unix_ms(
+                                    expires_raw,
+                                ),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        let _ = proxy.send_event(UserEvent::DownloadCookies {
+            tab,
+            token,
+            cookies: out,
+        });
+        Ok(())
+    }));
+    let uri_wide: Vec<u16> = uri.encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: the URI buffer outlives the call, the handler is
+    // the crate's own completed-handler object, and the manager
+    // is the live profile's cookie manager obtained above.
+    unsafe {
+        manager
+            .GetCookies(windows_core::PCWSTR(uri_wide.as_ptr()), &handler)
+            .map_err(|e| format!("GetCookies: {e}"))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn fetch_download_cookies(
+    _view: &WebView,
+    _uri: &str,
+    _tab: u64,
+    _token: u64,
+    _proxy: EventLoopProxy<UserEvent>,
+) -> Result<(), String> {
+    Err("cookie fetch is Windows-only".to_string())
+}
+
+/// Prepare one canonical downloads body for
+/// `core::dlcmd::parse_dl_body` (0.34). ONE transport
+/// adaptation lives here, in the app layer only — the core
+/// parser stays frozen:
+///
+/// - The chrome's `send()` wraps every body in the IPC
+///   envelope (`v` / `boot` / `req` ride alongside
+///   `kind`/`action`). Those three keys are chrome
+///   TRANSPORT framing, not downloads payload, so they are
+///   stripped before the strict parse (which denies
+///   unknown fields). Downloads-page bodies carry no
+///   envelope; stripping is a no-op for them.
+///
+/// The connection-count wire name is `conn` on every
+/// surface (the JS emitters' spelling; `core::dlcmd`'s
+/// parser expects exactly it since the 0.34 integration
+/// settlement) — no field renaming happens here.
+///
+/// A body that is not a JSON object passes through
+/// unchanged — the strict parser denies it there.
+fn normalize_dl_body(raw: &str) -> String {
+    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return raw.to_string();
+    };
+    let Some(obj) = v.as_object_mut() else {
+        return raw.to_string();
+    };
+    obj.remove("v");
+    obj.remove("boot");
+    obj.remove("req");
+    serde_json::to_string(&v).unwrap_or_else(|_| raw.to_string())
+}
+
+/// The chrome envelope identity (`boot`, `req`) of one raw
+/// chrome body, when it carries both: dl bodies ride the
+/// chrome transport, whose double-fire protection is the
+/// `(boot, req)` dedupe — the app checks it for dl bodies
+/// exactly as for `Command` envelopes (see
+/// `App::on_chrome_dl_body`).
+fn dl_envelope_id(raw: &str) -> Option<(String, u64)> {
+    let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let boot = v.get("boot")?.as_str()?.to_string();
+    let req = v.get("req")?.as_u64()?;
+    Some((boot, req))
+}
+
+/// Open the downloads FOLDER in Explorer (0.32): ShellExecuteW
+/// with the "open" verb on the folder path only — never a file,
+/// never a URL (the `download_open_folder` command carries no
+/// path; the folder is the manager's own resolved directory).
+#[cfg(windows)]
+fn open_folder_in_explorer(dir: &Path) {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
+    let verb = wide("open");
+    let file = wide(&dir.to_string_lossy());
+    // SAFETY: both buffers are NUL-terminated and outlive the
+    // call; no parent window, no parameters, no working
+    // directory override. (windows-sys 0.59 spells PCWSTR as a
+    // raw `*const u16`, so the buffers pass as plain pointers.)
+    let rc = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            verb.as_ptr(),
+            file.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    // ShellExecuteW reports success as a value above 32.
+    if (rc as isize) <= 32 {
+        log::error(&format!(
+            "downloads: folder open failed (ShellExecuteW rc {})",
+            rc as isize
+        ));
+    }
+}
+
+#[cfg(not(windows))]
+fn open_folder_in_explorer(_dir: &Path) {}
+
+/// Open one completed download FILE (0.33): ShellExecuteW with
+/// the "open" verb on the file path only. The path is the
+/// manager's own `completed_path` for a task id — never a
+/// page-supplied path, never a URL.
+#[cfg(windows)]
+fn open_file_in_explorer(file: &Path) {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
+    let verb = wide("open");
+    let file_w = wide(&file.to_string_lossy());
+    // SAFETY: both buffers are NUL-terminated and outlive the
+    // call; no parent window, no parameters, no working
+    // directory override.
+    let rc = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            verb.as_ptr(),
+            file_w.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    // ShellExecuteW reports success as a value above 32.
+    if (rc as isize) <= 32 {
+        log::error(&format!(
+            "downloads: file open failed (ShellExecuteW rc {})",
+            rc as isize
+        ));
+    }
+}
+
+#[cfg(not(windows))]
+fn open_file_in_explorer(_file: &Path) {}
+
+/// Probe: can Pico's downloads live beside the exe? Mirrors
+/// `core::state::probe_exe_dir`'s idea for the `Downloads`
+/// subfolder (0.32): create it, then round-trip a temp file
+/// including a RENAME (state saves and `.part` completion are
+/// rename-shaped work). Any failure is simply "not writable" —
+/// `core::download::resolve_downloads_dir` then falls back to
+/// the user's Downloads folder.
+fn probe_downloads_dir(exe_dir: &Path) -> bool {
+    let dir = exe_dir.join("Downloads");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return false;
+    }
+    let probe = dir.join(format!(".pico-probe-{}", std::process::id()));
+    let probe2 = dir.join(format!(".pico-probe-{}-renamed", std::process::id()));
+    let ok = std::fs::write(&probe, b"pico").is_ok() && std::fs::rename(&probe, &probe2).is_ok();
+    let _ = std::fs::remove_file(&probe);
+    let _ = std::fs::remove_file(&probe2);
+    ok
+}
 
 /// The installed WebView2 runtime version (e.g. "141.0.3485.0"),
 /// queried from the OS before any environment exists — wry wraps
@@ -655,7 +1448,7 @@ fn split_https_url(url: &str) -> Option<(String, u16, String)> {
 /// third-party HTTP code enters the tree. The transport is
 /// deliberately narrow: it exists only for the four canonical
 /// list URLs in `core::lists`, sends no cookies and no custom
-/// headers (the session's plain `Pico/0.31` User-Agent only),
+/// headers (the session's plain `Pico/0.40.1` User-Agent only),
 /// follows at most 5 redirects MANUALLY (automatic following
 /// is switched off, so the https→https-only policy is enforced
 /// here, hop by hop), and enforces the caller's size cap
@@ -685,7 +1478,7 @@ fn winhttp_get(url: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
             split_https_url(&current).ok_or_else(|| format!("not an https URL: {current}"))?;
         let host_w = wide(&host);
         let path_w = wide(&path);
-        let ua_w = wide("Pico/0.31");
+        let ua_w = wide("Pico/0.40.1");
         // SAFETY: every handle below is created by WinHTTP and
         // immediately owned by a WinHttpHandle (closed on drop);
         // all string pointers reference the NUL-terminated wide
@@ -711,12 +1504,7 @@ fn winhttp_get(url: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
                 &decomp as *const u32 as *const std::ffi::c_void,
                 4,
             );
-            let connect = WinHttpHandle(WinHttpConnect(
-                session.0,
-                host_w.as_ptr(),
-                port,
-                0,
-            ));
+            let connect = WinHttpHandle(WinHttpConnect(session.0, host_w.as_ptr(), port, 0));
             if connect.0.is_null() {
                 return Err(last_err("WinHttpConnect failed"));
             }
@@ -742,16 +1530,7 @@ fn winhttp_get(url: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
                 &never as *const u32 as *const std::ffi::c_void,
                 4,
             );
-            if WinHttpSendRequest(
-                request.0,
-                std::ptr::null(),
-                0,
-                std::ptr::null(),
-                0,
-                0,
-                0,
-            ) == 0
-            {
+            if WinHttpSendRequest(request.0, std::ptr::null(), 0, std::ptr::null(), 0, 0, 0) == 0 {
                 return Err(last_err("WinHttpSendRequest failed"));
             }
             if WinHttpReceiveResponse(request.0, std::ptr::null_mut()) == 0 {
@@ -1412,11 +2191,102 @@ enum UserEvent {
         tab: u64,
         source: ActionSource,
     },
-    /// A download was requested and denied (Pico has no downloads
-    /// manager by design; see SECURITY.md).
+    /// A Downloads-page action request (0.33; body shape
+    /// 0.34), from the page's IPC channel: the raw canonical
+    /// `{"kind":"dl", ...}` body, forwarded undecided.
+    /// Decided centrally by `core::dlcmd::parse_dl_body` +
+    /// the coordinator in `on_downloads_page_body` — the
+    /// handler that produces this event makes no decisions.
+    DownloadsAction {
+        tab: u64,
+        body: String,
+    },
+    /// A download was requested by the CHROME webview and denied
+    /// (0.32: content tabs route to the download manager via
+    /// [`UserEvent::DownloadStarting`] instead; the chrome serves
+    /// only Pico's internal pages, so a download attempt there is
+    /// still a flat denial — its event arm now only logs. No tab
+    /// field: the chrome is not a tab, and the pre-0.32 dummy
+    /// `tab: 0` carried no information).
     DownloadBlocked {
+        uri: String,
+    },
+    /// A content tab asked WebView2 to download (0.32): the wry
+    /// handler cancelled it (returning false always) and carries
+    /// the URI plus the suggested file name (the handler path's
+    /// file name, lossy; empty when it had none). The event arm
+    /// validates the URL, registers a pending download, and
+    /// starts the cookie fetch from that tab's webview.
+    DownloadStarting {
         tab: u64,
         uri: String,
+        suggested: String,
+    },
+    /// A content webview gained focus (0.32.4): the user
+    /// clicked (or tabbed) into the page — every chrome
+    /// panel closes. Sent by the GotFocus registration in
+    /// build_content_view; the arm is the panel law's
+    /// outside-interaction funnel.
+    ContentFocus {
+        tab: u64,
+    },
+    /// Ctrl+J was pressed while a CONTENT webview held
+    /// focus (0.35, WS5): sent by the AcceleratorKeyPressed
+    /// registration in build_content_view — through 0.34
+    /// the chord only worked when the CHROME document had
+    /// focus (its own key handler), so Ctrl+J from the page
+    /// did nothing. The arm opens the downloads page
+    /// through the same `App::open_downloads_page` the
+    /// coordinator's OpenDownloadsPage effect uses.
+    DownloadsPageShortcut,
+    /// A content page raised WebView2's context-menu request
+    /// (0.34.1): the registration handler already suppressed
+    /// the stock menu (SetHandled, unconditionally) and
+    /// carries the target facts plus the event's raw location
+    /// here, undecided — the event arm computes the anchor
+    /// (`core::ctxmenu::resolve_anchor`), the items
+    /// (`core::ctxmenu::menu_items`) and the card position
+    /// (`core::layout::ctx_menu_pos`), and stores the one
+    /// open menu in App state.
+    ContextMenu {
+        tab: u64,
+        target: pico_core::core::ctxmenu::CtxTarget,
+        location: (i32, i32),
+    },
+    /// A captured download's cookies arrived from its tab's
+    /// WebView2 cookie manager (0.32; token shape 0.34).
+    /// Whichever of this and
+    /// [`UserEvent::DownloadCookiesTimeout`] arrives first
+    /// lands the capture in the coordinator; the loser is
+    /// logged and ignored there. `tab` rides along because
+    /// the coordinator's landing revalidation needs the
+    /// tab's CURRENT facts (alive / navigation epoch /
+    /// only-tab), which only the app can supply.
+    DownloadCookies {
+        tab: u64,
+        token: u64,
+        cookies: Vec<pico_core::core::download::CookiePair>,
+    },
+    /// A captured download's cookie fetch did not answer in
+    /// time (0.32; token shape 0.34): the task is created
+    /// with no cookies rather than not at all.
+    DownloadCookiesTimeout {
+        tab: u64,
+        token: u64,
+    },
+    /// The download manager's visible state changed (0.32):
+    /// emitted by the manager on every transition and (throttled)
+    /// on progress; the arm only re-pushes the snapshot — the
+    /// signature gate decides whether anything is sent.
+    DownloadsChanged,
+    /// The download notice's display window ended (0.32.3;
+    /// coordinator-owned 0.34): fired by the one-shot timer
+    /// thread the app arms when a coordinator notice opens
+    /// (the cookie timeout's pattern). Carries the notice's
+    /// sequence number — a newer notice is never retired by
+    /// an older notice's timer (the coordinator checks).
+    DownloadNoticeExpired {
+        seq: u64,
     },
     DroppedPaths(Vec<PathBuf>),
     ServicesUpdated(ScanOutcome),
@@ -1489,6 +2359,26 @@ struct Tab {
     /// Creation failure reason, when `view` is `None`.
     failed: Option<String>,
     is_start: bool,
+    /// True when this tab is the Downloads page (0.33):
+    /// `pico://downloads`, classified live through
+    /// `live_downloads_tabs` like `is_start` is through its
+    /// set.
+    is_downloads: bool,
+    /// The tab's navigation epoch (0.34): the count of real
+    /// page commits this tab has applied, bumped ONLY at
+    /// the single commit point in `apply_url_event`
+    /// (`HistEffect::Commit`) — never for a swallowed
+    /// download finish, which returns before the reducer
+    /// runs. A download capture records the epoch at
+    /// capture time; the coordinator revalidates the tab's
+    /// fate against it at landing — a tab whose epoch moved
+    /// has committed a real page since and is the user's
+    /// tab now. (This is 0.33's `commits` counter under its
+    /// coordinator name; the 0.33 navigation guard and
+    /// finish-swallow marker it worked beside are gone —
+    /// the coordinator's capture records own that state
+    /// now.)
+    nav_epoch: u64,
     /// The tab's current URL — a MIRROR of `urlstate`'s live
     /// value (AUDIT V26, defect D7). Every write goes through
     /// the reducer (`App::apply_url_event`); the snapshot and
@@ -1524,6 +2414,49 @@ struct Tab {
     /// document's load; a finish WITHOUT one (orphan) still
     /// clears, as every commit did through 0.30.
     commit_started: bool,
+    /// True when this tab was opened by a PAGE (the
+    /// new-window/popup adoption path), not by the user
+    /// (0.32.4). Runtime-only: tabs are rebuilt every
+    /// session, nothing persists it. Cleared the moment
+    /// the tab commits a real page of its own — from then
+    /// on it is a normal tab.
+    adopted: bool,
+    /// The current unsettled navigation's URL chain
+    /// (0.35, WS2): every URL the in-flight navigation
+    /// has occupied — its initial target (the
+    /// `CommitStart` URL) plus each redirect hop observed
+    /// through SourceChanged while the tab is loading.
+    /// Maintained in `apply_url_event` (see its chain
+    /// block for the event-by-event rule): a CommitStart
+    /// RESETS it to that Start's URL, a Source URL
+    /// observed while loading APPENDS (consecutive
+    /// duplicates deduped), and a real CommitFinish
+    /// CLEARS it — the navigation settled into a page, so
+    /// the record must hold nothing from it for the next
+    /// navigation. A download capture assembles its
+    /// `CaptureFacts.chain` from this record: through
+    /// 0.34 the capture carried only the post-redirect
+    /// URI while the tab's live URL stayed on the
+    /// pre-redirect hop, and the fate gate's exact match
+    /// between the two could never pass for a redirected
+    /// navigation.
+    pending_chain: Vec<String>,
+    /// The tab's `adopted` flag AS OF the pending
+    /// navigation's start (0.35, WS2): snapshotted when
+    /// the chain resets (and when its first Source hop is
+    /// recorded). A real Commit CLEARS `adopted`, so a
+    /// captured navigation whose own Finished landed
+    /// BEFORE the capture (the WebView2Feedback-#5172
+    /// shape) has already cleared the live flag when the
+    /// capture reads its facts — this snapshot is where
+    /// `on_download_starting` recovers the origin the
+    /// navigation actually started with. A CommitFinish
+    /// clears `pending_chain` but deliberately NOT this
+    /// snapshot: it still describes the navigation that
+    /// just settled, which is exactly the one a
+    /// just-late capture belongs to. The next
+    /// navigation's start overwrites it.
+    pending_adopted: bool,
 }
 
 impl Tab {
@@ -1553,8 +2486,43 @@ struct App {
     services_count: usize,
     /// Non-qualifying local listeners (AUDIT V14-5 aggregate).
     others_count: usize,
-    blocked_downloads: usize,
-    download_notice: String,
+    /// The downloads coordinator (0.34): the pure core state
+    /// machine that owns downloads coordination — capture
+    /// triage and tab fate, the cookie race, the notice
+    /// machine, command dispatch — over the real manager
+    /// through the `dlbackend` adapter. The app feeds it
+    /// events and executes the `DlEffect`s it returns; the
+    /// 0.32–0.33 app-side patch stack it replaces (pending
+    /// downloads, the notice fields, the status-diff map)
+    /// is gone. Constructed once at startup with the
+    /// resolved downloads folder (inside the manager) and
+    /// the persisted downloads settings.
+    dl: Coordinator<crate::dlbackend::ManagerBackend>,
+    /// Whether the Downloads panel is open (0.32): same overlay
+    /// mechanics as Teleport's and the picker's panels, and
+    /// mutually exclusive with them — opening one closes the
+    /// others. App-owned UI state; the coordinator only
+    /// REQUESTS opens/closes through its effects.
+    downloads_panel_open: bool,
+    /// The coordinator notice sequence the app last armed an
+    /// expiry timer for (0.34): a notice is armed exactly
+    /// once per sequence, when it is first seen open after
+    /// executing effects — an older timer can never retire
+    /// a newer notice because the coordinator seq-checks
+    /// expiry itself.
+    dl_notice_armed_seq: u64,
+    /// Signature of the last Downloads-page push (0.33):
+    /// (snapshot version, settings tuple) hashed — a
+    /// gated-out push costs one hash, like the chrome
+    /// snapshot's. (0.35.1: theme left this hash — data
+    /// pushes no longer carry theme at all.)
+    last_dl_page_sig: u64,
+    /// Signature of the last Downloads-card push to the
+    /// start tabs (0.35.1): a hash of the serialized card
+    /// JSON, so `push_state` re-sends the card only when
+    /// the card itself changed — speed ticks move it at
+    /// the popover's cadence, idle pushes cost one hash.
+    last_dl_card_sig: u64,
     /// Signature of the last snapshot actually sent (AUDIT V28
     /// A1-M1): a cheap hash over the snapshot's primitive fields,
     /// computed BEFORE any snapshot construction, so a gated-out
@@ -1616,6 +2584,13 @@ struct App {
     /// overlay mechanics as Teleport's panel, and mutually
     /// exclusive with it — opening one closes the other.
     palette_panel_open: bool,
+    /// Pico's own context menu (0.34.1): the one open menu's
+    /// stored state, or None. An overlay like the panels —
+    /// while it is open the chrome rect grows to contain the
+    /// card (see chrome_phys) — and mutually exclusive with
+    /// them: opening it closes every panel through the one
+    /// funnel, and opening any panel clears it.
+    context_menu: Option<CtxMenuState>,
     /// One-shot address-focus hint (AUDIT V26, defect D4): set
     /// when a fresh tab is created via the new-tab paths (the +
     /// button, Ctrl+T, the startup tab, a chrome (re)creation
@@ -1631,24 +2606,46 @@ struct App {
     /// moment. (Through v25 the handlers captured `is_start` at
     /// build time, which made conversion impossible.)
     live_start_tabs: std::sync::Arc<Mutex<std::collections::HashSet<u64>>>,
+    /// The live set of Downloads-page tab ids (0.33): the
+    /// mirror of `live_start_tabs` for `pico://downloads`,
+    /// shared with the WebView navigation / IPC handlers so
+    /// their downloads classification is live, not the
+    /// build-time flag.
+    live_downloads_tabs: std::sync::Arc<Mutex<std::collections::HashSet<u64>>>,
     /// Last layout signature logged (AUDIT V26, defect D2): the
     /// layout witness line is written when the computed geometry
     /// changes, so pico.log can answer "what rects did the shell
     /// actually apply" without logging every pass.
     last_layout_sig: String,
-    /// One-shot shell navigation expectation (AUDIT 0.31,
-    /// A6-F2): `(tab_id, exact URL)` the shell itself most
-    /// recently submitted for a tab from USER-TYPED text. A
-    /// same-tab navigation to a credentialed (userinfo) URL is
-    /// allowed only when it matches this exactly; the
-    /// expectation is consumed by the first navigation event
-    /// for that tab, matched or not. Page-initiated
-    /// credentialed navigations never set it, so they never
-    /// match — typed credentialed URLs stay allowed as the
-    /// user's own act, page-minted ones are denied. Shared
-    /// (like `live_start_tabs`) because the synchronous
-    /// navigation handlers — not the event loop — consume it.
-    expected_nav: std::sync::Arc<Mutex<Option<(u64, String)>>>,
+    /// One-shot shell navigation expectations (AUDIT 0.31,
+    /// A6-F2), keyed PER TAB (AUDIT 0.32.1, P3-3: through
+    /// 0.32 a single global slot meant arming tab B silently
+    /// disarmed tab A): `tab_id → exact URL` the shell itself
+    /// most recently submitted for that tab from USER-TYPED
+    /// text. A same-tab navigation to a credentialed
+    /// (userinfo) URL is allowed only when it matches this
+    /// exactly; the expectation is consumed by the first
+    /// navigation event for that tab, matched or not.
+    /// Page-initiated credentialed navigations never set it,
+    /// so they never match — typed credentialed URLs stay
+    /// allowed as the user's own act, page-minted ones are
+    /// denied. Shared (like `live_start_tabs`) because the
+    /// synchronous navigation handlers — not the event loop —
+    /// consume it.
+    expected_nav: std::sync::Arc<Mutex<std::collections::HashMap<u64, String>>>,
+    /// Credentialed-URL ADOPTION markers (AUDIT 0.32.1,
+    /// P3-1): `tab_id → exact URL` set by the navigation
+    /// handler at the moment it ALLOWS a userinfo navigation
+    /// on the expectation match. `on_page_load` re-checks
+    /// only the scheme allowlist, so without this marker a
+    /// credentialed URL arriving via a server redirect
+    /// (which may not re-run the navigation handler as a
+    /// fresh user gesture) would be ADOPTED into tab state /
+    /// the address bar without ever passing the expectation
+    /// gate. A load carrying userinfo is adopted only when
+    /// it equals the marker; a load without userinfo clears
+    /// the tab's marker.
+    userinfo_adopt: std::sync::Arc<Mutex<std::collections::HashMap<u64, String>>>,
 }
 
 /// The Teleport payload as the chrome consumes it (v25): the
@@ -1706,6 +2703,57 @@ fn themes_snap() -> &'static Vec<ThemeSnap> {
     })
 }
 
+/// Pico's own context menu state (0.34.1): the ONE open
+/// menu — the tab it was raised on, the target facts it was
+/// built from (its picks execute against these stored facts,
+/// not against whatever the page did since), its window-DIP
+/// top-left as resolved by `core::layout::ctx_menu_pos`, and
+/// the item rows `core::ctxmenu::menu_items` decided.
+/// App-owned UI state like the panels': it lives in exactly
+/// one place, closes through the one panel funnel, and any
+/// panel opening supersedes it (as it supersedes them).
+struct CtxMenuState {
+    tab: u64,
+    target: pico_core::core::ctxmenu::CtxTarget,
+    x: f64,
+    y: f64,
+    items: Vec<pico_core::core::ctxmenu::CtxItem>,
+}
+
+/// The context menu as the chrome consumes it (0.34.1): the
+/// card's window-DIP position plus the item rows — the
+/// chrome draws exactly this and reports picks back by id.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct CtxMenuSnap {
+    x: f64,
+    y: f64,
+    items: Vec<CtxItemSnap>,
+}
+
+/// One context-menu row as the chrome consumes it (0.34.1):
+/// the pick id (empty for a separator), the frozen label
+/// and shortcut from core::ctxmenu's table, the enabled
+/// gate, and the separator flag.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct CtxItemSnap {
+    id: String,
+    label: String,
+    shortcut: Option<String>,
+    enabled: bool,
+    sep: bool,
+}
+
+/// The context menu card's height for a stored item vec
+/// (0.34.1): item rows and separator rows counted separately
+/// — core::layout prices them differently.
+fn ctx_menu_h_for(items: &[pico_core::core::ctxmenu::CtxItem]) -> f64 {
+    let rows = items.iter().filter(|i| !i.sep).count();
+    let seps = items.iter().filter(|i| i.sep).count();
+    layout::ctx_menu_h(rows, seps)
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Snap {
@@ -1729,8 +2777,19 @@ struct Snap {
     can_back: bool,
     can_forward: bool,
     services: usize,
-    blocked_downloads: usize,
-    download_notice: String,
+    /// THE downloads data shape (0.34): the coordinator's
+    /// snapshot, serialized with its frozen field names
+    /// (`{version, tasks, active_count, failed_unseen,
+    /// settings, notice, card}` — `card` added 0.35.1) —
+    /// the same shape the downloads page's init/push JSON
+    /// carries. Plus the panel's open state, which stays
+    /// app-owned like the other panels'.
+    downloads: pico_core::core::dlcoord::DlSnapshot,
+    downloads_open: bool,
+    /// Pico's own context menu (0.34.1), when one is open:
+    /// the chrome draws the card from this and reports picks
+    /// back as ctx_pick / ctx_close commands.
+    context_menu: Option<CtxMenuSnap>,
     active_error: String,
     /// Shield state (AUDIT V21): on/off, requests blocked this
     /// session, and the active tab's own count.
@@ -1783,21 +2842,339 @@ impl App {
         phys_to_rect(content)
     }
 
-    /// Either centered panel (Teleport's or the theme
-    /// picker's) extends the chrome rect; they are mutually
-    /// exclusive, so one bool covers both (AUDIT V27-A2).
+    /// Any centered panel (Teleport's, the theme picker's, or
+    /// Downloads') extends the chrome rect; they are mutually
+    /// exclusive, so one bool covers all three (AUDIT V27-A2).
     fn any_panel_open(&self) -> bool {
-        self.teleport_panel_open || self.palette_panel_open
+        self.teleport_panel_open || self.palette_panel_open || self.downloads_panel_open
+    }
+
+    /// Whether the coordinator's current download notice is
+    /// open (0.34): the toast's open state lives in the
+    /// coordinator's snapshot now — this is its one reader
+    /// for the layout/geometry paths.
+    fn dl_notice_open(&self) -> bool {
+        self.dl
+            .snapshot()
+            .notice
+            .as_ref()
+            .map(|n| n.open)
+            .unwrap_or(false)
+    }
+
+    /// Retire the download notice WITHOUT the toast-click
+    /// routing, GUARDED (0.35, WS5): the coordinator's
+    /// `retire_notice_unless_failed` — panel open/close
+    /// gestures (close_all_panels, the Teleport and Palette
+    /// arms) are not the user looking at a failure, so an
+    /// open Failed notice survives them. Genuine exits keep
+    /// the coordinator's hard retire and never come through
+    /// here: the notice click and the `DismissNotice`
+    /// dispatch (`notice_clicked` / `Coordinator::dispatch`),
+    /// the downloads panel opening (`panel_opened`), the
+    /// downloads page visit (`page_visited`) and expiry
+    /// (`notice_expired`).
+    fn retire_notice_unless_failed(&mut self) {
+        let effects = self.dl.retire_notice_unless_failed();
+        self.exec_dl_effects(effects);
+    }
+
+    /// Close every chrome overlay (0.32.4): the one funnel
+    /// every outside-interaction signal uses — a content
+    /// webview gaining focus, the window losing focus.
+    /// Mirrors each panel's own Close command semantics
+    /// (Teleport's payload retires with its panel), retires
+    /// the download toast, and pushes only when something
+    /// actually changed, so a focus event with nothing open
+    /// is a true no-op.
+    fn close_all_panels(&mut self) {
+        let mut changed = false;
+        if self.teleport_panel_open {
+            self.teleport = None;
+            self.teleport_version += 1;
+            self.teleport_panel_open = false;
+            changed = true;
+        }
+        if self.palette_panel_open {
+            self.palette_panel_open = false;
+            changed = true;
+        }
+        if self.downloads_panel_open {
+            self.downloads_panel_open = false;
+            changed = true;
+        }
+        // Pico's own context menu (0.34.1) rides the same
+        // funnel: a click into the page or a window focus
+        // loss dismisses it with the panels.
+        if self.context_menu.take().is_some() {
+            changed = true;
+        }
+        let notice_open = self.dl_notice_open();
+        if changed {
+            self.layout();
+        }
+        self.retire_notice_unless_failed();
+        if changed || notice_open {
+            self.push_state(false);
+        }
+    }
+
+    /// A content page's context-menu request arrived
+    /// (0.34.1): the stock menu is already suppressed by the
+    /// registration handler; here the event loop owns the
+    /// replacement. Every open panel (and any existing menu)
+    /// closes first through the one funnel — the menu
+    /// supersedes them, as they supersede it. The item model,
+    /// the anchor resolution and the card position are core's
+    /// pure functions; this arm only supplies the live facts
+    /// (the tab's history gates, the scale, the window size,
+    /// the real cursor position) and then focuses the chrome,
+    /// so the menu's keyboard dismissal engages
+    /// deterministically (Escape is the chrome's, and a click
+    /// back into the page reaches the GotFocus close funnel).
+    fn on_context_menu(
+        &mut self,
+        tab: u64,
+        target: pico_core::core::ctxmenu::CtxTarget,
+        location: (i32, i32),
+    ) {
+        let Some(t) = self.tabs.iter().find(|t| t.id == tab) else {
+            return; // the tab closed while the event was queued
+        };
+        let can_back = t.hist.can_go_back();
+        let can_forward = t.hist.can_go_forward();
+        self.close_all_panels();
+        let scale = self.window.scale_factor();
+        let cursor = cursor_client_dip(&self.window, scale);
+        let anchor = pico_core::core::ctxmenu::resolve_anchor(
+            (location.0 as f64, location.1 as f64),
+            scale,
+            layout::SOLID_H,
+            cursor,
+        );
+        let items = pico_core::core::ctxmenu::menu_items(&target, can_back, can_forward);
+        let menu_h = ctx_menu_h_for(&items);
+        let inner = self.window.inner_size();
+        let (x, y) = layout::ctx_menu_pos(
+            inner.width as f64 / scale,
+            inner.height as f64 / scale,
+            anchor,
+            menu_h,
+        );
+        // One log line: the kind, the item count, and the
+        // page in redacted form only (redaction law) — the
+        // link/source URLs never reach the log at all.
+        log::info(&format!(
+            "context menu: tab={tab} kind={:?} items={} page={}",
+            target.kind,
+            items.len(),
+            redact_url(&target.page_url)
+        ));
+        self.context_menu = Some(CtxMenuState {
+            tab,
+            target,
+            x,
+            y,
+            items,
+        });
+        self.layout();
+        self.push_state(true);
+        let _ = self.chrome.focus();
+    }
+
+    /// Execute one context-menu pick (0.34.1): the menu
+    /// closes first (its state is taken, the chrome rect
+    /// restored by the layout pass), then the id executes
+    /// against the STORED tab and target — the facts the
+    /// menu was built from. The nav verbs act on the active
+    /// tab, which is the right-clicked tab by construction
+    /// (only the active tab's view is visible, so only it
+    /// could raise the menu); everything else acts on the
+    /// stored tab explicitly, and a pick whose tab has since
+    /// closed stops after the close. The pick is logged by
+    /// id only — URLs never ride the log raw (redaction law).
+    fn on_ctx_pick(&mut self, id: &str) {
+        let Some(state) = self.context_menu.take() else {
+            return;
+        };
+        self.layout();
+        log::info(&format!("context menu: pick id={id} tab={}", state.tab));
+        if self.tab_index(state.tab).is_none() {
+            self.push_state(false);
+            return;
+        }
+        // AUDIT 0.40.1: a pick may only name an item this menu
+        // actually offered AND enabled. The IPC gate checks the
+        // global whitelist; without this second check a pick
+        // naming a whitelisted-but-unoffered (or greyed) item —
+        // e.g. Paste with no clipboard text, Back with no
+        // history — would still execute.
+        if !state.items.iter().any(|i| i.id == id && i.enabled) {
+            log::info(&format!(
+                "context menu: pick id={id} not offered/enabled; ignored"
+            ));
+            self.push_state(false);
+            return;
+        }
+        fn find_view(tabs: &[Tab], id: u64) -> Option<&WebView> {
+            tabs.iter().find(|t| t.id == id).and_then(|t| t.view())
+        }
+        let stored_tab = state.tab;
+        match id {
+            "back" => self.go(false),
+            "forward" => self.go(true),
+            "reload" => self.reload_active(),
+            "open_link" => {
+                if let Some(u) = &state.target.link_url {
+                    if is_web_url(u) {
+                        let u = u.clone();
+                        self.add_tab(&u, false, true);
+                    }
+                }
+            }
+            "open_image" => {
+                if let Some(u) = &state.target.source_url {
+                    if is_web_url(u) {
+                        let u = u.clone();
+                        self.add_tab(&u, false, true);
+                    }
+                }
+            }
+            "copy_link" => {
+                if let Some(u) = &state.target.link_url {
+                    let _ = clipboard_set_text(u);
+                }
+            }
+            "copy_image" => {
+                if let Some(u) = &state.target.source_url {
+                    let _ = clipboard_set_text(u);
+                }
+            }
+            "download_link" => {
+                // The proven capture entry, verbatim: the
+                // coordinator reads the tab's LIVE url (the
+                // page, not the file URL) as the capture's
+                // live_url, so this capture's tab fate is None
+                // by construction, and its referer, cookies
+                // and host-scoping come from the same triage
+                // as a browser-initiated download. 0.35: the
+                // capture is flagged as a context-menu
+                // capture, so its chain is the file URL alone
+                // (see on_download_starting) — the None fate
+                // survives the chain gate for the same
+                // reason: the page being read is not in it.
+                if let Some(u) = state.target.link_url.clone() {
+                    self.on_download_starting(state.tab, u, String::new(), true);
+                }
+            }
+            "download_image" => {
+                if let Some(u) = state.target.source_url.clone() {
+                    self.on_download_starting(state.tab, u, String::new(), true);
+                }
+            }
+            "copy" => {
+                if let Some(v) = find_view(&self.tabs, stored_tab) {
+                    let _ = v.evaluate_script("document.execCommand('copy')");
+                }
+            }
+            "cut" => {
+                if let Some(v) = find_view(&self.tabs, stored_tab) {
+                    let _ = v.evaluate_script("document.execCommand('cut')");
+                }
+            }
+            "select_all" => {
+                if let Some(v) = find_view(&self.tabs, stored_tab) {
+                    let _ = v.evaluate_script("document.execCommand('selectAll')");
+                }
+            }
+            "paste" => {
+                if let Some(text) = clipboard_get_text().filter(|s| !s.is_empty()) {
+                    if let Some(v) = find_view(&self.tabs, stored_tab) {
+                        // Clipboard text is page-bound input: it
+                        // crosses as a JSON string literal, never
+                        // interpolated raw.
+                        let arg = serde_json::to_string(&text).unwrap_or_default();
+                        let _ = v.evaluate_script(&format!(
+                            "document.execCommand('insertText', false, {arg})"
+                        ));
+                    }
+                }
+            }
+            "inspect" => {
+                if let Some(v) = find_view(&self.tabs, stored_tab) {
+                    v.open_devtools();
+                }
+            }
+            _ => {
+                log::info(&format!("context menu: unknown pick id ignored: {id}"));
+            }
+        }
+        self.push_state(false);
+    }
+
+    /// The chrome rect in device pixels: the downloads popover
+    /// (0.32.2) sizes its extension from the live task count —
+    /// a compact dropdown needs far less than the centered
+    /// panels' fixed extension — while Teleport/palette keep
+    /// the fixed panel extension and the closed state is the
+    /// plain tiling.
+    fn chrome_phys(&self) -> layout::PhysRect {
+        let size = self.window.inner_size();
+        let scale = self.window.scale_factor();
+        if let Some(state) = &self.context_menu {
+            // Pico's own context menu (0.34.1) is the FIRST
+            // claim on the chrome rect: the menu supersedes
+            // every panel (opening it closed them all), and
+            // its card hangs from its stored position — the
+            // extension is exactly what the card's bottom
+            // needs past the chrome's own height.
+            let menu_h = ctx_menu_h_for(&state.items);
+            layout::chrome_rect_with_extra(
+                size.width,
+                size.height,
+                scale,
+                layout::ctx_menu_extra(state.y, menu_h),
+            )
+        } else if self.downloads_panel_open {
+            layout::chrome_rect_with_extra(size.width, size.height, scale, self.dl_popover_h())
+        } else if self.any_panel_open() {
+            layout::chrome_rect_with_panel(size.width, size.height, scale, self.any_panel_open())
+        } else if self.dl_notice_open() {
+            // The download toast (0.32.3): a pill under the
+            // toolbar needs the same kind of extension as a
+            // panel — without it the pill would paint below
+            // the chrome HWND and be clipped away entirely.
+            // Panels are checked first: their extension is
+            // the larger claim and wins while one is open
+            // (a notice is also never born open over a panel,
+            // and opening a panel retires it).
+            layout::chrome_rect_with_extra(
+                size.width,
+                size.height,
+                scale,
+                layout::downloads_toast_h(),
+            )
+        } else {
+            layout::tile(size.width, size.height, scale).0
+        }
     }
 
     fn chrome_rect(&self) -> Rect {
-        let size = self.window.inner_size();
-        phys_to_rect(layout::chrome_rect_with_panel(
-            size.width,
-            size.height,
-            self.window.scale_factor(),
-            self.any_panel_open(),
-        ))
+        phys_to_rect(self.chrome_phys())
+    }
+
+    /// The popover extension the CURRENT snapshot implies:
+    /// the single pricing path for the downloads branch of
+    /// `chrome_phys`, factored out so `exec_dl_effects` can
+    /// notice the price moving while the panel is open
+    /// (AUDIT 0.34.2: task/error-row changes used to leave
+    /// the chrome rect at the old height indefinitely when
+    /// no notice open-state flip happened in the same batch).
+    fn dl_popover_h(&self) -> f64 {
+        let views = self.dl.snapshot().tasks;
+        let rows = views.len();
+        let errs = views.iter().filter(|v| v.error.is_some()).count();
+        layout::downloads_popover_h(rows, errs)
     }
 
     /// One layout pass: chrome on top, active content below it. The
@@ -1815,12 +3192,7 @@ impl App {
         {
             let inner = self.window.inner_size();
             let scale = self.window.scale_factor();
-            let cr = layout::chrome_rect_with_panel(
-                inner.width,
-                inner.height,
-                scale,
-                self.any_panel_open(),
-            );
+            let cr = self.chrome_phys();
             let (_, xr) = layout::tile(inner.width, inner.height, scale);
             let sig = format!(
                 "layout: win={}x{} scale={:.2} chrome=({},{},{}x{}) content=({},{},{}x{}) panel={}",
@@ -1835,10 +3207,16 @@ impl App {
                 xr.y,
                 xr.w,
                 xr.h,
-                if self.teleport_panel_open {
+                if self.context_menu.is_some() {
+                    "contextmenu"
+                } else if self.teleport_panel_open {
                     "teleport"
                 } else if self.palette_panel_open {
                     "palette"
+                } else if self.downloads_panel_open {
+                    "downloads"
+                } else if self.dl_notice_open() {
+                    "toast"
                 } else {
                     "closed"
                 },
@@ -1886,10 +3264,17 @@ impl App {
         // the build-time flag — a start tab that converts in
         // place leaves the set and its handler follows.
         let live_start = self.live_start_tabs.clone();
+        // 0.33: the same live classification for the
+        // Downloads page (see `live_downloads_tabs` on App).
+        let live_downloads = self.live_downloads_tabs.clone();
         // AUDIT 0.31 (A6-F2): the one-shot credentialed-nav
         // expectation, consumed by this handler (see the
         // `expected_nav` field on App).
         let expected_nav = self.expected_nav.clone();
+        // AUDIT 0.32.1 (P3-1): the adoption marker this
+        // handler sets when it allows a credentialed URL (see
+        // the `userinfo_adopt` field on App).
+        let userinfo_adopt = self.userinfo_adopt.clone();
 
         let rect = self.content_rect();
         let protocol = pico_protocol_handler(self.shared.clone());
@@ -1908,6 +3293,15 @@ impl App {
             .with_initialization_script_for_main_only(NAV_OBSERVER_SCRIPT, true)
             .with_ipc_handler(move |request: Request<String>| {
                 let body = request.body();
+                // AUDIT 0.40.1 (the A1-L5 symmetry fix): drop
+                // oversize bodies HERE, like the chrome handler
+                // does. Every parser on this channel caps at or
+                // below MAX_NAV_BODY_BYTES (16 KB), so a larger
+                // body can only be waste — pre-0.40.1 it was
+                // cloned and queued before any cap saw it.
+                if body.len() > pico_core::core::ipc::MAX_NAV_BODY_BYTES {
+                    return;
+                }
                 // Start-page actions (AUDIT V17-1) share this IPC
                 // channel with navigation notes; the two families
                 // are disjoint by their `kind` field. An action
@@ -1917,6 +3311,19 @@ impl App {
                     let _ = action_proxy.send_event(UserEvent::StartAction {
                         tab: id,
                         source: ActionSource::Ipc(body.clone()),
+                    });
+                    return;
+                }
+                // Downloads-page actions (0.33; canonical
+                // body 0.34) share this channel too: disjoint
+                // by `kind` ("dl"), forwarded undecided — the
+                // gate is `core::dlcmd::page_gate` + the
+                // frozen parser, applied centrally in
+                // `on_downloads_page_body`.
+                if pico_core::core::dlcmd::looks_like_dl_body(body) {
+                    let _ = action_proxy.send_event(UserEvent::DownloadsAction {
+                        tab: id,
+                        body: body.clone(),
                     });
                     return;
                 }
@@ -1968,6 +3375,10 @@ impl App {
                     .lock()
                     .map(|set| set.contains(&id))
                     .unwrap_or(false);
+                let is_downloads = live_downloads
+                    .lock()
+                    .map(|set| set.contains(&id))
+                    .unwrap_or(false);
                 // Shield page-state (AUDIT V21): WebView2 raises
                 // NavigationStarting for the MAIN frame only, so
                 // every URL seen here is a main-frame target —
@@ -1992,6 +3403,25 @@ impl App {
                         });
                     }
                     return false;
+                }
+                if is_downloads {
+                    // The Downloads tab may (re)load only the
+                    // Downloads page itself (0.33) — the
+                    // mirror of the start arm below. (Action
+                    // URLs from a downloads tab already
+                    // returned false above: `is_start` is
+                    // false there, so they never dispatch.)
+                    // The `https://pico.downloads` spellings
+                    // are wry's unfolded rewrite of the custom
+                    // scheme: `normalize_pico_url` does not
+                    // fold the downloads host yet (flagged in
+                    // the 0.33 report), so they are admitted
+                    // here by name rather than falling through
+                    // to the web allowlist.
+                    return url == DOWNLOADS_URL
+                        || url == "pico://downloads/"
+                        || url == "https://pico.downloads"
+                        || url == "https://pico.downloads/";
                 }
                 if is_start {
                     if is_web_url(&url) {
@@ -2022,10 +3452,7 @@ impl App {
                 // holds the decision table).
                 let expected_for_tab = {
                     let mut slot = expected_nav.lock().unwrap_or_else(|p| p.into_inner());
-                    match slot.as_ref() {
-                        Some((tab_id, _)) if *tab_id == id => slot.take().map(|(_, u)| u),
-                        _ => None,
-                    }
+                    slot.remove(&id)
                 };
                 if !userinfo_nav_allowed(&url, expected_for_tab.as_deref()) {
                     crate::log::info(&format!(
@@ -2034,16 +3461,39 @@ impl App {
                     ));
                     return false;
                 }
+                // Allowed. When the URL carries userinfo, this
+                // exact URL is the one credentialed load this
+                // tab may adopt (P3-1): record the marker the
+                // page-load gate checks.
+                if url_has_userinfo(&url) {
+                    let mut markers = userinfo_adopt.lock().unwrap_or_else(|p| p.into_inner());
+                    markers.insert(id, url.clone());
+                }
                 // Everywhere else: the strict scheme allowlist.
                 // javascript:, data:, file:, view-source:, res:, …
                 // are all refused as document navigations. Local
                 // files reach a tab only as static-server http URLs.
                 is_allowed_navigation_url(&url) && !url.starts_with("pico://")
             })
-            .with_download_started_handler(move |uri: String, _path: &mut PathBuf| -> bool {
-                // Pico has no downloads manager: deny every download
-                // (no drive-by file drops) and surface it instead.
-                let _ = download_proxy.send_event(UserEvent::DownloadBlocked { tab: id, uri });
+            .with_download_started_handler(move |uri: String, path: &mut PathBuf| -> bool {
+                // 0.32: WebView2's own download never runs — the
+                // attempt is cancelled here and routed to Pico's
+                // download manager by the event arm, which owns
+                // the URL validation, the cookie fetch and the
+                // task creation. The suggested name is the path
+                // argument's file name (lossy; empty when it has
+                // none). Returning false ALWAYS: if the manager
+                // path fails, the download is simply denied, as
+                // it was through 0.31.
+                let suggested = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let _ = download_proxy.send_event(UserEvent::DownloadStarting {
+                    tab: id,
+                    uri,
+                    suggested,
+                });
                 false
             })
             .with_on_page_load_handler(move |event: PageLoadEvent, raw_url: String| {
@@ -2136,6 +3586,9 @@ impl App {
             .build_as_child(&*self.window)
             .map_err(|e| e.to_string())?;
         harden_webview_profile(&view, "content");
+        attach_panel_focus_close(&view, id, self.proxy.clone());
+        attach_downloads_shortcut(&view, self.proxy.clone());
+        attach_context_menu(&view, id, self.proxy.clone());
         attach_media_probe(&view, id, self.probe_budget.clone(), self.stats.clone());
         attach_shield(
             &view,
@@ -2157,7 +3610,13 @@ impl App {
             self.push_state(false);
             return 0;
         }
-        if !is_allowed_navigation_url(url) {
+        // AUDIT 0.33: `is_allowed_navigation_url` (core::addr)
+        // pattern-matches the start URL specifically and does
+        // not know `pico://downloads` yet — the Downloads page
+        // is admitted here, in the shell, under the same
+        // exact-spelling discipline. (Flagged for the core
+        // allowlist to learn it; see the 0.33 report.)
+        if !is_allowed_navigation_url(url) && url != DOWNLOADS_URL && url != "pico://downloads/" {
             log::error(&format!(
                 "refusing to open disallowed URL: {}",
                 redact_url(url)
@@ -2211,6 +3670,8 @@ impl App {
             view,
             failed,
             is_start,
+            is_downloads: false,
+            nav_epoch: 0,
             url: url.to_string(),
             urlstate: UrlState::with_url(url),
             title,
@@ -2221,6 +3682,9 @@ impl App {
             last_load_start: Some(Instant::now()),
             doc_start_script,
             commit_started: false,
+            adopted: false,
+            pending_chain: Vec::new(),
+            pending_adopted: false,
         });
         // Seed the Shield's page-state for this tab: the initial
         // URL is both the pending main-frame target and (until the
@@ -2332,6 +3796,16 @@ impl App {
                 }
             }
         }
+        // The Downloads PAGE tab becoming the active page
+        // (0.34): the user has SEEN the failed tasks — the
+        // coordinator clears the unseen-failed count and any
+        // open notice. Idempotent: a no-change visit returns
+        // no effects; the activation's own snapshot push
+        // below still runs either way.
+        if self.tabs.iter().any(|t| t.id == id && t.is_downloads) {
+            let effects = self.dl.page_visited();
+            self.exec_dl_effects(effects);
+        }
         self.push_state(false);
     }
 
@@ -2343,7 +3817,28 @@ impl App {
         self.shield.forget_tab(id);
         self.lite.clear_chosen(id);
         self.stats.forget_tab(id);
+        // AUDIT 0.32.1 (P3-5): the media probe budget's per-tab
+        // entry was the one per-tab map never forgotten here —
+        // closed tab ids accumulated for the app's lifetime.
+        self.probe_budget
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .forget_tab(id);
+        // AUDIT 0.32.1 (P3-1/P3-3): the per-tab navigation
+        // expectation and adoption marker die with the tab.
+        self.expected_nav
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&id);
+        self.userinfo_adopt
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&id);
         self.live_start_tabs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&id);
+        self.live_downloads_tabs
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(&id);
@@ -2436,8 +3931,28 @@ impl App {
         can_back.hash(&mut hasher);
         can_forward.hash(&mut hasher);
         self.services_count.hash(&mut hasher);
-        self.blocked_downloads.hash(&mut hasher);
-        self.download_notice.hash(&mut hasher);
+        // Downloads (0.32; coordinator 0.34): the panel's open
+        // state, the manager's version counter (it bumps on
+        // every visible change, so the task list itself needs
+        // no hashing) and the persisted settings trio. Notice
+        // changes and failed-badge clears always arrive with
+        // a FORCED push from the coordinator's effects, so
+        // they need no hash here.
+        self.downloads_panel_open.hash(&mut hasher);
+        // Context menu (0.34.1): its presence, its tab and
+        // its item count. (An open always arrives with a
+        // forced push from its event arm; this keeps a
+        // later unforced push honest about a menu that
+        // closed or changed without one.)
+        self.context_menu.is_some().hash(&mut hasher);
+        if let Some(m) = &self.context_menu {
+            m.tab.hash(&mut hasher);
+            m.items.len().hash(&mut hasher);
+        }
+        self.dl.backend().0.version().hash(&mut hasher);
+        self.persist.download_connections.hash(&mut hasher);
+        self.persist.downloads_max_concurrent.hash(&mut hasher);
+        self.persist.downloads_speed_limit_kbps.hash(&mut hasher);
         active_error.hash(&mut hasher);
         shield_on.hash(&mut hasher);
         blocked_total.hash(&mut hasher);
@@ -2454,6 +3969,22 @@ impl App {
         }
         self.pending_focus_addr = false;
         self.last_snap_sig = sig;
+        // The ONE downloads snapshot (0.34): the coordinator's
+        // view of tasks, settings, the unseen-failed count
+        // and the notice — the chrome's `downloads` key, and
+        // (0.35.1, via its `card`) the start page's Downloads
+        // card, which the shared state mirrors below for the
+        // next start-page render and this push re-sends live
+        // after the chrome eval.
+        let dl_snapshot = self.dl.snapshot();
+        let dl_card = dl_snapshot.card.clone();
+        {
+            let mut data = self
+                .shared
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            data.downloads_card = dl_snapshot.card.clone();
+        }
         let snap = Snap {
             tabs: self
                 .tabs
@@ -2477,8 +4008,23 @@ impl App {
             can_back,
             can_forward,
             services: self.services_count,
-            blocked_downloads: self.blocked_downloads,
-            download_notice: self.download_notice.clone(),
+            downloads: dl_snapshot,
+            downloads_open: self.downloads_panel_open,
+            context_menu: self.context_menu.as_ref().map(|m| CtxMenuSnap {
+                x: m.x,
+                y: m.y,
+                items: m
+                    .items
+                    .iter()
+                    .map(|i| CtxItemSnap {
+                        id: i.id.to_string(),
+                        label: i.label.to_string(),
+                        shortcut: i.shortcut.map(|s| s.to_string()),
+                        enabled: i.enabled,
+                        sep: i.sep,
+                    })
+                    .collect(),
+            }),
             active_error,
             shield_on,
             blocked_total,
@@ -2493,6 +4039,40 @@ impl App {
         let _ = self
             .chrome
             .evaluate_script(&format!("window.__pico&&window.__pico({json})"));
+        // The start page's Downloads card (0.35.1): pushed
+        // live to every start tab, gated on a hash of the
+        // serialized card so an unchanged card costs one
+        // hash and no eval. This sits in push_state's
+        // non-gated region (past the signature early-return):
+        // the gate above hashes the dl backend version, so
+        // download ticks — speed changes included — pass it
+        // and the card updates at the popover's cadence,
+        // while a fully idle push_state never reaches here.
+        // The card JSON is never logged: `newest_name` is
+        // the user's own download name on his own start
+        // page — page content, not log content.
+        {
+            use std::hash::{Hash, Hasher};
+            let card_json = serde_json::to_string(&dl_card).unwrap_or_else(|_| "{}".to_string());
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            card_json.hash(&mut hasher);
+            let card_sig = hasher.finish();
+            if card_sig != self.last_dl_card_sig {
+                self.last_dl_card_sig = card_sig;
+                // Neutralize the script-breakout sequence
+                // exactly as the neighbouring pushes do.
+                let safe = card_json.replace("</", "<\\/");
+                for t in &self.tabs {
+                    if t.is_start {
+                        if let Some(v) = t.view() {
+                            let _ = v.evaluate_script(&format!(
+                                "window.__picoSetDownloadsCard&&window.__picoSetDownloadsCard({safe})"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// What the address bar shows for a tab: the file path for locally
@@ -2624,15 +4204,25 @@ impl App {
         }
     }
 
-    fn push_theme_to_start_tabs(&mut self) {
+    /// The ONE live theme channel (0.35.1): every internal
+    /// page (start + downloads) receives theme changes ONLY
+    /// through this push — the versioned payload
+    /// `{"v":1,"mode":"dark"|"light","palette":"<id>"}`
+    /// handed to `window.__picoTheme`. (Through 0.35 the
+    /// push reached start tabs only, as `__picoSetTheme`,
+    /// and an open Downloads page kept the old theme until
+    /// its next data push happened to carry one.) A page's
+    /// only other theme input is the INIT bake at serve
+    /// time (`render_start` / `render_downloads`).
+    fn push_theme_to_internal_tabs(&mut self) {
         // Mode and palette both come from closed sets
-        // ("light"/"dark", the palette table) — safe to place in
-        // a JS string literal directly.
+        // ("light"/"dark", the palette table).
         // AUDIT 0.31 (A3-F10): that safety rests entirely on
         // upstream sanitization, so re-check the closed sets AT
         // the sink: a value outside them (a future state-load
-        // regression, a hand-edited state.json that slipped a
-        // quote through) must never reach the JS literal.
+        // regression, a hand-edited state.json) must never
+        // reach the page — the push is refused whole, before
+        // any eval.
         let theme = self.persist.theme.clone();
         let palette = self.persist.theme_id.clone();
         if !matches!(theme.as_str(), "dark" | "light")
@@ -2648,13 +4238,497 @@ impl App {
             ));
             return;
         }
+        let payload = serde_json::json!({
+            "v": 1,
+            "mode": theme,
+            "palette": palette,
+        });
+        let json = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
         for t in &self.tabs {
-            if t.is_start {
+            if t.is_start || t.is_downloads {
                 if let Some(v) = t.view() {
                     let _ = v.evaluate_script(&format!(
-                        "window.__picoSetTheme&&window.__picoSetTheme('{theme}','{palette}')"
+                        "window.__picoTheme&&window.__picoTheme({json})"
                     ));
                 }
+            }
+        }
+    }
+
+    /// The Downloads page's one data shape (0.34 contract):
+    /// the coordinator's snapshot JSON — the frozen
+    /// `DlSnapshot` fields verbatim. The same JSON is the
+    /// page's stored init data and every
+    /// `__picoSetDownloads` push. 0.35.1: it carries NO
+    /// theme — an internal page's only theme inputs are
+    /// the INIT bake at serve time (`render_downloads`
+    /// merges the current theme/palette in) and the live
+    /// `__picoTheme` push.
+    fn downloads_snapshot_json(&self) -> String {
+        let snap = self.dl.snapshot();
+        serde_json::to_string(&snap).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    /// Push the Downloads page's data to every live downloads
+    /// tab (0.33; payload 0.34). Signature-gated on (snapshot
+    /// version, settings tuple) unless forced, like the
+    /// start pages' pushes. (0.35.1: theme/palette left the
+    /// gate — data pushes carry no theme; theme changes
+    /// ride `push_theme_to_internal_tabs`.) Whenever the
+    /// JSON is rebuilt the shared init data is refreshed
+    /// with it, so a fresh page load renders current data
+    /// — never a stale first paint.
+    fn push_downloads_page(&mut self, force: bool) {
+        use std::hash::{Hash, Hasher};
+        let snap = self.dl.snapshot();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        snap.version.hash(&mut hasher);
+        snap.settings.default_connections.hash(&mut hasher);
+        snap.settings.max_concurrent.hash(&mut hasher);
+        snap.settings.speed_limit_kbps.hash(&mut hasher);
+        let sig = hasher.finish();
+        if !force && sig == self.last_dl_page_sig {
+            return;
+        }
+        self.last_dl_page_sig = sig;
+        let json = self.downloads_snapshot_json();
+        {
+            let mut data = self
+                .shared
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            data.downloads_init = json.clone();
+        }
+        // The JSON rides a <script>-adjacent evaluate, so the
+        // script-breakout sequence is neutralized exactly as
+        // the asset assembly neutralizes init data.
+        let safe = json.replace("</", "<\\/");
+        for t in &self.tabs {
+            if t.is_downloads {
+                if let Some(v) = t.view() {
+                    let _ = v.evaluate_script(&format!(
+                        "window.__picoSetDownloads&&window.__picoSetDownloads({safe})"
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Open the Downloads page (0.33): focus its tab when one
+    /// exists, otherwise create it. Opening the page marks
+    /// every failed task as seen and retires an open notice
+    /// (0.34: the coordinator's `page_visited` owns that
+    /// state now — the page IS the failure list).
+    fn open_downloads_page(&mut self) {
+        let effects = self.dl.page_visited();
+        self.exec_dl_effects(effects);
+        let existing = self.tabs.iter().find(|t| t.is_downloads).map(|t| t.id);
+        match existing {
+            Some(id) => {
+                self.activate(id, true);
+                self.push_state(true);
+            }
+            None => {
+                let id = self.add_tab(DOWNLOADS_URL, false, true);
+                if id > 0 {
+                    if let Some(t) = self.tab_mut(id) {
+                        t.is_downloads = true;
+                        t.title = "Downloads".to_string();
+                    }
+                    self.live_downloads_tabs
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .insert(id);
+                }
+            }
+        }
+        self.push_downloads_page(true);
+    }
+
+    /// The coordinator's landing facts for one tab RIGHT
+    /// NOW (0.34): whether the capture's tab still exists,
+    /// its current navigation epoch (0 when the tab is
+    /// gone — the coordinator's `tab_alive: false`
+    /// dominates), and whether it is the only tab. These
+    /// are the app's live answers to the questions the
+    /// coordinator's deferred fate decision asks.
+    fn landing_facts_now(&self, tab_id: u64) -> pico_core::core::dlcoord::LandingFacts {
+        match self.tabs.iter().find(|t| t.id == tab_id) {
+            Some(t) => pico_core::core::dlcoord::LandingFacts {
+                tab_alive: true,
+                nav_epoch: t.nav_epoch,
+                only_tab: self.tabs.len() <= 1,
+            },
+            None => pico_core::core::dlcoord::LandingFacts {
+                tab_alive: false,
+                nav_epoch: 0,
+                only_tab: self.tabs.len() <= 1,
+            },
+        }
+    }
+
+    /// Execute the coordinator's effects (0.34): the ONE
+    /// funnel every coordinator call's output runs through.
+    /// Effects are executed in order; an effect that itself
+    /// produces effects (opening the panel reports back
+    /// into the coordinator) queues behind the rest. The
+    /// notice timer is armed at the end, from the resulting
+    /// snapshot.
+    fn exec_dl_effects(&mut self, effects: Vec<pico_core::core::dlcoord::DlEffect>) {
+        use pico_core::core::dlcoord::DlEffect;
+        let notice_was_open = self.dl_notice_open();
+        let popover_h_before = self.dl_popover_h();
+        let mut queue: std::collections::VecDeque<DlEffect> = effects.into();
+        while let Some(effect) = queue.pop_front() {
+            match effect {
+                DlEffect::Log(msg) => log::info(&msg),
+                DlEffect::LogError(msg) => log::error(&msg),
+                DlEffect::ExecuteFate { tab, fate } => {
+                    self.exec_dl_fate(tab, fate);
+                }
+                DlEffect::PushChrome => self.push_state(true),
+                DlEffect::PushPage => self.push_downloads_page(false),
+                DlEffect::OpenDownloadsPage => self.open_downloads_page(),
+                DlEffect::OpenPanel => {
+                    // Mirror the old chrome Downloads arm:
+                    // the panels are mutually exclusive.
+                    self.teleport = None;
+                    self.teleport_version += 1;
+                    self.teleport_panel_open = false;
+                    self.palette_panel_open = false;
+                    // A panel opening supersedes the context
+                    // menu (0.34.1), as the menu supersedes it.
+                    self.context_menu = None;
+                    self.downloads_panel_open = true;
+                    self.layout();
+                    self.push_state(true);
+                    // The funnel law: opening the panel
+                    // (any route) reports back.
+                    queue.extend(self.dl.panel_opened());
+                }
+                DlEffect::ClosePanel => {
+                    self.downloads_panel_open = false;
+                    self.layout();
+                    self.push_state(true);
+                }
+                DlEffect::ShellOpenFolder(path) => {
+                    open_folder_in_explorer(&path);
+                }
+                DlEffect::ShellOpenFile(path) => {
+                    open_file_in_explorer(&path);
+                }
+                DlEffect::PersistDownloadsSettings(settings) => {
+                    self.persist.download_connections = settings.default_connections;
+                    self.persist.downloads_max_concurrent = settings.max_concurrent;
+                    self.persist.downloads_speed_limit_kbps =
+                        settings.speed_limit_kbps.unwrap_or(0);
+                    self.save_state();
+                }
+            }
+        }
+        // The toast changes the chrome's height claim: if
+        // its open state flipped during this batch, relayout
+        // once (the per-effect paths already relayout for
+        // panel changes; the notice had no such hook in
+        // 0.33's field writes either — its show/retire
+        // helpers called layout() directly).
+        // AUDIT 0.34.2: the popover's height claim moves with
+        // the task list too — a task added/removed or an
+        // error row appearing while the panel is open changes
+        // the implied extension without any notice flip, and
+        // through 0.34.1 nothing relayouted, so the rect sat
+        // at the stale height (indefinitely under a Failed
+        // notice, which has no expiry timer). Relayout when
+        // the price moved during this batch.
+        if self.dl_notice_open() != notice_was_open
+            || (self.downloads_panel_open && self.dl_popover_h() != popover_h_before)
+        {
+            self.layout();
+        }
+        self.arm_dl_notice_timer();
+    }
+
+    /// Execute ONE tab fate (0.34): the tab-side action a
+    /// landed capture decided. The restore/go-back bodies
+    /// are 0.33's capture-unwind EXECUTION code, reused
+    /// verbatim minus the decision (the coordinator owns
+    /// the decision now; `capture_started` already applied
+    /// the fate's state half where the capture is
+    /// concerned — these run the view/history half).
+    ///
+    /// AUDIT 0.34.1 (field addition): each executed fate
+    /// logs exactly one `download tab fate: …` line, at
+    /// the point of commitment inside its arm (see the
+    /// RestoreTo / GoBack notes) — through 0.34 a fate
+    /// executed with no log line at all, so a field log
+    /// could not say what happened to the capturing tab.
+    fn exec_dl_fate(&mut self, tab_id: u64, fate: pico_core::core::dlcoord::TabFate) {
+        use pico_core::core::dlcoord::TabFate;
+        match fate {
+            TabFate::None => {}
+            TabFate::RestoreTo(url) => {
+                // AUDIT 0.34.1 (field addition): the fate
+                // log line sits AFTER this early return, at
+                // the point of commitment below — a missing
+                // tab restores nothing, so it must not claim
+                // a restore. (fate_step already revalidated
+                // the tab alive, so this path is defensive
+                // only.)
+                let Some(idx) = self.tabs.iter().position(|t| t.id == tab_id) else {
+                    return;
+                };
+                // The restore target is host data; if it
+                // carries userinfo, register the navigation
+                // expectation first (AUDIT 0.32.1 P2-3: an
+                // unmarked expectation-free load of a
+                // credentialed URL is denied by the
+                // navigation handler).
+                if pico_core::core::ipc::url_has_userinfo(&url) {
+                    self.expect_nav(tab_id, &url);
+                }
+                let tab = &mut self.tabs[idx];
+                // The finish of the file navigation is
+                // swallowed by the coordinator
+                // (`navigation_finished`) — no marker is
+                // needed here.
+                tab.urlstate = UrlState::with_url(&url);
+                tab.url = url.clone();
+                if let Some(view) = tab.view() {
+                    let _ = view.load_url(&url);
+                }
+                // 0.34.1: exactly one fate line per
+                // execution, after the point of commitment.
+                let redacted = redact_url(&url);
+                log::info(&format!(
+                    "download tab fate: restored tab {tab_id} to {redacted}"
+                ));
+            }
+            TabFate::GoBack => {
+                // `App::go`'s back half, verbatim in shape:
+                // record the traversal intent in the history
+                // machine (it returns the target), let the
+                // webview perform the move, and re-arm the
+                // one-shot expectation if the target is a
+                // credentialed entry (AUDIT 0.32.1 P3-2).
+                // The landing reconciles through the reducer
+                // like any traversal.
+                let now_ms = stats_now_ms();
+                let mut target_url: Option<String> = None;
+                if let Some(tab) = self.tab_mut(tab_id) {
+                    if let Some(target) = tab.hist.go_back(now_ms) {
+                        target_url = Some(target.to_string());
+                        if let Some(v) = tab.view() {
+                            let _ = v.evaluate_script("history.back()");
+                        }
+                        // 0.34.1: the fate line fires only
+                        // here — go_back returning a target
+                        // is the point of commitment; with
+                        // no target (or no tab) no traversal
+                        // happened and no line is claimed.
+                        log::info(&format!("download tab fate: tab {tab_id} back"));
+                    }
+                }
+                if let Some(target) = &target_url {
+                    if pico_core::core::ipc::url_has_userinfo(target) {
+                        self.expect_nav(tab_id, target);
+                    }
+                }
+            }
+            TabFate::ConvertToStart => {
+                self.convert_tab_to_start(tab_id);
+                // 0.34.1: exactly one fate line per
+                // execution (fate_step revalidated the tab
+                // alive, so the conversion has a tab).
+                log::info(&format!(
+                    "download tab fate: converted tab {tab_id} to start"
+                ));
+            }
+            TabFate::CloseTab => {
+                self.close_tab(tab_id);
+                log::info(&format!("download tab fate: closed tab {tab_id}"));
+            }
+        }
+        if self.tabs.iter().any(|t| t.id == tab_id) {
+            self.push_state(true);
+        }
+    }
+
+    /// Arm the notice expiry timer (0.34): after effects
+    /// execute, if the coordinator's notice is open and no
+    /// timer was armed for its sequence yet, spawn the
+    /// one-shot sleep thread (the cookie timeout's pattern)
+    /// that posts `DownloadNoticeExpired`. Durations are
+    /// 0.33's, preserved exactly: started 4 s, blocked 4 s,
+    /// finished 5 s, failed NEVER (a failed notice retires
+    /// only by click or by opening the downloads page).
+    fn arm_dl_notice_timer(&mut self) {
+        use pico_core::core::dlcoord::NoticeKind;
+        let snap = self.dl.snapshot();
+        let Some(notice) = snap.notice else {
+            return;
+        };
+        if !notice.open || notice.seq == self.dl_notice_armed_seq {
+            return;
+        }
+        let ms = match notice.kind {
+            NoticeKind::Started => 4000,
+            NoticeKind::Blocked => 4000,
+            NoticeKind::Finished => 5000,
+            NoticeKind::Failed => return,
+        };
+        self.dl_notice_armed_seq = notice.seq;
+        let seq = notice.seq;
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+            let _ = proxy.send_event(UserEvent::DownloadNoticeExpired { seq });
+        });
+    }
+
+    /// One downloads body from the CHROME (0.34): the dl
+    /// bodies ride the chrome transport, so the (boot, req)
+    /// dedupe guards them exactly like `Command` envelopes
+    /// (a transport double-fire must not double-apply a
+    /// downloads verb). Parse via the frozen dlcmd parser
+    /// over the normalized body; a denial writes exactly
+    /// one log line — no silent drop.
+    fn on_chrome_dl_body(&mut self, raw: &str) {
+        // AUDIT 0.40.1: the envelope is mandatory on this
+        // transport. Through 0.35.1 a body whose boot/req were
+        // absent or mistyped skipped the dedupe — and with it
+        // the stale/retired-boot rejection — and dispatched
+        // anyway. Pico's own chrome JS always sends a valid
+        // envelope (`send()` sets v/boot/req after the payload
+        // merge), so an envelope-less body is dropped like a
+        // parse failure.
+        let Some((boot, req)) = dl_envelope_id(raw) else {
+            log::info("downloads command dropped (missing chrome envelope)");
+            return;
+        };
+        {
+            // The dedupe consults the command only for its
+            // Ready-ness (boot adoption); a non-Ready
+            // placeholder preserves the strict rule that a
+            // fresh boot's count starts at its first Ready.
+            // `check` returns true for a FIRST delivery (the
+            // pair was unseen and is now recorded) — the same
+            // polarity as the command path in `on_chrome_cmd`.
+            // AUDIT 0.34.2: through 0.34.1 this guard was
+            // inverted (it returned early on a variable
+            // holding the check's "accepted"), which dropped every
+            // chrome-surface downloads verb on its normal
+            // single delivery — the toolbar button, the
+            // popover's rows, Add URL, the toast's dismiss —
+            // while re-deliveries and stale-boot bodies (for
+            // which `check` returns false) were dispatched,
+            // repeatedly. The downloads PAGE surface has no
+            // dedupe and kept working, which is why the dead
+            // chrome surface shipped unnoticed.
+            if !self.dedupe.check(&Envelope {
+                boot,
+                req,
+                cmd: Command::WinMin,
+            }) {
+                log::info(&format!(
+                    "downloads command dropped (duplicate or stale boot, req {req})"
+                ));
+                return;
+            }
+        }
+        let body = normalize_dl_body(raw);
+        match pico_core::core::dlcmd::parse_dl_body(&body) {
+            Ok(cmd) => {
+                let name = cmd.name();
+                // AUDIT 0.40.1: the per-verb surface table is a
+                // gate, not documentation — a verb the chrome
+                // surface never emits is denied here, so a
+                // compromised chrome context cannot reach
+                // page-only verbs (delete-file, refresh, …).
+                if !pico_core::core::dlcmd::spec_for(name)
+                    .is_some_and(|s| s.allows(pico_core::core::dlcmd::DlSurface::Chrome))
+                {
+                    log::error(&format!(
+                        "downloads command: surface=chrome action={name} decision=deny reason=surface"
+                    ));
+                    return;
+                }
+                let effects = if cmd == pico_core::core::dlcmd::DlCommand::DismissNotice {
+                    self.dl.notice_clicked()
+                } else {
+                    self.dl
+                        .dispatch(cmd, pico_core::core::dlcoord::DlSource::Chrome)
+                };
+                log::info(&format!(
+                    "downloads command: surface=chrome action={name} decision=ok"
+                ));
+                self.exec_dl_effects(effects);
+            }
+            Err(deny) => {
+                log::error(&format!(
+                    "downloads command: surface=chrome decision=deny reason={}",
+                    deny.label()
+                ));
+            }
+        }
+    }
+
+    /// One downloads body from the DOWNLOADS PAGE (0.34):
+    /// the page's action bridge, gated by the frozen
+    /// `core::dlcmd::page_gate` over the app's own tab
+    /// state, parsed by the same frozen parser, dispatched
+    /// as `DlSource::Page`. EVERY body — allowed or denied
+    /// — writes exactly one pico.log line naming the action
+    /// and the decision, mirroring `on_start_action`.
+    fn on_downloads_page_body(&mut self, tab_id: u64, raw: &str) {
+        let label = pico_core::core::dlcmd::action_label(raw);
+        let Some(tab) = self.tabs.iter().find(|t| t.id == tab_id) else {
+            log::error(&format!(
+                "downloads action: kind={label} tab={tab_id} decision=deny reason=tab-gone"
+            ));
+            return;
+        };
+        let gate = pico_core::core::dlcmd::page_gate(
+            tab.is_downloads,
+            pico_core::core::dlcmd::is_downloads_url(&tab.url),
+        );
+        if !gate {
+            log::error(&format!(
+                "downloads action: kind={label} tab={tab_id} decision=deny reason=not-on-downloads-page"
+            ));
+            return;
+        }
+        let body = normalize_dl_body(raw);
+        match pico_core::core::dlcmd::parse_dl_body(&body) {
+            Ok(cmd) => {
+                // AUDIT 0.40.1: same surface gate as the chrome
+                // transport — the page may only send page verbs,
+                // never chrome-only ones (set-connections,
+                // set-default-connections, panel verbs, …).
+                if !pico_core::core::dlcmd::spec_for(cmd.name())
+                    .is_some_and(|s| s.allows(pico_core::core::dlcmd::DlSurface::Page))
+                {
+                    log::error(&format!(
+                        "downloads action: kind={label} tab={tab_id} decision=deny reason=surface"
+                    ));
+                    return;
+                }
+                log::info(&format!(
+                    "downloads action: kind={label} tab={tab_id} decision=ok cmd={}",
+                    cmd.name()
+                ));
+                let effects = if cmd == pico_core::core::dlcmd::DlCommand::DismissNotice {
+                    self.dl.notice_clicked()
+                } else {
+                    self.dl
+                        .dispatch(cmd, pico_core::core::dlcoord::DlSource::Page)
+                };
+                self.exec_dl_effects(effects);
+            }
+            Err(deny) => {
+                log::error(&format!(
+                    "downloads action: kind={label} tab={tab_id} decision=deny reason={}",
+                    deny.label()
+                ));
             }
         }
     }
@@ -2809,6 +4883,392 @@ impl App {
         }
     }
 
+    /// A content tab's download attempt (0.34): the thin
+    /// app side of a capture. The facts come from the tab
+    /// as it stands at capture time; the coordinator
+    /// triages, decides the tab's fate and (on acceptance)
+    /// holds the capture open under a token until the
+    /// cookie leg lands it. The app's remaining jobs: run
+    /// the returned effects, then run the cookie leg for an
+    /// ACCEPTED capture (acceptance is pre-triaged here
+    /// with the core's pure `triage_download_uri` — the
+    /// coordinator re-triages internally for its own
+    /// decision; the double triage is pure and cheap).
+    /// Only the host is ever logged — never the URL, never
+    /// a cookie.
+    ///
+    /// 0.35, WS2: the facts carry the captured navigation's
+    /// URL CHAIN (see the assembly in the body), and
+    /// `from_context_menu` marks the context menu's
+    /// Download Link / Download Image captures, which are
+    /// NOT navigations: their chain is the file URL alone,
+    /// so the page being read (their live URL) is outside
+    /// it and their fate stays None, exactly as through
+    /// 0.34.
+    fn on_download_starting(
+        &mut self,
+        tab: u64,
+        uri: String,
+        suggested: String,
+        from_context_menu: bool,
+    ) {
+        use pico_core::core::dlcoord::CaptureFacts;
+        // App-side accept pre-triage, for the cookie leg
+        // only (see the doc above).
+        let accepted = matches!(
+            pico_core::core::download::triage_download_uri(&uri),
+            pico_core::core::download::DownloadTriage::Accept
+        );
+        // Capture facts from the tab's CURRENT state. A
+        // gone tab still gets a capture call (its facts are
+        // the gone-tab shape); the landing revalidation
+        // dominates the outcome there.
+        let (facts, referer) = match self.tabs.iter().find(|t| t.id == tab) {
+            Some(t) => {
+                let committed = t.hist.current().map(|s| s.to_string());
+                let prev = committed.as_ref().and_then(|_| {
+                    let entries = t.hist.entries();
+                    let idx = t.hist.index()?;
+                    if idx > 0 {
+                        entries.get(idx - 1).cloned()
+                    } else {
+                        None
+                    }
+                });
+                // The capture's URL chain (0.35, WS2),
+                // deduped, order preserved. A navigation
+                // capture assembles it from the tab's
+                // pending-navigation record (initial target
+                // + redirect hops) plus the live URL plus
+                // the captured URI — the live URL is a
+                // pre-redirect hop the record may not have
+                // seen (e.g. no Source event fired for it),
+                // and the captured URI is the final hop the
+                // record cannot have seen (the handler hands
+                // it over post-redirect). A context-menu
+                // capture is not a navigation: its chain is
+                // the file URL alone, so the page being read
+                // (its live URL) stays outside the chain and
+                // the fate gate refuses, as through 0.34.
+                let mut chain: Vec<String> = Vec::new();
+                let push_unique = |chain: &mut Vec<String>, u: &str| {
+                    if !chain.iter().any(|c| c == u) {
+                        chain.push(u.to_string());
+                    }
+                };
+                if from_context_menu {
+                    push_unique(&mut chain, &uri);
+                } else {
+                    for hop in &t.pending_chain {
+                        let hop = hop.clone();
+                        push_unique(&mut chain, &hop);
+                    }
+                    push_unique(&mut chain, &t.url.clone());
+                    push_unique(&mut chain, &uri);
+                }
+                let in_chain = |u: &str| chain.iter().any(|c| c == u);
+                let committed_in_chain = committed.as_ref().is_some_and(|c| in_chain(c));
+                let prev_is_real = prev.as_ref().is_some_and(|p| !in_chain(p));
+                // Pre-capture-commit defense (0.35, WS2,
+                // bounded): a committed entry that is IN
+                // the chain is the captured navigation's own
+                // artifact — a download renders no page, so
+                // that "commit" is the WebView2Feedback-#5172
+                // shape, a Finished for the file that landed
+                // before this capture and polluted the
+                // history (and, being a Commit, cleared the
+                // tab's live `adopted`). When NO real page
+                // sits behind it (the previous entry is
+                // absent or itself a chain hop), the artifact
+                // is presented to the matrix as NO committed
+                // page, and the origin is recovered from the
+                // pending record's adopted-at-start snapshot
+                // — the download-only tab then closes as it
+                // should instead of converting. When a real
+                // previous page DOES sit behind it, the
+                // committed entry is left in place on
+                // purpose: the chain matrix judges a
+                // chain-committed entry with a real previous
+                // entry as GoBack to that page, origin
+                // regardless, and presenting None here would
+                // destroy exactly that row.
+                let (committed_url, origin) =
+                    if !from_context_menu && committed_in_chain && !prev_is_real {
+                        (
+                            None,
+                            if t.pending_adopted {
+                                pico_core::core::dlcoord::CaptureOrigin::Adopted
+                            } else {
+                                pico_core::core::dlcoord::CaptureOrigin::User
+                            },
+                        )
+                    } else {
+                        (
+                            committed.clone(),
+                            if t.adopted {
+                                pico_core::core::dlcoord::CaptureOrigin::Adopted
+                            } else {
+                                pico_core::core::dlcoord::CaptureOrigin::User
+                            },
+                        )
+                    };
+                // The 0.33 referer rule: the page the
+                // download was captured from (the committed
+                // page when it differs from the download
+                // URL); the manager/coordinator sanitizes
+                // (userinfo-stripped http/https) downstream.
+                // 0.35: an in-chain committed entry is the
+                // artifact above, not a referring page — the
+                // real page behind it (when there is one)
+                // refers instead.
+                let referer = if !from_context_menu && committed_in_chain {
+                    if prev_is_real {
+                        prev.clone().filter(|c| c != &uri)
+                    } else {
+                        None
+                    }
+                } else {
+                    committed.clone().filter(|c| c != &uri)
+                };
+                (
+                    CaptureFacts {
+                        live_url: t.url.clone(),
+                        captured_url: uri.clone(),
+                        chain,
+                        committed_url,
+                        prev_url: prev,
+                        origin,
+                        only_tab: self.tabs.len() <= 1,
+                        traversal_pending: t.hist.has_pending(),
+                        nav_epoch: t.nav_epoch,
+                    },
+                    referer,
+                )
+            }
+            None => (
+                CaptureFacts {
+                    live_url: uri.clone(),
+                    captured_url: uri.clone(),
+                    chain: vec![uri.clone()],
+                    committed_url: None,
+                    prev_url: None,
+                    origin: pico_core::core::dlcoord::CaptureOrigin::User,
+                    only_tab: self.tabs.len() <= 1,
+                    traversal_pending: false,
+                    nav_epoch: 0,
+                },
+                None,
+            ),
+        };
+        let (token, effects) =
+            self.dl
+                .capture_started(tab, uri.clone(), suggested, referer.clone(), facts);
+        self.exec_dl_effects(effects);
+        if !accepted {
+            // A rejected capture is complete: the effects
+            // carried the fate and the blocked notice. No
+            // cookie leg, no token to land.
+            return;
+        }
+        // The cookie leg (0.32's plumbing, token-shaped):
+        // the page's session cookies ride the task when the
+        // capture crosses within the page's own site. Any
+        // shortcut — no tab, no view, cross-site, COM error
+        // — lands the capture immediately with no cookies:
+        // a download must never hang on its session fetch.
+        let page_url = {
+            let t = self.tabs.iter().find(|t| t.id == tab);
+            match (t, &referer) {
+                (Some(_), Some(r)) => Some(r.clone()),
+                (Some(t), None) => Some(t.url.clone()),
+                _ => None,
+            }
+        };
+        let has_view = self
+            .tabs
+            .iter()
+            .find(|t| t.id == tab)
+            .and_then(|t| t.view())
+            .is_some();
+        let (true, Some(page_url)) = (has_view, page_url) else {
+            let effects = self
+                .dl
+                .cookies_arrived(token, Vec::new(), self.landing_facts_now(tab));
+            self.exec_dl_effects(effects);
+            return;
+        };
+        if !pico_core::core::download::cookie_capture_allowed(&page_url, &uri) {
+            // P2-1 (AUDIT 0.32.1), preserved: the page's
+            // cookies are withheld when the download host is
+            // not host-related to the page's host (neither the
+            // same host nor a subdomain of it — the predicate
+            // is host-relatedness only; AUDIT 0.40.1 corrected
+            // this comment, which used to claim scheme/port
+            // checks the predicate never made) — a hostile page
+            // must not pass its session to a third-party host by
+            // pointing the browser at it, and the third party
+            // must not receive the page's cookies either. The
+            // jar slice itself is WebView2's, taken for the
+            // download URI, and the send predicate re-checks
+            // host-only/secure/path/expiry per request.
+            log::info(&format!(
+                "download cookies skipped (cross-site): page host {} download host {}",
+                pico_core::core::download::url_host(&page_url)
+                    .unwrap_or_else(|| "unknown host".to_string()),
+                pico_core::core::download::url_host(&uri)
+                    .unwrap_or_else(|| "unknown host".to_string())
+            ));
+            let effects = self
+                .dl
+                .cookies_arrived(token, Vec::new(), self.landing_facts_now(tab));
+            self.exec_dl_effects(effects);
+            return;
+        }
+        // The 1500 ms cookie timeout (0.32): whichever of
+        // the answer and the timeout arrives first lands
+        // the capture; the loser is ignored by the
+        // coordinator (unknown token).
+        let timeout_proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            let _ = timeout_proxy.send_event(UserEvent::DownloadCookiesTimeout { tab, token });
+        });
+        let fetch_result = {
+            // AUDIT 0.40.1: was an `expect` on an invariant the
+            // guard above establishes — under panic="abort" a
+            // broken invariant would kill the browser, so this
+            // now takes the same graceful path as a failed
+            // fetch instead of panicking.
+            let Some(view) = self
+                .tabs
+                .iter()
+                .find(|t| t.id == tab)
+                .and_then(|t| t.view())
+            else {
+                log::error(&format!(
+                    "download cookie fetch skipped for tab {tab}: view gone (continuing without cookies)"
+                ));
+                let effects =
+                    self.dl
+                        .cookies_arrived(token, Vec::new(), self.landing_facts_now(tab));
+                self.exec_dl_effects(effects);
+                return;
+            };
+            fetch_download_cookies(view, &uri, tab, token, self.proxy.clone())
+        };
+        if let Err(why) = fetch_result {
+            log::error(&format!(
+                "download cookie fetch failed for tab {tab}: {why} (continuing without cookies)"
+            ));
+            let effects = self
+                .dl
+                .cookies_arrived(token, Vec::new(), self.landing_facts_now(tab));
+            self.exec_dl_effects(effects);
+        }
+    }
+
+    /// A capture's cookies arrived (0.34): land it in the
+    /// coordinator with the tab's CURRENT landing facts —
+    /// the coordinator revalidates the deferred fate
+    /// against them (a tab that committed a real page
+    /// since capture keeps it).
+    fn on_download_cookies(
+        &mut self,
+        tab: u64,
+        token: u64,
+        cookies: Vec<pico_core::core::download::CookiePair>,
+    ) {
+        let effects = self
+            .dl
+            .cookies_arrived(token, cookies, self.landing_facts_now(tab));
+        self.exec_dl_effects(effects);
+    }
+
+    /// A capture's cookie fetch timed out (0.34): land it
+    /// with no cookies rather than not at all.
+    fn on_download_cookies_timeout(&mut self, tab: u64, token: u64) {
+        let effects = self.dl.cookies_timeout(token, self.landing_facts_now(tab));
+        self.exec_dl_effects(effects);
+    }
+
+    /// Convert a content tab into the start tab in place
+    /// (0.32.3): the mirror image of `convert_start_tab`.
+    /// Used by the download unwind when the tab has no
+    /// committed page to return to — a fresh tab or a popup
+    /// adoption whose first navigation was the captured
+    /// file. The start classification is LIVE (the shared
+    /// set the navigation handler reads), so the existing
+    /// view follows the flip immediately; the record reset
+    /// mirrors the start half of `add_tab`'s seeding.
+    fn convert_tab_to_start(&mut self, tab_id: u64) {
+        let Some(idx) = self.tab_index(tab_id) else {
+            return;
+        };
+        if self.tabs[idx].is_start {
+            return;
+        }
+        // The tab may hold or borrow a static-server root
+        // (it was showing a local page): release through
+        // the one path that owns root bookkeeping.
+        self.set_tab_root(idx, None);
+        // 0.33 hygiene: a downloads tab converting to start
+        // leaves the downloads classification too.
+        self.live_downloads_tabs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&tab_id);
+        self.live_start_tabs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(tab_id);
+        let was_active = self.active == tab_id;
+        if was_active {
+            // The page the panels name is gone: retire them
+            // exactly as a start conversion does.
+            self.teleport = None;
+            self.teleport_version += 1;
+            self.teleport_panel_open = false;
+            self.palette_panel_open = false;
+            self.downloads_panel_open = false;
+        }
+        {
+            let tab = &mut self.tabs[idx];
+            tab.is_start = true;
+            tab.is_downloads = false;
+            tab.hist = TabHistory::new();
+            tab.urlstate = UrlState::with_url(START_URL);
+            tab.url = START_URL.to_string();
+            tab.title = "Start".to_string();
+            tab.failed = None;
+            tab.commit_started = false;
+            tab.pending_chain.clear();
+            tab.pending_adopted = false;
+            tab.loading = tab.view.is_some();
+            tab.last_load_start = if tab.view.is_some() {
+                Some(Instant::now())
+            } else {
+                None
+            };
+        }
+        self.shield.set_page_url(tab_id, START_URL);
+        self.shield.set_pending_main(tab_id, START_URL);
+        self.lite.clear_chosen(tab_id);
+        if let Some(v) = self.tabs[idx].view() {
+            let _ = v.load_url(START_URL);
+            if was_active {
+                let _ = v.focus();
+            }
+        } else {
+            // A failed view: the record is already retargeted;
+            // rebuild it for the start page (the A6-3 retry).
+            self.retry_tab_view(tab_id);
+        }
+        if was_active {
+            self.layout();
+        }
+        self.push_state(true);
+    }
+
     /// Flip the Shield (AUDIT V21). Turning off is immediate for
     /// the network layer (a flag the handlers read per request)
     /// and best-effort for the in-page layers already applied to
@@ -2939,9 +5399,11 @@ impl App {
     /// single mandated line with the host redacted per log laws.
     fn request_teleport(&mut self) {
         use pico_core::core::teleport::{choose_lan_ip_with_egress, resolve};
-        // The two centered panels are mutually exclusive (v27):
-        // asking for Teleport retires the picker.
+        // The centered panels are mutually exclusive (v27,
+        // Downloads added 0.32): asking for Teleport retires
+        // the picker and the Downloads panel.
         self.palette_panel_open = false;
+        self.downloads_panel_open = false;
         let Some(tab) = self.active_tab() else {
             return;
         };
@@ -3005,6 +5467,9 @@ impl App {
         // Grow the chrome overlay so the panel has somewhere to
         // paint (the content rect does not move).
         if !self.teleport_panel_open {
+            // A panel opening supersedes the context menu
+            // (0.34.1), as the menu supersedes it.
+            self.context_menu = None;
             self.teleport_panel_open = true;
             self.layout();
         }
@@ -3191,6 +5656,8 @@ impl App {
             tab.hist = TabHistory::new();
             tab.urlstate = UrlState::with_url(url);
             tab.url = url.to_string();
+            tab.pending_chain.clear();
+            tab.pending_adopted = tab.adopted;
             tab.title = String::new();
             // A conversion IS a load start: stale timing from the
             // start page's own load must not leak into the
@@ -3276,7 +5743,7 @@ impl App {
     /// `expected_nav` field.
     fn expect_nav(&self, tab: u64, url: &str) {
         let mut slot = self.expected_nav.lock().unwrap_or_else(|p| p.into_inner());
-        *slot = Some((tab, url.to_string()));
+        slot.insert(tab, url.to_string());
     }
 
     /// Address-bar submission (AUDIT V26, defect D5): routed by
@@ -3477,6 +5944,7 @@ impl App {
                 return;
             }
         }
+        let mut target_url: Option<String> = None;
         if let Some(tab) = self.tab_mut(id) {
             let target = if forward {
                 tab.hist.go_forward(now_ms)
@@ -3484,6 +5952,7 @@ impl App {
                 tab.hist.go_back(now_ms)
             };
             if target.is_some() {
+                target_url = target.map(str::to_string);
                 if let Some(v) = tab.view() {
                     let _ = v.evaluate_script(if forward {
                         "history.forward()"
@@ -3491,6 +5960,18 @@ impl App {
                         "history.back()"
                     });
                 }
+            }
+        }
+        // AUDIT 0.32.1 (P3-2): a traversal landing on a
+        // credentialed history entry must re-arm the one-shot
+        // expectation, exactly as the original typed
+        // submission did — through 0.32 reload/traversal never
+        // armed it, so a legitimately typed credentialed page
+        // could never be reloaded or gone back to (the
+        // navigation handler denied its own user's page).
+        if let Some(target) = &target_url {
+            if url_has_userinfo(target) {
+                self.expect_nav(id, target);
             }
         }
     }
@@ -3503,6 +5984,14 @@ impl App {
             self.retry_tab_view(id);
             return;
         }
+        // AUDIT 0.32.1 (P3-2): reloading a credentialed page
+        // re-arms the one-shot expectation for its exact URL
+        // (see go()) — the navigation the reload triggers is
+        // the user's own act on their own typed URL.
+        let current = tab.url.clone();
+        if url_has_userinfo(&current) {
+            self.expect_nav(id, &current);
+        }
         if let Some(v) = tab.view() {
             let _ = v.reload();
         }
@@ -3513,9 +6002,11 @@ impl App {
     /// ignored, never persisted. The switch itself is the same
     /// discipline as the mode toggle: persist through the one
     /// save path, repaint every explicit background, push the
-    /// theme to start tabs, and let the snapshot re-token the
-    /// chrome. Already-open content pages are untouched (the
-    /// chrome/start surfaces are the themed ones).
+    /// theme to the internal tabs, and let the snapshot
+    /// re-token the chrome. The theme law (0.35.1): internal
+    /// pages (start + downloads) are themed live through the
+    /// one `__picoTheme` channel; regular web pages are
+    /// never touched.
     fn set_palette(&mut self, id: &str) {
         if !pico_core::core::themes::is_known_palette(id) {
             log::error(&format!("theme: unknown palette id refused: {id}"));
@@ -3523,10 +6014,11 @@ impl App {
         }
         if self.persist.theme_id == id {
             // AUDIT V28 A3-LOW-2: a same-id re-pick still re-pushes
-            // the theme to start tabs — a start page that missed
-            // the first push (recreated, not yet ready) heals here
-            // instead of staying on the old palette forever.
-            self.push_theme_to_start_tabs();
+            // the theme to internal tabs — an internal page that
+            // missed the first push (recreated, not yet ready)
+            // heals here instead of staying on the old palette
+            // forever.
+            self.push_theme_to_internal_tabs();
             self.push_state(true);
             return;
         }
@@ -3540,7 +6032,7 @@ impl App {
                 let _ = v.set_background_color(rgba);
             }
         }
-        self.push_theme_to_start_tabs();
+        self.push_theme_to_internal_tabs();
         self.push_state(true);
     }
 
@@ -3569,13 +6061,25 @@ impl App {
                 let _ = v.set_background_color(rgba);
             }
         }
-        self.push_theme_to_start_tabs();
+        self.push_theme_to_internal_tabs();
         self.push_state(true);
     }
 
     // -- command processing ------------------------------------------------
 
     fn on_chrome_cmd(&mut self, raw: &str, control_flow: &mut ControlFlow) {
+        // Downloads bodies (0.34) ride the chrome transport
+        // as the canonical `{"kind":"dl", ...}` shape — they
+        // are NOT chrome `Command`s (the downloads family
+        // left `core::ipc` in 0.34). Route them to the
+        // coordinator before the command parser sees the
+        // body; the dl handler applies the envelope dedupe
+        // itself.
+        if pico_core::core::dlcmd::looks_like_dl_body(raw) {
+            self.on_chrome_dl_body(raw);
+            self.push_state(false);
+            return;
+        }
         let env = match parse_command(raw) {
             Ok(e) => e,
             Err(why) => {
@@ -3642,7 +6146,14 @@ impl App {
             Command::ThemeToggle => self.toggle_theme(),
             Command::ShieldToggle => self.toggle_shield(),
             Command::LiteToggle => self.toggle_lite(),
-            Command::Teleport => self.request_teleport(),
+            Command::Teleport => {
+                // The download toast retires when any panel
+                // opens (0.32.3), Teleport included — guarded
+                // since 0.35 (WS5): an open Failed notice
+                // survives panel gestures.
+                self.retire_notice_unless_failed();
+                self.request_teleport();
+            }
             Command::TeleportClose => {
                 self.teleport = None;
                 self.teleport_version += 1;
@@ -3655,11 +6166,19 @@ impl App {
                 log::info("teleport: copy");
             }
             Command::Palette => {
-                // Mutually exclusive with Teleport (v27): the
-                // picker replaces it, payload and all.
+                // Mutually exclusive with Teleport (v27) and
+                // Downloads (0.32): the picker replaces them,
+                // payload and all. The download toast retires
+                // with the other panels' opening (0.32.3) —
+                // guarded since 0.35 (WS5), like Teleport's.
+                self.retire_notice_unless_failed();
                 self.teleport = None;
                 self.teleport_version += 1;
                 self.teleport_panel_open = false;
+                self.downloads_panel_open = false;
+                // A panel opening supersedes the context menu
+                // (0.34.1), as the menu supersedes it.
+                self.context_menu = None;
                 if !self.palette_panel_open {
                     self.palette_panel_open = true;
                     self.layout();
@@ -3672,6 +6191,17 @@ impl App {
                     self.layout();
                 }
             }
+            Command::CtxClose => {
+                // Context menu dismissed without a pick
+                // (0.34.1): drop the stored state and restore
+                // the plain chrome bounds; a close with no
+                // menu open is a no-op.
+                if self.context_menu.take().is_some() {
+                    self.layout();
+                    self.push_state(false);
+                }
+            }
+            Command::CtxPick { id } => self.on_ctx_pick(&id),
             Command::ThemeSet { id } => self.set_palette(&id),
             Command::OpenFile => self.open_file_dialog(),
             Command::Social { site } => self.open_social(site),
@@ -3681,6 +6211,10 @@ impl App {
                 let _ = self.window.drag_window();
             }
             Command::WinClose => {
+                // Downloads (0.32): pause every running task and
+                // persist its live progress BEFORE teardown, so
+                // a close never loses downloaded bytes' record.
+                self.dl.backend().0.pause_all_and_persist();
                 self.capture_geometry();
                 self.save_state();
                 *control_flow = ControlFlow::Exit;
@@ -3939,6 +6473,84 @@ impl App {
             UrlEvent::CommitStart(u) => Some(u.clone()),
             _ => None,
         };
+        // The pending-navigation chain (0.35, WS2), maintained
+        // event by event BEFORE the reducer consumes the event
+        // (the chain describes the navigation the event belongs
+        // to, judged from the state that navigation started
+        // in):
+        //
+        // - CommitStart(url): a full navigation is starting.
+        //   Every CommitStart begins a NEW navigation (the
+        //   previous one either settled at its Finish or is
+        //   being pre-empted), so the chain RESETS to
+        //   `[url]` and the record snapshots the tab's
+        //   CURRENT `adopted` — the origin this navigation
+        //   starts with, before any commit of its own can
+        //   clear the live flag. (The brief's "a Start
+        //   arriving while the tab is not loading resets"
+        //   is this same moment seen from the load flags:
+        //   `on_page_load` has already set `loading` for a
+        //   Start by the time this runs, so the reset is
+        //   unconditional here rather than flag-gated.)
+        // - Source(url): while the tab is loading (a load
+        //   in flight: `loading` or `commit_started`), the
+        //   URL is a hop of the in-flight navigation — a
+        //   redirect target, or the final URL the Source
+        //   settled on — and APPENDS, consecutive
+        //   duplicates deduped. Recording the FIRST hop of
+        //   an as-yet empty chain snapshots `adopted` the
+        //   same way a Start does (a Source can precede its
+        //   document's CommitStart, AUDIT V28 A6-9; the
+        //   Start that follows resets to the same URL and
+        //   re-snapshots the same flag). A Source observed
+        //   while NOT loading is a same-document change of
+        //   an already settled page — not a navigation hop
+        //   — and never touches the chain.
+        // - CommitFinish: the navigation settled into a
+        //   page, so the chain CLEARS — it must hold
+        //   nothing from a settled navigation. The
+        //   `pending_adopted` snapshot deliberately
+        //   survives (see the field): a download capture
+        //   that arrives just after this Finish can still
+        //   recover the settled navigation's origin.
+        // - Note: an observer hint about the CURRENT
+        //   document, never a navigation hop — ignored.
+        //
+        // Unusable URLs (empty / about:blank / non-web, the
+        // reducer's `usable` gate) never enter the chain:
+        // the reducer refuses them, so the record must not
+        // carry a URL no event could have adopted.
+        match &ev {
+            UrlEvent::CommitStart(u)
+                if !u.is_empty()
+                    && u != "about:blank"
+                    && pico_core::core::addr::web_origin(u).is_some() =>
+            {
+                let tab = &mut self.tabs[idx];
+                tab.pending_adopted = tab.adopted;
+                tab.pending_chain.clear();
+                tab.pending_chain.push(u.clone());
+            }
+            UrlEvent::Source(u)
+                if !u.is_empty()
+                    && u != "about:blank"
+                    && pico_core::core::addr::web_origin(u).is_some() =>
+            {
+                let tab = &mut self.tabs[idx];
+                if tab.loading || tab.commit_started {
+                    if tab.pending_chain.is_empty() {
+                        tab.pending_adopted = tab.adopted;
+                    }
+                    if tab.pending_chain.last().map(|s| s.as_str()) != Some(u.as_str()) {
+                        tab.pending_chain.push(u.clone());
+                    }
+                }
+            }
+            UrlEvent::CommitFinish(_) => {
+                self.tabs[idx].pending_chain.clear();
+            }
+            _ => {}
+        }
         let pending = self.tabs[idx].hist.pending_target().map(|t| t.to_string());
         // AUDIT 0.31 (A6-F1, core half): a commit start is a
         // history-machine fact in its own right — note it
@@ -4000,6 +6612,32 @@ impl App {
             HistEffect::Traversal => self.tabs[idx].hist.record_traversal(&live),
             HistEffect::None => {}
         }
+        if matches!(outcome.hist, HistEffect::Commit) {
+            // 0.32.4: a real page landing in this tab's
+            // history makes the tab its own — an adopted
+            // (site-opened) tab that commits a page is a
+            // normal tab from then on, and a later download
+            // capture in it must never close it.
+            // AUDIT 0.33 (WS1): the clear is gated on COMMIT
+            // only. The pre-0.33 rule cleared on ANY landing
+            // (Push/Replace included), and a download file's
+            // SourceChanged — classified Push — cleared it
+            // before the capture ever decided, converting a
+            // download-only tab's close into a start-page
+            // conversion. Nothing is lost by the narrower
+            // rule: a same-document landing presupposes an
+            // earlier Commit of that document, which already
+            // cleared the flag. The same Commit also bumps
+            // the tab's NAVIGATION EPOCH (0.34) — the SINGLE
+            // point where the epoch moves: a real commit
+            // landed. A swallowed download finish returns
+            // before the reducer runs, so it never reaches
+            // here; the coordinator's capture revalidation
+            // reads the epoch as "has this tab committed a
+            // real page since the capture".
+            self.tabs[idx].adopted = false;
+            self.tabs[idx].nav_epoch += 1;
+        }
         if let Some(new_url) = outcome.adopted {
             let id = self.tabs[idx].id;
             self.tabs[idx].url = new_url.clone();
@@ -4032,19 +6670,27 @@ impl App {
             self.shield.set_page_url(id, &new_url);
             let root = self.server.root_id_for_url(&new_url);
             self.set_tab_root(idx, root);
-            if id == self.active && (self.teleport_panel_open || self.palette_panel_open) {
+            if id == self.active
+                && (self.teleport_panel_open
+                    || self.palette_panel_open
+                    || self.downloads_panel_open)
+            {
                 // The panel names the page it was computed for;
                 // a navigation retires it (AUDIT V26 D3).
                 // AUDIT 0.31 (A1-F1): the theme picker follows
                 // the same dismissal law — through 0.30 only
                 // Teleport was retired here, so the picker (and
                 // the grown chrome rect) survived navigation.
+                // 0.32.2: the downloads popover joins the same
+                // law — a committed navigation in the active tab
+                // is a content interaction and retires it too.
                 if self.teleport_panel_open {
                     self.teleport = None;
                     self.teleport_version += 1;
                     self.teleport_panel_open = false;
                 }
                 self.palette_panel_open = false;
+                self.downloads_panel_open = false;
                 self.layout();
             }
         }
@@ -4111,9 +6757,41 @@ impl App {
         let Some(idx) = self.tab_index(tab_id) else {
             return;
         };
+        // The download-finish swallow (0.33 WS1; coordinator
+        // 0.34), FIRST — before any URL application, exactly
+        // where 0.33 checked its marker. A captured download's
+        // navigation completion (WebView2 reports it as a
+        // Finished load for the file URL) is dropped whole:
+        // no CommitFinish (so no navigation-epoch bump), no
+        // history record of the file as a page, no error
+        // state, no Shield/Lite tail. The coordinator owns
+        // the pending-swallow records now; this asks it
+        // whether THIS finish is one.
+        if finished && self.dl.navigation_finished(tab_id, &url) {
+            let tab = &mut self.tabs[idx];
+            tab.loading = false;
+            tab.commit_started = false;
+            // 0.35, WS2: the captured navigation has settled
+            // (as a download, not a page) — its pending chain
+            // clears here exactly as a real CommitFinish
+            // clears it in apply_url_event; the coordinator
+            // keeps its own copy of the chain for the landing.
+            tab.pending_chain.clear();
+            log::info(&format!("download finish swallowed: tab={tab_id}"));
+            self.push_state(true);
+            return;
+        }
         let root_id = self.server.root_id_for_url(&url);
         let real = !url.is_empty() && url != "about:blank";
-        if real && !is_allowed_navigation_url(&url) {
+        // AUDIT 0.33: the Downloads page's own load is exempt
+        // from the allowlist check for its tab, under the
+        // same exact-spelling discipline as add_tab's
+        // admission (core's allowlist does not know
+        // `pico://downloads` yet — flagged in the 0.33
+        // report).
+        let is_downloads_load =
+            self.tabs[idx].is_downloads && (url == DOWNLOADS_URL || url == "pico://downloads/");
+        if real && !is_allowed_navigation_url(&url) && !is_downloads_load {
             // Defense in depth behind the navigation handler: never
             // let state track a document outside the allowlist.
             log::error(&format!(
@@ -4123,6 +6801,42 @@ impl App {
             self.tabs[idx].loading = false;
             self.push_state(false);
             return;
+        }
+        if real {
+            // AUDIT 0.32.1 (P3-1): the same defense for
+            // credentialed URLs. The layer above checks only
+            // the scheme, so a userinfo URL that reached the
+            // load stage without the navigation handler's
+            // expectation match (e.g. adopted through a
+            // redirect) would land in tab state as if typed.
+            // Adoption now requires the exact marker the
+            // handler set when it allowed the navigation; a
+            // plain (non-credentialed) load retires the tab's
+            // marker.
+            if url_has_userinfo(&url) {
+                let marker = {
+                    let markers = self
+                        .userinfo_adopt
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner());
+                    markers.get(&tab_id).cloned()
+                };
+                if !userinfo_adoption_allowed(&url, marker.as_deref()) {
+                    log::info(&format!(
+                        "page load with credentialed URL not adopted: tab={tab_id} {}",
+                        redact_url(&url)
+                    ));
+                    self.tabs[idx].loading = false;
+                    self.push_state(false);
+                    return;
+                }
+            } else {
+                let mut markers = self
+                    .userinfo_adopt
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+                markers.remove(&tab_id);
+            }
         }
         if !finished {
             // AUDIT V29: a new document retires the old
@@ -4174,7 +6888,9 @@ impl App {
             }
             if real {
                 // The reducer records the history commit (AUDIT
-                // V26 D7) — one writer for URL + history.
+                // V26 D7) — one writer for URL + history. (A
+                // swallowed download finish never reaches here;
+                // it returned at the top.)
                 self.apply_url_event(idx, UrlEvent::CommitFinish(url.clone()));
             }
         }
@@ -4274,6 +6990,30 @@ impl App {
                     }
                 }
             }
+        }
+        // AUDIT 0.33: a downloads tab's own load finish pushes
+        // the page data (forced — the freshly loaded page must
+        // render current data even when the signature gate
+        // would call it unchanged). 0.34: the committed
+        // downloads page also counts as VISITED for the
+        // coordinator (failed tasks seen, open notice
+        // retired) — the same hook point 0.33 used to know a
+        // downloads tab committed.
+        if finished && self.tabs[idx].is_downloads {
+            let effects = self.dl.page_visited();
+            self.exec_dl_effects(effects);
+            self.push_downloads_page(true);
+        }
+        // Heal on load (0.35.1): an internal page (start or
+        // downloads) that finished loading re-receives the
+        // current theme through the one live channel — a
+        // page that loaded before (or while) a theme change
+        // landed converges instead of keeping the theme its
+        // INIT was baked with. Unconditional but cheap: the
+        // push is two small evals at most (one per internal
+        // tab).
+        if finished && (self.tabs[idx].is_start || self.tabs[idx].is_downloads) {
+            self.push_theme_to_internal_tabs();
         }
         self.push_state(false);
     }
@@ -4646,7 +7386,7 @@ fn build_chrome(
             let _ = proxy_ipc.send_event(UserEvent::ChromeCmd(body.clone()));
         })
         .with_download_started_handler(move |uri: String, _path: &mut PathBuf| -> bool {
-            let _ = proxy_dl.send_event(UserEvent::DownloadBlocked { tab: 0, uri });
+            let _ = proxy_dl.send_event(UserEvent::DownloadBlocked { uri });
             false
         })
         .with_navigation_handler(|url: String| {
@@ -4752,6 +7492,23 @@ pub fn run() {
             plan
         {
             let report = pstore::perform_migration(&plan);
+            // AUDIT 0.34.1 (field addition): the itemized
+            // failures and pure skips log BEFORE the summary
+            // line — relative paths only, never contents,
+            // so the summary's counts are always preceded by
+            // the items that make them up.
+            for detail in &report.details {
+                match &detail.error {
+                    Some(error) => log::error(&format!(
+                        "data: migration item failed: {} {} — {}",
+                        detail.kind, detail.path, error
+                    )),
+                    None => log::info(&format!(
+                        "data: migration item skipped: {} {}",
+                        detail.kind, detail.path
+                    )),
+                }
+            }
             if report.failed > 0 {
                 // AUDIT V29 (A5-1): an incomplete migration is
                 // logged as one — the plan re-issues next start.
@@ -4877,6 +7634,34 @@ fn run_with_server(server: FileServer) {
         theme: persist.theme.clone(),
         palette: persist.theme_id.clone(),
         stats: stats_book.view(),
+        // 0.34: the Downloads page's initial data — an
+        // empty-but-valid snapshot JSON (the frozen
+        // `DlSnapshot` shape, seeded from the persisted
+        // settings). 0.35.1: no theme in it — `render_downloads`
+        // bakes the current theme/palette in at serve time.
+        // `push_downloads_page` refreshes it with live data
+        // on the first push (which run() makes once the App
+        // exists). The start page's card starts empty and is
+        // mirrored by the first snapshot push.
+        downloads_init: serde_json::json!({
+            "version": 0,
+            "tasks": [],
+            "active_count": 0,
+            "failed_unseen": 0,
+            "settings": {
+                "default_connections": persist.download_connections,
+                "max_concurrent": persist.downloads_max_concurrent,
+                "speed_limit_kbps": if persist.downloads_speed_limit_kbps == 0 {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::json!(persist.downloads_speed_limit_kbps)
+                },
+            },
+            "notice": null,
+            "card": pico_core::core::dlcoord::DlCardView::empty(),
+        })
+        .to_string(),
+        downloads_card: pico_core::core::dlcoord::DlCardView::empty(),
     }));
 
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
@@ -5079,6 +7864,72 @@ fn run_with_server(server: FileServer) {
         });
     }
 
+    // Downloads (0.32): resolve the downloads folder ONCE, the
+    // same way the data dir is resolved — probed facts in, one
+    // pure decision out (`core::download::resolve_downloads_dir`).
+    // Beside the exe when its Downloads subfolder passes the
+    // write+rename probe; else the user's own Downloads folder
+    // (USERPROFILE\Downloads, when the variable is set); else
+    // beside the exe anyway as the last resort (the manager's
+    // writes then fail per-task, visibly, never silently).
+    // Task state lives under the data dir's `downloads` folder.
+    let downloads_manager = {
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            .unwrap_or_else(|| PathBuf::from("."));
+        let exe_writable = probe_downloads_dir(&exe_dir);
+        let user_downloads = std::env::var("USERPROFILE")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(|home| PathBuf::from(home).join("Downloads"));
+        let used_user_fallback = !exe_writable && user_downloads.is_some();
+        let dir = pico_core::core::download::resolve_downloads_dir(
+            &exe_dir,
+            user_downloads.as_deref(),
+            exe_writable,
+        );
+        if used_user_fallback {
+            log::info(&format!(
+                "downloads: folder {} (fallback: user Downloads)",
+                dir.display()
+            ));
+        } else {
+            log::info(&format!("downloads: folder {}", dir.display()));
+        }
+        // W2's constructor note: `UserEvent` is private to this
+        // module, so the manager takes the proxy through its
+        // generic `new_with_proxy` adapter with the event
+        // factory — the brief's `new(proxy, …)` shape, one
+        // indirection removed from app types.
+        let manager = crate::downloads::DownloadManager::new_with_proxy(
+            proxy.clone(),
+            || UserEvent::DownloadsChanged,
+            dir,
+            pstore::pico_dir().join("downloads"),
+            persist.download_connections,
+            persist.downloads_max_concurrent,
+            persist.downloads_speed_limit_kbps,
+        );
+        // 0.34: the coordinator owns the manager from here,
+        // through the adapter; its settings seed from the
+        // same persisted trio (the persisted speed limit is
+        // stored as 0 = off; the coordinator's shape is
+        // `Option`).
+        Coordinator::new(
+            crate::dlbackend::ManagerBackend::new(manager),
+            DlSettings {
+                default_connections: persist.download_connections,
+                max_concurrent: persist.downloads_max_concurrent,
+                speed_limit_kbps: if persist.downloads_speed_limit_kbps == 0 {
+                    None
+                } else {
+                    Some(persist.downloads_speed_limit_kbps)
+                },
+            },
+        )
+    };
+
     let mut app = App {
         window: window.clone(),
         web_ctx,
@@ -5095,8 +7946,11 @@ fn run_with_server(server: FileServer) {
         dedupe: Dedupe::new(512),
         services_count: 0,
         others_count: 0,
-        blocked_downloads: 0,
-        download_notice: String::new(),
+        dl: downloads_manager,
+        downloads_panel_open: false,
+        dl_notice_armed_seq: 0,
+        last_dl_page_sig: 0,
+        last_dl_card_sig: 0,
         last_snap_sig: 0,
         chrome_gen: 1,
         chrome_ready: false,
@@ -5112,11 +7966,19 @@ fn run_with_server(server: FileServer) {
         teleport_panel_open: false,
         teleport_version: 0,
         palette_panel_open: false,
+        context_menu: None,
         pending_focus_addr: false,
         live_start_tabs: std::sync::Arc::new(Mutex::new(std::collections::HashSet::new())),
+        live_downloads_tabs: std::sync::Arc::new(Mutex::new(std::collections::HashSet::new())),
         last_layout_sig: String::new(),
-        expected_nav: std::sync::Arc::new(Mutex::new(None)),
+        expected_nav: std::sync::Arc::new(Mutex::new(std::collections::HashMap::new())),
+        userinfo_adopt: std::sync::Arc::new(Mutex::new(std::collections::HashMap::new())),
     };
+
+    // 0.34: seed the shared Downloads-page init data with the
+    // coordinator's REAL snapshot (restored tasks included)
+    // before any tab can render the page.
+    app.push_downloads_page(true);
 
     // Startup tabs: open every command-line argument that resolves —
     // files, directories, URLs, bare ports (AUDIT L4: v12 opened
@@ -5273,7 +8135,19 @@ fn run_with_server(server: FileServer) {
                         match route_new_window(&raw_url) {
                             NewWindowRoute::OpenTab(url) => {
                                 let is_start = url == START_URL;
-                                if app.add_tab(&url, is_start, true) > 0 {
+                                let new_id = app.add_tab(&url, is_start, true);
+                                if new_id > 0 {
+                                    // 0.32.4: a tab a PAGE opened
+                                    // is adopted, not the user's
+                                    // — the download unwind's
+                                    // CloseTab decision keys off
+                                    // this (a start tab is Pico's
+                                    // own page, never adopted).
+                                    if !is_start {
+                                        if let Some(t) = app.tab_mut(new_id) {
+                                            t.adopted = true;
+                                        }
+                                    }
                                     log::info(&format!(
                                         "new-window: opened in new tab: {}",
                                         redact_url(&url)
@@ -5300,14 +8174,82 @@ fn run_with_server(server: FileServer) {
                     // go through core::action::dispatch.
                     app.on_start_action(tab, source);
                 }
-                UserEvent::DownloadBlocked { tab, uri } => {
-                    app.blocked_downloads += 1;
-                    app.download_notice = truncate_chars(&uri, 80);
-                    log::info(&format!(
-                        "download denied (tab {tab}): {}",
-                        redact_url(&uri)
-                    ));
-                    app.push_state(false);
+                UserEvent::DownloadBlocked { uri } => {
+                    // The chrome webview's downloads stay denied
+                    // (0.32): the line is the whole handling —
+                    // no counter, no notice, no snapshot field.
+                    log::info(&format!("chrome download denied: {}", redact_url(&uri)));
+                }
+                UserEvent::ContentFocus { tab } => {
+                    // (The tab id rides along for symmetry with
+                    // the other per-tab events; the funnel is
+                    // shell-global, like HistoryChanged's push.)
+                    let _ = tab;
+                    app.close_all_panels();
+                }
+                UserEvent::DownloadsPageShortcut => {
+                    // Ctrl+J from content focus (0.35, WS5):
+                    // open the downloads page through the
+                    // same code the coordinator's
+                    // OpenDownloadsPage effect uses (which
+                    // also performs page_visited).
+                    log::info("downloads page opened (ctrl+j)");
+                    app.open_downloads_page();
+                }
+                UserEvent::ContextMenu {
+                    tab,
+                    target,
+                    location,
+                } => {
+                    // Pico's own context menu (0.34.1): the
+                    // registration handler suppressed the stock
+                    // menu and forwarded the target facts; the
+                    // app computes the menu and stores it.
+                    app.on_context_menu(tab, target, location);
+                }
+                UserEvent::DownloadStarting {
+                    tab,
+                    uri,
+                    suggested,
+                } => {
+                    app.on_download_starting(tab, uri, suggested, false);
+                }
+                UserEvent::DownloadCookies {
+                    tab,
+                    token,
+                    cookies,
+                } => {
+                    app.on_download_cookies(tab, token, cookies);
+                }
+                UserEvent::DownloadCookiesTimeout { tab, token } => {
+                    app.on_download_cookies_timeout(tab, token);
+                }
+                UserEvent::DownloadsChanged => {
+                    // The manager's state moved (0.34): the
+                    // coordinator diffs task statuses into
+                    // transition notices itself; its effects
+                    // re-push the surfaces through the
+                    // signature gates.
+                    let effects = app.dl.backend_changed();
+                    app.exec_dl_effects(effects);
+                }
+                UserEvent::DownloadsAction { tab, body } => {
+                    // The ONLY place Downloads-page actions are
+                    // decided (0.33; dlcmd 0.34): the IPC handler
+                    // forwards the raw body undecided;
+                    // `core::dlcmd::page_gate` + the parser
+                    // decide centrally.
+                    app.on_downloads_page_body(tab, &body);
+                }
+                UserEvent::DownloadNoticeExpired { seq } => {
+                    // The notice's display window ended
+                    // (0.32.3; coordinator 0.34): the
+                    // coordinator retires it only if it is
+                    // still THIS notice — a newer notice
+                    // re-arms its own timer and must not be
+                    // retired by this one.
+                    let effects = app.dl.notice_expired(seq);
+                    app.exec_dl_effects(effects);
                 }
                 UserEvent::DroppedPaths(paths) => {
                     for p in &paths {
@@ -5387,9 +8329,18 @@ fn run_with_server(server: FileServer) {
                     app.push_state(false);
                 }
                 WindowEvent::CloseRequested => {
+                    // Same pre-teardown download pause as the
+                    // WinClose command arm (0.32).
+                    app.dl.backend().0.pause_all_and_persist();
                     app.capture_geometry();
                     app.save_state();
                     *control_flow = ControlFlow::Exit;
+                }
+                WindowEvent::Focused(false) => {
+                    // The user left the window entirely
+                    // (0.32.4): panels close, same law as a
+                    // click into the page.
+                    app.close_all_panels();
                 }
                 _ => {}
             },

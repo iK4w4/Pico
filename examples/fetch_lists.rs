@@ -19,12 +19,9 @@ use pico_core::core::lists::{acquire_lists, AcquireOutcome, ListSource, LIST_SOU
 use std::path::PathBuf;
 
 fn main() {
-    let seam = PathBuf::from(
-        std::env::var("PICO_FETCH_SEAM_DIR").expect("PICO_FETCH_SEAM_DIR set"),
-    );
-    let cache = PathBuf::from(
-        std::env::var("PICO_LISTS_CACHE").expect("PICO_LISTS_CACHE set"),
-    );
+    let seam =
+        PathBuf::from(std::env::var("PICO_FETCH_SEAM_DIR").expect("PICO_FETCH_SEAM_DIR set"));
+    let cache = PathBuf::from(std::env::var("PICO_LISTS_CACHE").expect("PICO_LISTS_CACHE set"));
     let seam_fetcher = |src: &ListSource| -> Result<Vec<u8>, String> {
         let name = src.url.rsplit('/').next().unwrap_or("list.txt");
         let path = seam.join(name);

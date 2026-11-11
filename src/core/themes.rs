@@ -528,6 +528,7 @@ pub const TOKEN_NAMES: &[&str] = &[
     "--inset-line",
     "--focus-glow",
     "--focus-outline",
+    "--selection",
     "--feather-shade",
     "--backdrop",
     "--glow",
@@ -646,6 +647,22 @@ pub fn derive(p: &Palette, dark: bool) -> Vec<(&'static str, String)> {
     } else {
         rgba(s1, 0.14)
     };
+    // AUDIT 0.32.3: the text-selection tint for the shell's
+    // inputs (the address bar above all — through 0.32.2 a
+    // selected URL painted the OS default: a solid blue
+    // block with white text, foreign to every palette). The
+    // tint is the theme's OWN accent at the largest alpha
+    // whose composite over the surface still keeps --text
+    // at AA — the discipline every other text-bearing
+    // token is derived under. The ladder's floor sits close
+    // to the surface, where --text holds AA by
+    // construction, so a rung always qualifies; the floor
+    // is the fallback regardless.
+    let selection_alpha = [0.42, 0.36, 0.30, 0.24, 0.18]
+        .iter()
+        .copied()
+        .find(|&a| text.contrast(accent.mix(surface, 1.0 - a)) >= aa)
+        .unwrap_or(0.18);
     let glow = format!(
         "0 0 16px 0 {}, 0 0 4px 0 {}",
         rgba(accent, glow_alpha),
@@ -674,6 +691,7 @@ pub fn derive(p: &Palette, dark: bool) -> Vec<(&'static str, String)> {
             "--focus-outline",
             rgba(accent, if dark { 0.55 } else { 0.50 }),
         ),
+        ("--selection", rgba(accent, selection_alpha)),
         ("--feather-shade", feather),
         ("--backdrop", backdrop),
         ("--glow", glow),
@@ -1170,6 +1188,52 @@ mod tests {
                 Some(*want),
                 "{id} dark={dark} --accent-text drifted from its pre-A3-F5 pin"
             );
+        }
+    }
+
+    #[test]
+    fn selection_keeps_text_aa_for_all_32() {
+        // AUDIT 0.32.3: the RENDERED selection pairing —
+        // --text over the --selection tint composited on the
+        // theme's surface — holds AA in every derivation,
+        // and the tint is a real translucent accent (never
+        // the OS default solid blue, never fully opaque,
+        // never invisible). The alpha is parsed back out of
+        // the emitted rgba() string, so the test judges the
+        // exact bytes the pages serve.
+        fn emitted_alpha(sel: &str) -> f64 {
+            let inner = sel
+                .strip_prefix("rgba(")
+                .and_then(|s| s.strip_suffix(')'))
+                .expect("selection token is an rgba() value");
+            inner
+                .rsplit(", ")
+                .next()
+                .and_then(|a| a.parse::<f64>().ok())
+                .expect("selection alpha parses")
+        }
+        for p in PALETTES {
+            for dark in [true, false] {
+                let t = derive(p, dark);
+                let text = Rgb::from_hex(token(&t, "--text").unwrap());
+                let surface = Rgb::from_hex(token(&t, "--surface").unwrap());
+                let accent = Rgb::from_hex(token(&t, "--accent").unwrap());
+                let alpha = emitted_alpha(token(&t, "--selection").unwrap());
+                assert!(
+                    (0.15..=0.45).contains(&alpha),
+                    "{} dark={dark} selection alpha {alpha} outside the ladder's span",
+                    p.id
+                );
+                let blend = accent.mix(surface, 1.0 - alpha);
+                assert!(
+                    text.contrast(blend) >= 4.5,
+                    "{} dark={dark} --text {} on selection blend {} is {:.2}:1 (< 4.5)",
+                    p.id,
+                    text.to_hex(),
+                    blend.to_hex(),
+                    text.contrast(blend)
+                );
+            }
         }
     }
 

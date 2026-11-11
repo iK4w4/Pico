@@ -33,6 +33,35 @@ pub const MAX_LOG_VALUE_CHARS: usize = 300;
 /// the same hiding + control-stripping + length cap (callers
 /// also use this for URIs from download events and error
 /// strings).
+/// Strip `user[:pass]@` from every URL embedded in a larger
+/// string (a raw IPC body, an error message). The schemed
+/// branch of [`redact_url`] handles a bare URL; AUDIT 0.32.1
+/// (P2-6) is about the text AROUND one: for a JSON body the
+/// string before `://` is the JSON prefix, so the bare-URL
+/// branch never fires and the userinfo used to survive into
+/// the log. The authority scan stops at the first delimiter
+/// that cannot appear in an authority (path/query starts,
+/// quotes, whitespace, angle brackets).
+fn strip_embedded_userinfo(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(pos) = rest.find("://") {
+        let after = &rest[pos + 3..];
+        let auth_len = after
+            .find(|c| ['/', '?', '#', '"', '\'', ' ', '<', '>'].contains(&c))
+            .unwrap_or(after.len());
+        let authority = &after[..auth_len];
+        out.push_str(&rest[..pos + 3]);
+        match authority.rfind('@') {
+            Some(at) => out.push_str(&authority[at + 1..]),
+            None => out.push_str(authority),
+        }
+        rest = &after[auth_len..];
+    }
+    out.push_str(rest);
+    out
+}
+
 pub fn redact_url(url: &str) -> String {
     let (scheme, rest) = match url.split_once("://") {
         Some((s, r)) if !s.is_empty() && s.len() <= 32 => (s, r),
@@ -40,7 +69,12 @@ pub fn redact_url(url: &str) -> String {
             // Not a schemed URL (an error string, a raw IPC
             // body): still hide anything behind ? or # — callers
             // pass arbitrary page-shaped text here, and a query's
-            // contents are never needed to debug it.
+            // contents are never needed to debug it. Embedded
+            // URLs lose their userinfo first (P2-6): it can sit
+            // BEFORE any '?' and would otherwise survive the
+            // cut verbatim.
+            let stripped = strip_embedded_userinfo(url);
+            let url = stripped.as_str();
             let cut = url.find(['?', '#']).unwrap_or(url.len());
             let mut out = url[..cut].to_string();
             let tail = &url[cut..];

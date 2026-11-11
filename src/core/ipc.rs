@@ -136,6 +136,27 @@ pub enum Command {
     ThemeSet {
         id: String,
     },
+    /// A row of Pico's own context menu was picked. The id is
+    /// validated at parse time against the menu model's
+    /// whitelist (`core::ctxmenu::CTX_IDS`) — the chrome page
+    /// can only ever name one of the fourteen ids the model
+    /// can emit, so a forged or confused sender cannot turn
+    /// this verb into a stock-menu action the shell never
+    /// offered.
+    CtxPick {
+        id: String,
+    },
+    /// Pico's own context menu was dismissed without a pick:
+    /// the app restores the plain chrome bounds and drops the
+    /// pending target.
+    CtxClose,
+    // Downloads commands are NOT chrome `Command`s since
+    // 0.34: every downloads verb on every surface travels
+    // as the canonical `{"kind":"dl", ...}` body and is
+    // parsed by `core::dlcmd::parse_dl_body` (the chrome
+    // transport's inherent gate is the handler split in
+    // app.rs, which routes dl bodies before `parse_command`
+    // ever sees them).
     WinMin,
     WinMax,
     WinDrag,
@@ -169,13 +190,13 @@ fn allowed_command_keys(t: &str) -> Option<&'static [&'static str]> {
     match t {
         "ready" | "new_tab" | "back" | "forward" | "reload" | "home" | "open_file"
         | "theme_toggle" | "shield_toggle" | "lite_toggle" | "teleport" | "teleport_close"
-        | "teleport_copy" | "palette" | "palette_close" | "win_min" | "win_max" | "win_drag"
-        | "win_close" => Some(COMMON),
+        | "teleport_copy" | "palette" | "palette_close" | "ctx_close" | "win_min" | "win_max"
+        | "win_drag" | "win_close" => Some(COMMON),
         "social" => Some(SOCIAL),
         "close_tab" | "switch_tab" => Some(TAB),
         "cycle_tab" => Some(DIR),
         "navigate" => Some(TEXT),
-        "theme_set" => Some(ID),
+        "theme_set" | "ctx_pick" => Some(ID),
         _ => None,
     }
 }
@@ -188,18 +209,37 @@ fn allowed_command_keys(t: &str) -> Option<&'static [&'static str]> {
 /// the user themselves typed and submitted — because typed
 /// credentialed URLs are the documented user's-own-act
 /// exception; a page minting the same shape gets no match.
-pub fn userinfo_nav_allowed(url: &str, expected: Option<&str>) -> bool {
-    let has_userinfo = match url.split_once("://") {
+/// Does this URL's authority carry userinfo (`user[:pass]@`)?
+pub fn url_has_userinfo(url: &str) -> bool {
+    match url.split_once("://") {
         Some((_, rest)) => {
             let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
             authority.contains('@')
         }
         None => false,
-    };
-    if !has_userinfo {
+    }
+}
+
+pub fn userinfo_nav_allowed(url: &str, expected: Option<&str>) -> bool {
+    if !url_has_userinfo(url) {
         return true;
     }
     expected == Some(url)
+}
+
+/// May a finished/started page load of `url` be ADOPTED into
+/// tab state (address bar, history)? The `on_page_load`
+/// second layer behind the navigation handler (AUDIT 0.32.1,
+/// P3-1): a non-credentialed URL always may; a credentialed
+/// one only when `marker` — recorded by the navigation
+/// handler at the moment it allowed the load on an exact
+/// expectation match — names exactly this URL. A redirect
+/// chain that lands on a credentialed URL the handler never
+/// blessed (or never saw) is refused adoption, so the
+/// spoofed prefix cannot reach the address bar through the
+/// back door.
+pub fn userinfo_adoption_allowed(url: &str, marker: Option<&str>) -> bool {
+    !url_has_userinfo(url) || marker == Some(url)
 }
 
 /// Parse one raw IPC message body from the chrome webview.
@@ -258,6 +298,17 @@ pub fn parse_command(body: &str) -> Result<Envelope, String> {
         // longer is not a palette name, whatever it claims.
         if id.is_empty() || id.len() > 32 {
             return Err("theme id out of range".to_string());
+        }
+    }
+    if let Command::CtxPick { id } = &cmd {
+        // Context-menu ids are the menu model's fixed table
+        // ("copy_link", "inspect"); anything else — empty,
+        // over-long, or simply not an id `core::ctxmenu` can
+        // emit — is not a pick, whatever it claims. The
+        // whitelist is the point: a stock-menu verb ("save
+        // as", "print") has no id here to hide behind.
+        if id.is_empty() || id.len() > 32 || !super::ctxmenu::CTX_IDS.contains(&id.as_str()) {
+            return Err("ctx id out of range".to_string());
         }
     }
     if let Command::CycleTab { dir } = &cmd {
@@ -568,12 +619,18 @@ pub fn parse_shield_prune(body: &str) -> Option<Vec<PruneItem>> {
     if body.len() > MAX_NAV_BODY_BYTES {
         return None;
     }
+    // AUDIT 0.32.1 (P3-4): deny_unknown_fields, like both
+    // sibling report parsers (lite_chosen, shield_pruned) —
+    // this was the one report shape that silently tolerated
+    // extra fields.
     #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct RawItem {
         p: String,
         n: u64,
     }
     #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct Raw {
         kind: String,
         items: Vec<RawItem>,
@@ -584,15 +641,27 @@ pub fn parse_shield_prune(body: &str) -> Option<Vec<PruneItem>> {
     }
     let mut out = Vec::with_capacity(raw.items.len());
     for item in raw.items {
+        // AUDIT 0.32.1 (P3-4): the path is page-controlled
+        // text that reaches pico.log verbatim. A JS property
+        // path never contains '?' or '#', so cut there — a
+        // forged "path" shaped like a URL can no longer carry
+        // its query (the classic secret carrier) into the log
+        // dressed as Shield telemetry.
+        let path = item
+            .p
+            .split(['?', '#'])
+            .next()
+            .unwrap_or_default()
+            .to_string();
         if item.n == 0
-            || item.p.is_empty()
-            || item.p.len() > 256
-            || item.p.chars().any(|c| c.is_control())
+            || path.is_empty()
+            || path.len() > 256
+            || path.chars().any(|c| c.is_control())
         {
             continue;
         }
         out.push(PruneItem {
-            path: item.p,
+            path,
             count: item.n.min(100_000),
         });
     }
@@ -653,3 +722,64 @@ pub const NAV_OBSERVER_SCRIPT: &str = r#"
   } catch (e) { /* never break the page */ }
 })();
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ctx_pick_parses_for_every_whitelisted_id() {
+        // The whole menu table round-trips: any id the model
+        // can emit is a parseable pick.
+        for id in super::super::ctxmenu::CTX_IDS {
+            let body = format!(r#"{{"v":1,"boot":"b","req":1,"t":"ctx_pick","id":"{id}"}}"#);
+            let env = parse_command(&body).expect("whitelisted id parses");
+            assert_eq!(env.cmd, Command::CtxPick { id: id.to_string() });
+        }
+        let env = parse_command(r#"{"boot":"b","req":7,"t":"ctx_pick","id":"copy_link"}"#)
+            .expect("ctx_pick parses");
+        assert_eq!(env.boot, "b");
+        assert_eq!(env.req, 7);
+    }
+
+    #[test]
+    fn ctx_close_parses() {
+        let env = parse_command(r#"{"v":1,"boot":"b","req":2,"t":"ctx_close"}"#)
+            .expect("ctx_close parses");
+        assert_eq!(env.cmd, Command::CtxClose);
+    }
+
+    #[test]
+    fn ctx_pick_rejects_ids_the_model_cannot_emit() {
+        // Unknown, stock-shaped, empty, and over-long ids are
+        // all rejected at parse time — the app never sees a
+        // pick it did not offer.
+        for bad_id in ["save_as", "print", "bogus", "", "copy-link"] {
+            let body = format!(r#"{{"boot":"b","req":1,"t":"ctx_pick","id":"{bad_id}"}}"#);
+            assert!(parse_command(&body).is_err(), "id {bad_id:?} rejected");
+        }
+        let huge = format!(
+            r#"{{"boot":"b","req":1,"t":"ctx_pick","id":"{}"}}"#,
+            "x".repeat(200)
+        );
+        assert!(parse_command(&huge).is_err(), "oversized id rejected");
+        // A missing id is not a pick either.
+        assert!(parse_command(r#"{"boot":"b","req":1,"t":"ctx_pick"}"#).is_err());
+    }
+
+    #[test]
+    fn ctx_pick_rejects_unknown_fields() {
+        // The unknown-field law (AUDIT 0.31, A1-F5) covers
+        // the new verbs: an extra field on ctx_pick — even
+        // one naming a real field of another variant — is a
+        // rejection, and ctx_close takes no fields at all.
+        assert!(parse_command(
+            r#"{"boot":"b","req":1,"t":"ctx_pick","id":"copy","url":"https://evil.example"}"#
+        )
+        .is_err());
+        assert!(
+            parse_command(r#"{"boot":"b","req":1,"t":"ctx_pick","id":"copy","tab":9}"#).is_err()
+        );
+        assert!(parse_command(r#"{"boot":"b","req":1,"t":"ctx_close","id":"copy"}"#).is_err());
+    }
+}

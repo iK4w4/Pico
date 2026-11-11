@@ -94,3 +94,28 @@ fn redaction_output_is_bounded_for_monster_urls() {
     assert!(out.chars().count() <= 320);
     assert!(!out.contains("ssss"));
 }
+
+#[test]
+fn embedded_userinfo_in_a_raw_body_is_stripped() {
+    // AUDIT 0.32.1 (P2-6): a rejected chrome command is
+    // logged through redact_url with its RAW JSON body. The
+    // schemed-URL branch never fires for a body (the text
+    // before "://" is the JSON prefix), and the fallback used
+    // to cut only at '?'/'#' — so a download_add URL's
+    // user:pass@, sitting before any '?', reached pico.log
+    // verbatim. The fallback now strips userinfo from any
+    // embedded URL too.
+    let body = r#"{"t":"download_add","url":"https://user:hunter2@files.example.com/x.zip"}"#;
+    let out = redact_url(body);
+    assert!(!out.contains("hunter2"), "password leaked: {out}");
+    assert!(!out.contains("user:"), "userinfo leaked: {out}");
+    assert!(
+        out.contains("files.example.com"),
+        "the host stays for debugging: {out}"
+    );
+    // A bare (non-JSON) string carrying a credentialed URL
+    // gets the same treatment.
+    let out = redact_url("navigation failed for https://a:b@h.example/p end");
+    assert!(!out.contains("a:b@"), "{out}");
+    assert!(out.contains("h.example/p"), "{out}");
+}

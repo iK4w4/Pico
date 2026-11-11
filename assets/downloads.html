@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light" data-palette="forest">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; connect-src 'none'; base-uri 'none'; form-action 'none';">
+<title>Downloads</title>
+<style>
+/*__SHARED_CSS__*/
+
+body { min-height: 100vh; }
+.page { max-width: 880px; margin: 0 auto; padding: 32px 28px 44px; }
+
+/* 0.33: the Downloads page — the full-page sibling of the
+   chrome popover. Same laws as the start page: initial data
+   arrives in the INIT object, live updates arrive through
+   __picoSetDownloads, and every dynamic string is placed
+   with textContent only. Theme has exactly ONE channel
+   story: INIT at serve gives the first paint, and live theme
+   pushes arrive only through window.__picoTheme with the
+   versioned object payload — downloads snapshots no longer
+   carry theme/palette. */
+.dl-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 6px; }
+.dl-head h1 { margin: 0; font-size: 25px; font-weight: 700; letter-spacing: -0.01em; }
+.dl-head .v {
+  font-size: 11px; font-weight: 650; color: var(--accent);
+  background: var(--surface); box-shadow: var(--neu-raised-sm);
+  border-radius: var(--r-pill); padding: 2px 6px; line-height: 18px;
+}
+#dl-count-line { margin: 0 0 18px; color: var(--muted); font-size: 13.5px; }
+
+.dl-toolbar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+#dl-search {
+  flex: 1 1 220px; height: 34px; border: none; border-radius: var(--r-pill);
+  padding: 0 14px; color: var(--text); font: inherit; font-size: 13px;
+  min-width: 160px; user-select: text;
+}
+#dl-search:focus-visible { box-shadow: var(--neu-inset), var(--neu-focus); }
+#dl-chips { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+.dl-chip {
+  padding: 6px 12px; border-radius: var(--r-pill); font-size: 12px; font-weight: 650;
+  color: var(--muted); background: var(--surface); box-shadow: var(--neu-raised-sm);
+  transition: color 120ms ease, box-shadow 120ms ease;
+}
+.dl-chip:hover { color: var(--text); }
+.dl-chip[aria-pressed="true"] { color: var(--accent); box-shadow: var(--neu-pressed); }
+
+.dl-add-row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+#dl-add-url {
+  flex: 1; height: 34px; border: none; border-radius: var(--r-md);
+  padding: 0 12px; color: var(--text); font: inherit; font-size: 13px;
+  min-width: 0; user-select: text;
+}
+#dl-add-url:focus-visible { box-shadow: var(--neu-inset), var(--neu-focus); }
+.dl-btn {
+  padding: 7px 12px; border-radius: var(--r-md); font-size: 12.5px; font-weight: 600;
+  color: var(--text); background: var(--surface); box-shadow: var(--neu-raised-sm);
+  transition: box-shadow 120ms ease, color 120ms ease;
+  white-space: nowrap;
+}
+.dl-btn:hover { color: var(--accent); }
+.dl-btn:active { box-shadow: var(--neu-pressed); }
+.dl-btn.armed { color: var(--warn); box-shadow: var(--neu-pressed); }
+
+.dl-settings {
+  display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  margin-bottom: 12px; font-size: 12.5px; color: var(--muted);
+}
+.dl-settings label { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; }
+.dl-settings select {
+  font: inherit; font-size: 12.5px; color: var(--text);
+  background: var(--surface); border: none; border-radius: var(--r-md);
+  box-shadow: var(--neu-raised-sm); padding: 4px 8px; height: 28px;
+}
+.dl-settings .spacer { flex: 1; }
+
+#dl-page-list { display: flex; flex-direction: column; gap: 10px; }
+.dlp-row {
+  border-radius: var(--r-xl); padding: 14px 16px;
+  background: var(--surface); box-shadow: var(--neu-raised);
+}
+.dlp-name-line { display: flex; align-items: baseline; gap: 8px; }
+.dlp-name {
+  flex: 1; min-width: 0; font-size: 14px; font-weight: 650; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.dlp-status { flex: none; font-size: 11.5px; font-weight: 600; color: var(--accent); }
+.dlp-meta { margin-top: 3px; font-size: 12px; color: var(--faint); }
+.dlp-bar {
+  margin-top: 10px; height: 6px; border-radius: var(--r-pill); overflow: hidden;
+  background: var(--surface); box-shadow: var(--neu-pressed);
+}
+.dlp-fill { height: 100%; width: 0; border-radius: var(--r-pill); background: var(--accent); }
+.dlp-fill.indet { opacity: 0.35; }
+.dlp-detail { margin-top: 8px; font-size: 12.5px; color: var(--muted); }
+.dlp-error { margin-top: 6px; font-size: 12px; line-height: 1.5; color: var(--warn); }
+.dlp-hint { margin-top: 2px; font-size: 12px; line-height: 1.5; color: var(--muted); }
+.dlp-retry { margin-top: 6px; font-size: 12px; color: var(--muted); }
+.dlp-sha {
+  margin-top: 8px; font-size: 11.5px; color: var(--faint);
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+}
+.dlp-sha .sha-val {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 11px; color: var(--muted); cursor: pointer; word-break: break-all;
+}
+.dlp-sha .sha-val:hover { color: var(--accent); }
+.dlp-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.dlp-refresh {
+  display: flex; align-items: center; gap: 8px; margin-top: 12px;
+}
+.dlp-refresh input {
+  flex: 1; height: 32px; border: none; border-radius: var(--r-md);
+  padding: 0 10px; color: var(--text); font: inherit; font-size: 12.5px;
+  min-width: 0; user-select: text;
+}
+.dlp-refresh input:focus-visible { box-shadow: var(--neu-inset), var(--neu-focus); }
+
+.empty {
+  border-radius: var(--r-xl); padding: 24px; text-align: center; color: var(--faint);
+  font-size: 13px; line-height: 1.55;
+  box-shadow: var(--neu-inset);
+}
+.footer { margin-top: 36px; text-align: center; font-size: 11.5px; color: var(--faint); line-height: 1.7; }
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="dl-head">
+    <h1>Downloads</h1>
+    <span class="v" id="dl-ver">0.40.1</span>
+  </div>
+  <p id="dl-count-line"></p>
+
+  <div class="dl-toolbar">
+    <input class="well" id="dl-search" type="text" spellcheck="false" autocomplete="off"
+           placeholder="Search name or host" aria-label="Search downloads">
+    <div id="dl-chips" role="group" aria-label="Filter downloads by status">
+      <button class="dl-chip" type="button" data-chip="all" aria-pressed="true">All</button>
+      <button class="dl-chip" type="button" data-chip="downloading" aria-pressed="false">Downloading</button>
+      <button class="dl-chip" type="button" data-chip="queued" aria-pressed="false">Queued</button>
+      <button class="dl-chip" type="button" data-chip="paused" aria-pressed="false">Paused</button>
+      <button class="dl-chip" type="button" data-chip="failed" aria-pressed="false">Failed</button>
+      <button class="dl-chip" type="button" data-chip="done" aria-pressed="false">Done</button>
+    </div>
+  </div>
+
+  <div class="dl-add-row">
+    <input class="well" id="dl-add-url" type="text" spellcheck="false" autocomplete="off"
+           placeholder="Paste a download link" aria-label="Download link">
+    <button class="dl-btn" id="dl-add-btn" type="button">Add</button>
+  </div>
+
+  <div class="dl-settings">
+    <label>At once
+      <select id="dl-max-concurrent" aria-label="Maximum downloads at once">
+        <option value="1">1</option>
+        <option value="2">2</option>
+        <option value="3">3</option>
+        <option value="4">4</option>
+        <option value="5">5</option>
+      </select>
+    </label>
+    <label>Speed limit
+      <select id="dl-speed-limit" aria-label="Download speed limit">
+        <option value="0">Off</option>
+        <option value="512">512 KB/s</option>
+        <option value="1024">1 MB/s</option>
+        <option value="2048">2 MB/s</option>
+        <option value="5120">5 MB/s</option>
+        <option value="10240">10 MB/s</option>
+      </select>
+    </label>
+    <span class="spacer"></span>
+    <button class="dl-btn" id="dl-open-folder" type="button">Open folder</button>
+    <button class="dl-btn" id="dl-clear-completed" type="button">Clear completed</button>
+    <button class="dl-btn" id="dl-clear-all" type="button">Clear all (files stay on disk)</button>
+  </div>
+
+  <div id="dl-page-list"></div>
+  <div class="empty" id="dl-page-empty" hidden>No downloads yet — add a link above, or start one from any page.</div>
+  <div class="empty" id="dl-page-nomatch" hidden>Nothing matches.</div>
+
+  <div class="footer">Pico 0.40.1 · by @iK4w4</div>
+</div>
+
+<script>
+"use strict";
+/*__DLROWS__*/
+/* Pico 0.34 downloads page. Rebuilt on the shared DlRows
+   renderer (spliced in above — the same bytes the chrome
+   popover runs): rows are DlRows.renderTaskList(snapshot,
+   "page") and every task gesture is posted by
+   DlRows.bindCommands through postDl, which wraps payloads
+   into the canonical body {kind:"dl", action:…}. Initial
+   data arrives in the INIT object; live updates arrive
+   through __picoSetDownloads — both carry THE downloads
+   snapshot {tasks, active_count, failed_unseen, settings,
+   notice} (DlRows.normalizeSnapshot also accepts the 0.33
+   payload shape). Theme is NOT part of that snapshot:
+   INIT at serve gives the first paint, and live theme pushes
+   arrive only through window.__picoTheme. The page never edits the list itself; it
+   keeps only LOCAL UI state across renders: the search
+   text, the active chip, and (inside DlRows._ui) the open
+   refresh editor with its draft and the armed Restart
+   confirm. Page-chrome gestures (Add URL, the settings
+   selects, Clear completed / Clear all) post canonical
+   bodies from here; the clear-* verbs predate the 0.34
+   frozen verb list and are kept so the 0.33 feature is not
+   silently dropped. */
+var INIT = __PICO_INIT_JSON__ || {};
+
+var data = INIT;
+var activeChip = "all";
+
+var listEl = document.getElementById("dl-page-list");
+var emptyEl = document.getElementById("dl-page-empty");
+var nomatchEl = document.getElementById("dl-page-nomatch");
+var countLineEl = document.getElementById("dl-count-line");
+var searchEl = document.getElementById("dl-search");
+var addUrlEl = document.getElementById("dl-add-url");
+var maxConcEl = document.getElementById("dl-max-concurrent");
+var speedEl = document.getElementById("dl-speed-limit");
+
+function postDl(payload) {
+  if (window.ipc && typeof window.ipc.postMessage === "function") {
+    try {
+      var msg = { kind: "dl" };
+      for (var k in payload) msg[k] = payload[k];
+      window.ipc.postMessage(JSON.stringify(msg));
+    } catch (e) { /* IPC died mid-click; the log line in Rust is the witness either way */ }
+  }
+}
+
+function applyTheme(t, p) {
+  document.documentElement.setAttribute("data-theme", t === "dark" ? "dark" : "light");
+  if (p) document.documentElement.setAttribute("data-palette", p);
+}
+
+/* 0.40.1: the ONE theme entry point. The app pushes only
+   window.__picoTheme(payload) with payload =
+   {"v":1,"mode":"dark"|"light","palette":"<id>"}; every other
+   theme input was removed. The hook is defensive: any invalid
+   payload changes nothing, logs one console.warn line, returns
+   false, and never throws. Extra fields are ignored. */
+var _knownPalettes = null;
+var _paletteScanFailed = false;
+function probeKnownPalettes() {
+  if (_knownPalettes !== null || _paletteScanFailed) return _knownPalettes;
+  var found = {};
+  var readable = false;
+  try {
+    var sheets = document.styleSheets;
+    for (var i = 0; i < sheets.length; i++) {
+      var rules = null;
+      try { rules = sheets[i].cssRules; } catch (e) { continue; }
+      if (!rules) continue;
+      readable = true;
+      for (var j = 0; j < rules.length; j++) {
+        var sel = rules[j] && rules[j].selectorText;
+        if (!sel) continue;
+        var re = /\[data-palette="([a-z0-9-]+)"\]/g;
+        var m;
+        while ((m = re.exec(sel)) !== null) found[m[1]] = true;
+      }
+    }
+  } catch (e) {
+    _paletteScanFailed = true;
+    _knownPalettes = null;
+    return null;
+  }
+  if (!readable || Object.keys(found).length === 0) {
+    /* Fallback: the stylesheet scan itself failed (no readable
+       sheet or no palette selectors found), so palette ids are
+       accepted by shape only — see __picoTheme below. */
+    _paletteScanFailed = true;
+    _knownPalettes = null;
+    return null;
+  }
+  _knownPalettes = found;
+  return _knownPalettes;
+}
+function warnInvalidTheme() {
+  try { console.warn("pico: ignored invalid theme payload"); } catch (e) {}
+}
+window.__picoTheme = function (payload) {
+  try {
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) { warnInvalidTheme(); return false; }
+    if (payload.v !== 1) { warnInvalidTheme(); return false; }
+    if (payload.mode !== "dark" && payload.mode !== "light") { warnInvalidTheme(); return false; }
+    if (typeof payload.palette !== "string") { warnInvalidTheme(); return false; }
+    var known = probeKnownPalettes();
+    if (known) {
+      if (!known[payload.palette]) { warnInvalidTheme(); return false; }
+    } else {
+      /* Fallback when the stylesheet scan fails: accept only
+         ids matching the palette-id shape. */
+      if (!/^[a-z][a-z0-9-]{0,31}$/.test(payload.palette)) { warnInvalidTheme(); return false; }
+    }
+    applyTheme(payload.mode, payload.palette);
+    return true;
+  } catch (e) {
+    warnInvalidTheme();
+    return false;
+  }
+};
+
+function snap() { return DlRows.normalizeSnapshot(data); }
+
+function matchesFilter(task) {
+  if (activeChip !== "all" && task.status !== activeChip) return false;
+  var q = searchEl.value.trim().toLowerCase();
+  if (!q) return true;
+  var name = String(task.name || "").toLowerCase();
+  var host = String(task.host || "").toLowerCase();
+  return name.indexOf(q) !== -1 || host.indexOf(q) !== -1;
+}
+
+/* AUDIT 0.34.2: render is guarded, like the chrome's
+   sections — a throw while painting one snapshot surfaces
+   on the count line (and in window.__picoErrors + the
+   console) instead of leaving a silently blank or stale
+   list; the next push re-renders from scratch. */
+function render() {
+  try {
+    renderNow();
+  } catch (e) {
+    if (typeof console !== "undefined" && console.error) {
+      console.error("pico downloads render:", e);
+    }
+    window.__picoErrors = window.__picoErrors || {};
+    if (!window.__picoErrors.render) {
+      window.__picoErrors.render = String((e && e.message) || e);
+    }
+    countLineEl.textContent =
+      "Downloads view hit a problem — details in the console";
+  }
+}
+
+function renderNow() {
+  var snapshot = snap();
+  /* Settings reflect the incoming state on every render —
+     except the select the user is interacting with, whose
+     change event already carries their pick. */
+  var settings = snapshot.settings;
+  if (settings.max_concurrent !== null && settings.max_concurrent !== undefined &&
+      document.activeElement !== maxConcEl) {
+    maxConcEl.value = String(settings.max_concurrent);
+  }
+  if (settings.speed_limit_kbps !== undefined &&
+      document.activeElement !== speedEl) {
+    /* null = Off (the frozen settings shape). A value
+       outside the choice list (a hand-edited state file —
+       the sanitizer caps the range but does not snap to
+       choices, AUDIT 0.34.2 G4) must render as a real
+       option, never a blank select: the same rescue the
+       chrome's default-connections select got in 0.32.1. */
+    var wantSpeed = settings.speed_limit_kbps === null
+      ? "0" : String(settings.speed_limit_kbps);
+    speedEl.value = wantSpeed;
+    if (speedEl.value !== wantSpeed) {
+      var opt = document.createElement("option");
+      opt.value = wantSpeed;
+      opt.textContent = settings.speed_limit_kbps === null
+        ? "Off" : (settings.speed_limit_kbps / 1024) + " MB/s";
+      speedEl.appendChild(opt);
+      speedEl.value = wantSpeed;
+    }
+  }
+  var tasks = snapshot.tasks;
+  countLineEl.textContent = tasks.length === 0
+    ? "No downloads"
+    : tasks.length + (tasks.length === 1 ? " download" : " downloads") +
+      " · " + snapshot.active_count + " active";
+
+  var filtered = tasks.filter(matchesFilter);
+  /* 0.35: the full snapshot list rides along as the
+     queue-position context, so a queued row's "ahead"
+     count is computed against reality, not the filter. */
+  listEl.innerHTML = DlRows.renderTaskList({ tasks: filtered }, "page", tasks);
+  /* Clear completed is gated like the popover's Clear
+     finished: hidden unless a done task exists. */
+  document.getElementById("dl-clear-completed").hidden =
+    !tasks.some(function (t) { return t.status === "done"; });
+  emptyEl.hidden = tasks.length !== 0;
+  nomatchEl.hidden = !(tasks.length > 0 && filtered.length === 0);
+}
+
+/* Task verbs inside the list: ONE delegated DlRows handler;
+   postDl supplies the canonical body; a local-state change
+   (Restart arm, refresh editor) repaints via render(). */
+DlRows.bindCommands(listEl, postDl, { rerender: render });
+
+window.__picoSetDownloads = function (payload) {
+  if (payload) {
+    data = payload;
+  }
+  render();
+};
+
+/* Toolbar wiring. */
+searchEl.addEventListener("input", function () { render(); });
+document.querySelectorAll("#dl-chips .dl-chip").forEach(function (chip) {
+  chip.addEventListener("click", function () {
+    activeChip = chip.getAttribute("data-chip") || "all";
+    document.querySelectorAll("#dl-chips .dl-chip").forEach(function (c) {
+      c.setAttribute("aria-pressed", c === chip ? "true" : "false");
+    });
+    render();
+  });
+});
+
+function submitAdd() {
+  var url = addUrlEl.value.trim();
+  if (!url) return;
+  postDl({ action: "add-url", url: url });
+  addUrlEl.value = "";
+}
+document.getElementById("dl-add-btn").addEventListener("click", function () { submitAdd(); });
+addUrlEl.addEventListener("keydown", function (ev) {
+  if (ev.key === "Enter") { ev.preventDefault(); submitAdd(); }
+});
+
+maxConcEl.addEventListener("change", function () {
+  postDl({ action: "set-max-concurrent", maxConcurrent: parseInt(maxConcEl.value, 10) });
+});
+speedEl.addEventListener("change", function () {
+  postDl({ action: "set-speed-limit", speedLimitKbps: parseInt(speedEl.value, 10) });
+});
+document.getElementById("dl-open-folder").addEventListener("click", function () {
+  /* No id key at all — the verb's id is optional. */
+  postDl({ action: "open-folder" });
+});
+document.getElementById("dl-clear-completed").addEventListener("click", function () {
+  postDl({ action: "clear-completed" });
+});
+document.getElementById("dl-clear-all").addEventListener("click", function () {
+  postDl({ action: "clear-all" });
+});
+
+applyTheme(INIT.theme, INIT.palette);
+render();
+
+</script>
+</body>
+</html>

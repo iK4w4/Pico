@@ -224,7 +224,7 @@ pub fn decide(facts: &RequestFacts, state: FilterState, engine: Option<&ShieldEn
 /// empty body — the *element* keeps whatever box the page's CSS
 /// gave it, and an image that fails outright keeps a
 /// broken-image placeholder. On long-tail sites without
-/// host-specific cosmetics (a long-tail-site screenshot:
+/// host-specific cosmetics (the user's soft98.ir screenshot:
 /// ad sidebars of broken-image boxes in fully visible
 /// containers) nothing ever collapses those boxes. This runtime
 /// does: it listens for image load failures in the capture
@@ -765,7 +765,7 @@ mod tests {
         assert_eq!(classify_origin("http://dev.localhost/"), OriginClass::Local);
         assert_eq!(classify_origin("http://[::1]:3000/"), OriginClass::Local);
         assert_eq!(classify_origin("pico://start"), OriginClass::Internal);
-        assert_eq!(classify_origin("https://downloads.example.net/"), OriginClass::Public);
+        assert_eq!(classify_origin("https://soft98.ir/"), OriginClass::Public);
         assert_eq!(
             classify_origin("data:image/png;base64,x"),
             OriginClass::Local

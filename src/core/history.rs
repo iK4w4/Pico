@@ -424,6 +424,43 @@ impl TabHistory {
         self.push_new(url);
     }
 
+    /// Remove the CURRENT entry (AUDIT 0.33): the repair for a
+    /// download navigation that polluted history via
+    /// [`Self::record_push`] (WS1) — the shell drops the file
+    /// entry the push created so the tab's history is what it
+    /// was before the captured navigation. The index becomes
+    /// `index - 1` when it was > 0, and `None` when it was 0
+    /// or the entries are now empty. Pending intent and the
+    /// remembered commit-start are cleared, mirroring
+    /// `record_push`'s hygiene: neither may survive pointing
+    /// at an entry that no longer exists. No-op when there
+    /// is no current entry.
+    pub fn drop_top_entry(&mut self) {
+        let Some(i) = self.index else {
+            return;
+        };
+        if i >= self.entries.len() {
+            return;
+        }
+        self.entries.remove(i);
+        self.index = if self.entries.is_empty() {
+            None
+        } else if i == 0 {
+            None
+        } else {
+            Some(i - 1)
+        };
+        // Edge: removing entry 0 while later entries remain
+        // leaves index None with a non-empty list — the same
+        // shape a fresh history has before its first commit;
+        // the next commit/pop reconciles by push. (The WS1
+        // repair case is a single-entry or top-entry drop,
+        // where this lands exactly on the previous page or
+        // on no page at all.)
+        self.clear_pending();
+        self.commit_start = None;
+    }
+
     /// SPA `history.replaceState`: rewrite the current entry in
     /// place.
     pub fn record_replace(&mut self, url: &str) {

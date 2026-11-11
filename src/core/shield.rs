@@ -91,7 +91,7 @@ use std::sync::{Mutex, RwLock};
 /// host-specific cosmetic set is 1,152 hosts / 2,128 rules and
 /// serializes to 326,923 bytes of script — the v25 budget of
 /// 300,000 silently cut the long tail (578 hosts shipped;
-/// long-tail sites got generic cosmetics only). 340,000
+/// soft98.ir-class sites got generic cosmetics only). 340,000
 /// covers every host in the lists with ~13 KB of headroom for
 /// the budget accounting's approximation drift (V26-S3); the
 /// coverage test in tests/shield_tests.rs pins hosts-shipped ==
@@ -912,8 +912,8 @@ impl DomainSet {
 }
 
 /// One `domain=` entry against a page host. Plain entries cover
-/// the host and its subdomains. Entries ending in `.*` (the
-/// real lists carry dozens — `partner.*`-shaped stems) are
+/// the host and its subdomains. Entries ending in `.*` (89 of
+/// them in the shipped lists — `gentside.*`, `ohmymag.*`) are
 /// TLD wildcards: they match when the host with its final label
 /// stripped equals the stem or ends with `.<stem>`.
 fn host_matches(page_host: &str, entry: &str) -> bool {

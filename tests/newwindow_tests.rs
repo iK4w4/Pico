@@ -62,6 +62,29 @@ fn the_start_page_may_open_as_a_tab() {
 }
 
 #[test]
+fn the_downloads_page_may_not_open_as_a_tab() {
+    // AUDIT 0.40.1: the downloads page renders the user's
+    // download history (names, hosts) — a web page must not
+    // mint a tab showing it. Through 0.35.1 the downloads
+    // spellings rode the shared navigation allowlist into
+    // OpenTab. (The page's ACTIONS from such a tab were
+    // already dead at the page gate, which requires the
+    // app's own is_downloads flag; this closes the display.)
+    for u in [
+        "pico://downloads",
+        "pico://downloads/",
+        "https://pico.downloads/",
+        "https://pico.downloads",
+    ] {
+        assert_eq!(denies(u), "internal-page", "url: {u}");
+    }
+    // The chrome document is not a page-mintable tab either
+    // (it was never in the allowlist — the fallthrough's
+    // reason, unchanged).
+    assert_eq!(denies("pico://chrome"), "scheme-not-allowed");
+}
+
+#[test]
 fn internal_action_urls_are_denied_with_their_own_reason() {
     // Actions may only ever be decided by the gated dispatch;
     // a page must not mint one by opening a window.

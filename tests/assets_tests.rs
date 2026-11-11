@@ -41,8 +41,8 @@ fn chrome_final_html_is_complete() {
     // Static skeleton: the version badge is correct BEFORE any Rust
     // message arrives.
     assert!(
-        html.contains(">0.31.1<"),
-        "static version badge must say 0.31.1"
+        html.contains(">0.40.1<"),
+        "static version badge must say 0.40.1"
     );
 }
 
@@ -61,7 +61,7 @@ fn start_final_html_is_complete() {
         );
     }
     assert!(html.contains("\"marker\":true"), "init JSON not embedded");
-    assert!(html.contains(">0.31.1<"), "start page must say 0.31.1");
+    assert!(html.contains(">0.40.1<"), "start page must say 0.40.1");
     // Script-breakout neutralization is part of assembly: a hostile
     // title inside the init JSON cannot close the script element.
     let hostile = assemble_start_html("{\"t\":\"x</script><script>alert(1)</script>\"}");
@@ -139,11 +139,11 @@ fn branding_is_present_and_enum_wired() {
 
     let start = assemble_start_html("{}");
     // Hero heading + byline row + footer line.
-    assert!(start.contains("Pico <span class=\"v\">0.31.1</span>"));
+    assert!(start.contains("Pico <span class=\"v\">0.40.1</span>"));
     assert!(start.contains("by @iK4w4"), "start byline text missing");
     assert!(
-        start.contains("Pico 0.31.1 · by @iK4w4"),
-        "start footer must read 'Pico 0.31.1 · by @iK4w4'"
+        start.contains("Pico 0.40.1 · by @iK4w4"),
+        "start footer must read 'Pico 0.40.1 · by @iK4w4'"
     );
     // Chips: action-URL hrefs carrying ONLY the enum name, plus the
     // data-social attributes the DOM test drives.
@@ -406,6 +406,12 @@ fn px_literals(value: &str) -> Vec<f64> {
 /// {0, 2, 4, 6, 8, 12, 16}. The single documented exception —
 /// #navbar's geometry-derived vertical padding — is pinned
 /// exactly, neutralized, and the scan proceeds without it.
+/// 0.32.2: the downloads popover carries its OWN geometry
+/// contract (the DL_* constants in core::layout, shared with
+/// the CSS), whose 10px card padding, 8px/10px row padding,
+/// 5px row gap and the error line's -5px gap absorption are
+/// pinned exactly below and neutralized the same way — the
+/// exception covers the popover only.
 #[test]
 fn chrome_spacing_stays_on_the_scale() {
     const SCALE: [f64; 7] = [0.0, 2.0, 4.0, 6.0, 8.0, 12.0, 16.0];
@@ -415,6 +421,18 @@ fn chrome_spacing_stays_on_the_scale() {
         "the #navbar geometry padding changed shape (AUDIT D9 pins it)"
     );
     css = css.replace("padding: 1px 12px 13px;", "padding: 12px;");
+    for (decl, neutral) in [
+        ("padding: 10px;", "padding: 12px;"),
+        ("padding: 8px 10px;", "padding: 8px 12px;"),
+        ("gap: 5px;", "gap: 6px;"),
+        ("margin-top: -5px;", "margin-top: 0;"),
+    ] {
+        assert!(
+            css.contains(decl),
+            "the downloads popover's geometry declaration '{decl}' changed shape (0.32.2 pins it)"
+        );
+        css = css.replace(decl, neutral);
+    }
     let props = [
         "margin",
         "margin-top",
@@ -448,6 +466,86 @@ fn chrome_spacing_stays_on_the_scale() {
         }
     }
     assert!(checked >= 20, "spacing scan saw too little ({checked})");
+}
+
+/// Text selection + caret (0.32.3): selected text in the
+/// chrome is themed — the --selection token (an accent
+/// tint derived to keep --text at AA in core::themes)
+/// behind the theme's own text color, never the platform
+/// blue/white — and the address input's caret is the
+/// accent. Focus stays the wrap's shadow glow (pinned by
+/// address_focus_is_a_shadow_only_glow); these two rules
+/// are the rest of the bar's state styling.
+#[test]
+fn selection_and_caret_are_themed() {
+    let html = assemble_chrome_html();
+    let sel = rule_body(&html, "::selection");
+    assert!(
+        sel.contains("background: var(--selection)"),
+        "selection background must be the --selection token"
+    );
+    assert!(
+        sel.contains("color: var(--text)"),
+        "selected text must keep the theme text color"
+    );
+    // "#addr {" — the bare "#addr" would match #addr-wrap
+    // first (rule_body finds the first occurrence).
+    let addr = rule_body(&html, "#addr {");
+    assert!(
+        addr.contains("caret-color: var(--accent)"),
+        "the address caret must be the theme accent"
+    );
+}
+
+/// The download toast's geometry (0.32.3) is a three-party
+/// contract, same as the popover's: the CSS declaration,
+/// the DL_TOAST_* constants the app sizes the chrome rect
+/// with, and this pin must agree. The pill height is the
+/// closed form 18px line + 2 × 8px padding.
+#[test]
+fn download_toast_matches_the_layout_contract() {
+    use pico_core::core::layout::{DL_TOAST_H, DL_TOAST_TOP};
+    let html = assemble_chrome_html();
+    let toast = rule_body(&html, "#dl-toast");
+    for decl in [
+        "position: fixed",
+        "max-width: 360px",
+        "border-radius: var(--r-lg)",
+        "box-shadow: var(--neu-raised)",
+        "padding: 8px 12px",
+        "line-height: 18px",
+        "cursor: pointer",
+    ] {
+        assert!(
+            toast.contains(decl),
+            "#dl-toast lost '{decl}' (0.32.3 pins the toast geometry)"
+        );
+    }
+    assert!(
+        toast.contains(&format!("top: {}px", DL_TOAST_TOP as i64)),
+        "#dl-toast top must equal DL_TOAST_TOP ({DL_TOAST_TOP})"
+    );
+    assert!(
+        toast.contains(&format!("right: {}px", 12)),
+        "#dl-toast anchors right like the popover (12px)"
+    );
+    // The pill's own height is the closed form the app
+    // extends the chrome rect for.
+    assert_eq!(
+        DL_TOAST_H, 34.0,
+        "DL_TOAST_H must stay the 18px line + 2x8px padding closed form"
+    );
+    // The blocked variant leads in the theme's warn color.
+    let warn = rule_body(&html, "#dl-toast.warn .dt-lead");
+    assert!(warn.contains("color: var(--warn)"));
+    // The toast's ids are structural anchors.
+    for id in ["dl-toast", "dl-toast-lead", "dl-toast-name"] {
+        assert!(
+            pico_core::core::assets::REQUIRED_CHROME_IDS.contains(&id),
+            "{id} must be a required chrome id"
+        );
+        assert!(html.contains(&format!("id=\"{id}\"")), "chrome lost #{id}");
+    }
 }
 
 /// v19 radius contract (AUDIT D4): border-radius values in the
@@ -1047,8 +1145,9 @@ fn v26_palette_purity_no_old_hexes() {
 /// bar when focused, the active tab's top edge, the brand
 /// mark, icon buttons on hover, the filter/teleport/palette
 /// buttons in their active state, the picker cards, the
-/// start page's primary cards on hover, and (0.30) the
-/// savings band's tiles on hover. Resting surfaces never
+/// start page's primary cards on hover, (0.30) the
+/// savings band's tiles on hover, and (0.32) the Downloads
+/// button while its panel is open. Resting surfaces never
 /// glow (that would kill the material).
 #[test]
 fn glow_lives_only_at_the_approved_sites() {
@@ -1060,6 +1159,7 @@ fn glow_lives_only_at_the_approved_sites() {
         "#lite[aria-pressed=\"true\"]",
         "#teleport[aria-expanded=\"true\"]",
         "#palette[aria-expanded=\"true\"]",
+        "#downloads[aria-expanded=\"true\"]",
         ".pcard:hover",
         ".pcard[aria-pressed=\"true\"]",
     ] {
@@ -1093,8 +1193,8 @@ fn glow_lives_only_at_the_approved_sites() {
     // DEFINE --glow; they never reference var(--glow).)
     let total = style.matches("var(--glow").count() + start.matches("var(--glow").count();
     assert_eq!(
-        total, 12,
-        "glow reference count drifted from the approved set (10 chrome + 2 start)"
+        total, 13,
+        "glow reference count drifted from the approved set (11 chrome + 2 start)"
     );
 }
 
