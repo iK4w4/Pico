@@ -20,10 +20,8 @@ page and run it. It needs the Microsoft Edge
 WebView2 Runtime, which ships with Windows 11 and
 recent Windows 10.
 
-- Size: TODO — filled in when the 0.40.1 release
-  is published
-- SHA-256: TODO — filled in when the 0.40.1
-  release is published
+- Size: 1,638,912 bytes
+- SHA-256: 54dcc42c3ae1bb24904ae24802d6df3db69c3e49dcd3a684c642d733aa87dcd8
 
 Everything Pico keeps — settings, the log, the
 cached filter lists and the WebView2 profile —

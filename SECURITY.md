@@ -18,10 +18,11 @@ Chrome).
 
 ## Verifying the release download
 
-The `Pico.exe` attached to the 0.40.1 release is TODO
-bytes with SHA-256 TODO. (Filled in when the release is
-published.) If your copy's hash differs, it is not the file
-published from this tree.
+The `Pico.exe` attached to the 0.40.1 release is 1,638,912
+bytes with SHA-256
+`54dcc42c3ae1bb24904ae24802d6df3db69c3e49dcd3a684c642d733aa87dcd8`.
+If your copy's hash differs, it is not the file published
+from this tree.
 
 ## Network behavior
 
