@@ -33,6 +33,16 @@ works the same. Download state lives there too
 writable (otherwise your Windows Downloads
 folder).
 
+## Screenshots
+
+![Pico's start page — local servers, the savings band, and the downloads card](screenshots/pico-start-royal-light.png)
+
+*The start page: running dev servers as cards, what the Shield and Lite have saved, and live downloads at a glance.*
+
+![The downloads page and popover — progress, live speed, and time left](screenshots/pico-downloads-royal-light.png)
+
+*The download manager: every file with its progress, live speed, and controls; finished files carry a SHA-256.*
+
 ## What's inside
 
 - **Tabs and navigation** — the usual browser
