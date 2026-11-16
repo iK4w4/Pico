@@ -1,4 +1,4 @@
-//! Pico v26 core library: everything that does not need a GUI.
+//! Pico core library: everything that does not need a GUI.
 //!
 //! The library has zero windowing dependencies so it can be
 //! compiled and tested on any host

@@ -6,12 +6,13 @@
 //! (static file server, localhost detector, history machine, typed
 //! IPC, address parsing, state, log redaction, the Shield).
 //!
-//! Pico ships with NO embedded manifest and NO `.rsrc` section: the
-//! hand-built resource container is what made v11 fail on the user's
-//! Windows with a side-by-side (SxS) activation error, while the
-//! manifest-less v1/v2 binaries launched fine. DPI awareness — the
-//! one thing the manifest was for — is set at runtime in `dpi`
-//! instead.
+//! Pico ships with NO embedded manifest. Since v24 the only
+//! resource section is an icon-only `.res` (RT_ICON +
+//! RT_GROUP_ICON, no manifest): the hand-built manifest container
+//! is what made v11 fail on the user's Windows with a side-by-side
+//! (SxS) activation error, while the manifest-less v1/v2 binaries
+//! launched fine. DPI awareness — the one thing the manifest was
+//! for — is set at runtime in `dpi` instead.
 
 mod app;
 mod dlbackend;

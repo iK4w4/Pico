@@ -2,7 +2,7 @@
   <img src="pico-icon.png" width="120" alt="Pico icon">
 </p>
 
-<h1 align="center">Pico</h1>
+<h1 align="center">Pico - a Tiny Browser</h1>
 
 <p align="center">
   A tiny, neumorphic Windows browser for local development — and a download manager.<br>
@@ -88,7 +88,9 @@ exe stay where they are — Pico still finds them for its records.
 ## Security
 
 Pico stores no passwords and sends nothing anywhere except the
-requests your browsing makes and the one-time filter-list download.
+requests your browsing makes, a Google search when you type
+non-URL text into the address bar, and the one-time filter-list
+download.
 Cookies are scoped per download task and never logged, file names
 are made safe, the local server sits behind a host wall, and Pico's
 internal pages cannot be opened or driven by web content.

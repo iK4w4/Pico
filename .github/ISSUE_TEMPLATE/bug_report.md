@@ -18,9 +18,9 @@ labels: bug
 
 
 **Your setup**
-- Pico version (shown on the start page, e.g. 0.31):
+- Pico version (shown on the start page, e.g. 0.41.3):
 - Windows version (e.g. Windows 11):
 
 **Anything from pico.log?**
-<!-- pico.log lives in the data folder next to Pico.exe. It redacts
+<!-- pico.log lives in the data folder at %LOCALAPPDATA%\Pico. It redacts
 URLs, but give it a quick look before pasting lines here. -->

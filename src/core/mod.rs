@@ -2,7 +2,7 @@
 //! decision that can be made without a window lives here and is
 //! covered by the integration suites in `tests/`.
 
-/// The version the USER names this release by: **0.34.1**.
+/// The version the USER names this release by: **0.41.3**.
 /// Every user-visible string — the chrome badge, the start
 /// page, the log banner — shows exactly this. The display
 /// form is the name the user gives the release: a feature
