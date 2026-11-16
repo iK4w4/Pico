@@ -1,9 +1,5 @@
 # Pico - a Tiny Browser
 
-[![YouTube](https://img.shields.io/badge/YouTube-@iK4w4-FF0000?logo=youtube&logoColor=white)](https://www.youtube.com/@iK4w4)
-[![Telegram](https://img.shields.io/badge/Telegram-@iK4w4-26A5E4?logo=telegram&logoColor=white)](https://t.me/iK4w4)
-[![Telegram Bot](https://img.shields.io/badge/Telegram_Bot-@AskKawaBot-26A5E4?logo=telegram&logoColor=white)](https://t.me/AskKawaBot)
-
 A tiny, neumorphic Windows browser for local
 development — and, since 0.32, a download manager.
 One portable `Pico.exe`: no installer, no embedded
@@ -11,6 +7,12 @@ manifest, static CRT. Pico auto-detects the dev
 servers already running on your machine, serves
 local files with live reload, and stays out of the
 way the rest of the time.
+
+[![Release](https://img.shields.io/github/v/release/iK4w4/Pico)](https://github.com/iK4w4/Pico/releases) ![Platform](https://img.shields.io/badge/platform-Windows_10_%2F_11-333) ![Built with](https://img.shields.io/badge/built_with-Rust-007ec6) ![Download size](https://img.shields.io/badge/download_size-~1.6_MB-brightgreen) ![License](https://img.shields.io/badge/license-MIT-333)
+
+[![YouTube](https://img.shields.io/badge/YouTube-@iK4w4-FF0000?logo=youtube&logoColor=white)](https://www.youtube.com/@iK4w4)
+[![Telegram](https://img.shields.io/badge/Telegram-@iK4w4-26A5E4?logo=telegram&logoColor=white)](https://t.me/iK4w4)
+[![Telegram Bot](https://img.shields.io/badge/Telegram_Bot-@AskKawaBot-26A5E4?logo=telegram&logoColor=white)](https://t.me/AskKawaBot)
 
 ## Download
 
