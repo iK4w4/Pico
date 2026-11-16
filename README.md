@@ -2,11 +2,12 @@
   <img src="pico-icon.png" width="120" alt="Pico icon">
 </p>
 
-<h1 align="center">Pico - a Tiny Browser</h1>
+<h1 align="center">Pico</h1>
 
 <p align="center">
-  A tiny, neumorphic Windows browser for local development — and a download manager.<br>
-  One portable <code>Pico.exe</code>: no installer, no accounts, no telemetry.
+  A tiny browser for Windows that fits in a single file — nothing to install.<br>
+  It finds your running local projects on its own, blocks ads, and manages your downloads.<br>
+  No accounts, no tracking. Just open it and browse.
 </p>
 
 <p align="center">
