@@ -158,10 +158,25 @@ pub struct MediaProbeTarget {
 
 /// Does this request URI belong to the media probe? Two shapes:
 /// any host at or under `googlevideo.com` (YouTube's media CDN),
-/// or a `/videoplayback` path on any host (the player endpoint
-/// shape, wherever it is served from). The query string never
-/// participates (signed URLs carry tokens there — and the probe
-/// logs hosts and statuses only, never the URI).
+/// or a media-stream URL by the ONE shared definition
+/// ([`crate::core::lite::is_media_stream_url`] — the
+/// `/videoplayback` endpoint and the stream extensions,
+/// case-insensitive and percent-decoded). The query string
+/// never participates in the googlevideo host rule (signed
+/// URLs carry tokens there — and the probe logs hosts and
+/// statuses only, never the URI).
+///
+/// AUDIT 0.41.3 (Front D D-2): through 0.41.2 this
+/// function hand-rolled its own path matcher, and the
+/// two had drifted apart — the probe's was case-SENSITIVE,
+/// never percent-decoded, and knew no extensions, so a
+/// stream Lite recognized (`/VIDEO.MP4`, `/video%70layback`,
+/// any `.m3u8`) was invisible to the probe whose whole job
+/// is classifying "Video unavailable" reports. The probe
+/// now IS the lite definition, plus the googlevideo host
+/// rule (which stays probe-only, with this function's
+/// existing host handling: userinfo dropped, trailing
+/// dot trimmed, case folded).
 pub fn probe_target(uri: &str) -> Option<MediaProbeTarget> {
     let (_, rest) = uri.split_once("://")?;
     let authority_end = rest
@@ -179,13 +194,12 @@ pub fn probe_target(uri: &str) -> Option<MediaProbeTarget> {
     if host.is_empty() {
         return None;
     }
-    let host = host.to_ascii_lowercase();
-    // The path is what follows the authority, minus query/fragment.
-    let tail = &rest[authority_end..];
-    let path_end = tail.find(|c| ['?', '#'].contains(&c)).unwrap_or(tail.len());
-    let path = &tail[..path_end];
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    if host.is_empty() {
+        return None;
+    }
     let is_googlevideo = host == "googlevideo.com" || host.ends_with(".googlevideo.com");
-    if is_googlevideo || path.contains("/videoplayback") {
+    if is_googlevideo || crate::core::lite::is_media_stream_url(uri) {
         Some(MediaProbeTarget { host })
     } else {
         None

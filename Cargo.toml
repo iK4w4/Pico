@@ -1,8 +1,8 @@
 [package]
 name = "pico"
-version = "0.40.2"
+version = "0.41.3"
 edition = "2021"
-description = "Pico 0.40.2 by @iK4w4 \u2014 a tiny neumorphic Windows browser for local development (Rust + tao/wry WebView2): auto-detected localhost services, a download manager (multi-connection downloads, pause/resume across restarts, a live-speed popover and a full downloads page), a three-layer Shield (filter lists downloaded on first run from EasyList / EasyPrivacy / uBlock Origin and cached beside the exe), Lite mode with chosen-video semantics, a start-page savings band, sixteen palette themes, and portable data (state, log, lists and profile in data\\ beside the exe). Ships with NO embedded manifest (zero RT_MANIFEST, gate-verified); the only resource is an icon-only .rsrc compiled by llvm-rc from a generated .ico."
+description = "Pico 0.41.3 by @iK4w4 \u2014 a tiny neumorphic Windows browser for local development (Rust + tao/wry WebView2): auto-detected localhost services, a download manager (multi-connection downloads, pause/resume across restarts, a live-speed popover and a full downloads page), a three-layer Shield (filter lists downloaded on first run from EasyList / EasyPrivacy / uBlock Origin and cached in %LOCALAPPDATA%\\Pico), Lite mode with chosen-video semantics, a start-page savings band, sixteen palette themes, and AppData data since 0.41.0 (state, log, lists and profile in %LOCALAPPDATA%\\Pico; nothing beside the exe, an old data\\ folder is migrated on first run). Ships with NO embedded manifest (zero RT_MANIFEST, gate-verified); the only resource is an icon-only .rsrc compiled by llvm-rc from the checked-in .ico (resampled from the master artwork)."
 license = "MIT"
 
 [lib]
@@ -48,6 +48,11 @@ windows-sys = { version = "0.59", features = [
     # more feature flag, no new dependency (precedent: the
     # FileSystem flag above).
     "Win32_System_DataExchange",
+    # 0.41.0: CoTaskMemFree for the SHGetKnownFolderPath
+    # string hand-off (src/core/state.rs known folders) —
+    # same crate, one more feature flag, no new dependency
+    # (precedent: the DataExchange flag above).
+    "Win32_System_Com",
     # 0.34.1: GlobalAlloc/GlobalLock/GlobalUnlock/GlobalSize
     # for the clipboard text hand-off — same crate, one more
     # flag (GlobalFree itself lives in Win32_Foundation,
@@ -68,8 +73,10 @@ windows-sys = { version = "0.59", features = [
 # NOTE: no build-dependencies, no build.rs, no embed-manifest, no winres.
 # Pico must link with NO RT_MANIFEST — gate v2 in scripts/ proves it
 # on the final binary. v24's ONE resource is assets/pico.res, an
-# ICON-ONLY .res compiled by llvm-rc from scripts/gen_icon.py's
-# pico.ico, CHECKED IN and linked via .cargo/config.toml's
+# ICON-ONLY .res compiled by llvm-rc from assets/pico.ico
+# (resampled from the master artwork, assets/icon-master.png,
+# by scripts/gen_icon.py), CHECKED IN and linked via
+# .cargo/config.toml's
 # link-arg — no build-time resource toolchain is needed, and
 # nothing else (no manifest, no version info) is in it. See
 # BUILD_NOTES.md for the forensic rationale.

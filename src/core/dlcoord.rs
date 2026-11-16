@@ -27,7 +27,7 @@
 //! fold). Tests drive it through a fake backend and replay
 //! the field stories end to end (`tests/dl_replay.rs`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use serde::Serialize;
@@ -619,14 +619,49 @@ pub struct Coordinator<B: DlBackend> {
     failed_unseen: u32,
     prev_views: Vec<DlTaskView>,
     prev_version: u64,
-    /// False until the first `backend_changed`: startup
-    /// restore is silent (0.33 rule — a restored failed or
-    /// finished task fires no toast).
+    /// Startup restore is silent (0.33 rule — a restored
+    /// failed or finished task fires no toast). Seeded
+    /// `true` by `Coordinator::new` since 0.41.1 (Front D
+    /// D-1): the restored set is snapshotted at
+    /// construction, so the silent-startup branch is a
+    /// formality — the field stays so the drain logic
+    /// reads the same as the model it was proven against.
     started: bool,
+    /// Ids the coordinator has already accounted for
+    /// (0.41.0, Workstream D / F-1): seeded with every id
+    /// present at the silent startup call, then extended
+    /// with every id a later `backend_changed` has seen,
+    /// and with the ids of records the coordinator itself
+    /// creates already-final via `add_failed` (those carry
+    /// their own Blocked notice at creation, so a later
+    /// first sight must not notice them a second time).
+    /// After startup, an id NOT in this set that appears
+    /// already Complete/Failed was born and finished
+    /// between two drains of the event loop — it counts
+    /// as newly final, exactly like a witnessed
+    /// transition. Ids are monotonic and never reused, so
+    /// the set only ever grows within a session.
+    seen_ids: HashSet<u64>,
 }
 
 impl<B: DlBackend> Coordinator<B> {
     pub fn new(backend: B, settings: DlSettings) -> Self {
+        // AUDIT 0.41.1 (Front D D-1): the startup snapshot
+        // is seeded HERE, at construction — not at the
+        // first `backend_changed`. The F-1 design modeled
+        // a silent startup drain, but production's first
+        // drain is the first DownloadsChanged EVENT, which
+        // can already carry a runtime-born task that
+        // finished before the event loop got to it; that
+        // task took the silent `first` branch and was
+        // seeded as seen, losing its notice permanently.
+        // The backend's tasks at construction are exactly
+        // the restored set (the manager loads before the
+        // coordinator exists), so seeding from it makes
+        // the restored/runtime distinction exact.
+        let prev_views = backend.views();
+        let prev_version = backend.version();
+        let seen_ids: HashSet<u64> = prev_views.iter().map(|v| v.id).collect();
         Coordinator {
             backend,
             settings,
@@ -635,9 +670,10 @@ impl<B: DlBackend> Coordinator<B> {
             notice_seq: 0,
             notice: None,
             failed_unseen: 0,
-            prev_views: Vec::new(),
-            prev_version: 0,
-            started: false,
+            prev_views,
+            prev_version,
+            started: true,
+            seen_ids,
         }
     }
 
@@ -651,6 +687,21 @@ impl<B: DlBackend> Coordinator<B> {
     /// The mirrored settings (also in every snapshot).
     pub fn settings(&self) -> DlSettings {
         self.settings
+    }
+
+    /// Is a download capture MID-FLIGHT on `tab` (0.41.0,
+    /// Workstream C)? A capture is mid-flight while its
+    /// cookie race is still open (`AwaitingCookies`): the
+    /// capture record — and the tab fate it carries —
+    /// belongs to this process until it lands, so the
+    /// tab-move-to-new-Pico decision (`core::tabcmd`)
+    /// treats such a tab as not closable. A landed capture
+    /// record (kept only so the captured navigation's
+    /// Finished is swallowed) is NOT mid-flight.
+    pub fn has_pending_capture(&self, tab: u64) -> bool {
+        self.captures
+            .values()
+            .any(|c| c.tab == tab && c.phase == CapturePhase::AwaitingCookies)
     }
 
     /// The current data shape, pulled fresh from the
@@ -753,6 +804,14 @@ impl<B: DlBackend> Coordinator<B> {
                         Some(suggested.as_str())
                     };
                     let id = self.backend.add_failed(&uri, suggested_opt, reason);
+                    // F-1 (0.41.0 WS-D): this record is born
+                    // Failed and already noticed (Blocked,
+                    // below) — mark it seen so its first
+                    // `backend_changed` sight is not counted
+                    // as a second, newly-final failure.
+                    if let Some(id) = id {
+                        self.seen_ids.insert(id);
+                    }
                     let name = id
                         .and_then(|id| self.backend.name_of(id))
                         .unwrap_or_else(|| suggested_or_host(&suggested, &uri));
@@ -1014,6 +1073,21 @@ impl<B: DlBackend> Coordinator<B> {
     /// - the FIRST call after construction is silent
     ///   (startup restore — 0.33 rule), whatever it holds.
     ///
+    /// F-1 (0.41.0 WS-D): after startup, a task whose id
+    /// has never been seen (not in `seen_ids`, no entry
+    /// in `prev_views`) and which is ALREADY Complete or
+    /// Failed-and-final at its first sight was born and
+    /// finished between two drains of the event loop —
+    /// the manager's notify for its creation and for its
+    /// transition both read the same live final state.
+    /// It counts as newly final, with exactly the normal
+    /// transition's toast + badge rules. (Through 0.40.3
+    /// the `None => false` arms below silently dropped
+    /// exactly those fast downloads.) Ids the coordinator
+    /// itself created already-final via `add_failed` are
+    /// pre-marked seen at creation, so they never take
+    /// this path — their Blocked notice already spoke.
+    ///
     /// Any views/version change pushes both surfaces; a
     /// notice change rides the same pushes.
     pub fn backend_changed(&mut self) -> Vec<DlEffect> {
@@ -1022,8 +1096,32 @@ impl<B: DlBackend> Coordinator<B> {
         let first = !self.started;
         self.started = true;
         if !first {
+            // AUDIT 0.41.1 (Front D D-3): the notice is
+            // chosen ONCE per drain, after the loop.
+            // Through 0.41.0 each newly-final task called
+            // set_notice as the loop walked the views
+            // newest-first, so when two tasks finalized in
+            // one drain the LAST call — the OLDEST task —
+            // won the single toast slot and the newer
+            // task's toast never existed. The badge count
+            // was always per-task and stays so; the toast
+            // now names the NEWEST task of the winning
+            // kind, and a Failed still outranks a Finished
+            // (the 0.35 WS5 stickiness law, preserved: the
+            // single set_notice call below applies it
+            // against any notice already open).
+            let mut finished_pick: Option<&DlTaskView> = None;
+            let mut failed_pick: Option<&DlTaskView> = None;
             for view in &views {
                 let prev = self.prev_views.iter().find(|p| p.id == view.id);
+                // First sight after startup: no previous
+                // view AND never accounted for. (A prev
+                // view implies the id is in `seen_ids`
+                // already; the set is what separates a
+                // runtime-born task from a restored one
+                // and from a coordinator-created
+                // already-final record.)
+                let first_sight = prev.is_none() && !self.seen_ids.contains(&view.id);
                 match view.status {
                     TaskStatus::Complete => {
                         let was_active = prev.is_some_and(|p| {
@@ -1032,12 +1130,8 @@ impl<B: DlBackend> Coordinator<B> {
                                 TaskStatus::Queued | TaskStatus::Downloading | TaskStatus::Paused
                             )
                         });
-                        if was_active {
-                            self.set_notice(
-                                NoticeKind::Finished,
-                                view.name.clone(),
-                                Some(view.size_text.clone()),
-                            );
+                        if (was_active || first_sight) && finished_pick.is_none() {
+                            finished_pick = Some(view);
                         }
                     }
                     TaskStatus::Failed if !view.retry_pending => {
@@ -1046,20 +1140,33 @@ impl<B: DlBackend> Coordinator<B> {
                                 p.status != TaskStatus::Failed
                                     || (p.retry_pending && !view.retry_pending)
                             }
-                            None => false,
+                            None => first_sight,
                         };
                         if newly_final {
                             self.failed_unseen = self.failed_unseen.saturating_add(1);
-                            self.set_notice(
-                                NoticeKind::Failed,
-                                view.name.clone(),
-                                view.error.clone(),
-                            );
+                            if failed_pick.is_none() {
+                                failed_pick = Some(view);
+                            }
                         }
                     }
                     _ => {}
                 }
             }
+            if let Some(view) = failed_pick {
+                self.set_notice(NoticeKind::Failed, view.name.clone(), view.error.clone());
+            } else if let Some(view) = finished_pick {
+                self.set_notice(
+                    NoticeKind::Finished,
+                    view.name.clone(),
+                    Some(view.size_text.clone()),
+                );
+            }
+        }
+        // Every id in this snapshot is accounted for from
+        // here on — including the startup call's, which is
+        // what seeds the set with the restored tasks.
+        for view in &views {
+            self.seen_ids.insert(view.id);
         }
         let changed = views != self.prev_views || version != self.prev_version;
         self.prev_views = views;
@@ -1147,6 +1254,16 @@ impl<B: DlBackend> Coordinator<B> {
                 pushes()
             }
             DlCommand::Resume(id) => {
+                // AUDIT 0.41.1 (Front D D-2): a record the
+                // coordinator created already-final (Blocked)
+                // was marked seen at creation — that mark
+                // spoke for the BLOCKED failure only. A
+                // restart begins a new attempt whose final
+                // state is a new event: clear the mark, or
+                // an undrained restart→refinalize cycle can
+                // never take the first-sight path again and
+                // its notice is lost.
+                self.seen_ids.remove(&id);
                 self.backend.resume(id);
                 pushes()
             }
@@ -1155,10 +1272,16 @@ impl<B: DlBackend> Coordinator<B> {
                 pushes()
             }
             DlCommand::Restart(id) => {
+                // AUDIT 0.41.1 (Front D D-2): see Resume.
+                self.seen_ids.remove(&id);
                 self.backend.restart(id);
                 pushes()
             }
             DlCommand::Refresh(id, url) => {
+                // AUDIT 0.41.1 (Front D D-2): a refresh
+                // also begins a new attempt — same
+                // seen-mark clearing as Restart/Resume.
+                self.seen_ids.remove(&id);
                 self.backend.refresh_link(id, &url);
                 pushes()
             }
@@ -1234,6 +1357,12 @@ impl<B: DlBackend> Coordinator<B> {
                 ))];
                 if !url.trim().is_empty() {
                     let id = self.backend.add_failed(&url, None, reason);
+                    // F-1: born-Failed and already noticed
+                    // (Blocked) — mark seen, as in the
+                    // capture reject path.
+                    if let Some(id) = id {
+                        self.seen_ids.insert(id);
+                    }
                     let name = id
                         .and_then(|id| self.backend.name_of(id))
                         .unwrap_or_else(|| suggested_or_host("", &url));

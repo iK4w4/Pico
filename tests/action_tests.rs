@@ -119,6 +119,34 @@ fn pick_file_opens_the_picker_via_both_transports() {
         dispatch(&url("https://pico.pick-file/"), &start_at_start(), &r),
         Decision::OpenPicker
     );
+    for spelling in [
+        "pico://start?x=1",
+        "pico://start#top",
+        "pico://start//",
+        "https://pico.start/?x=1#top",
+    ] {
+        let req = Requester {
+            is_start_tab: true,
+            current_url: spelling.to_string(),
+        };
+        assert_eq!(
+            dispatch(&ipc(r#"{"kind":"action","action":"pick-file"}"#), &req, &r),
+            Decision::OpenPicker,
+            "start spelling {spelling} must pass the gate"
+        );
+    }
+    let dotted = Requester {
+        is_start_tab: true,
+        current_url: "pico://start.".to_string(),
+    };
+    assert_eq!(
+        dispatch(
+            &ipc(r#"{"kind":"action","action":"pick-file"}"#),
+            &dotted,
+            &r
+        ),
+        Decision::Deny(DenyReason::NotOnStartPage)
+    );
 }
 
 #[test]
@@ -137,6 +165,33 @@ fn service_opens_via_both_transports() {
         dispatch(&url("http://localhost:5173/"), &start_at_start(), &r),
         want
     );
+}
+
+#[test]
+fn credentialed_service_urls_deny_on_both_transports() {
+    // AUDIT 0.41.3 (E-S-B): the Service verb behind the
+    // start gate accepted credentialed URLs — including
+    // the authority-confusion spelling whose real host
+    // is the part AFTER the `@`. Both deny on BOTH
+    // transports (the plain localhost control still
+    // opens: service_opens_via_both_transports).
+    let r = recents();
+    for bad in [
+        "https://user:pass@evil.example/x",
+        "https://google.com:443@evil.example/",
+    ] {
+        let body = format!(r#"{{"kind":"action","action":"service","url":"{bad}"}}"#);
+        assert_eq!(
+            dispatch(&ipc(&body), &start_at_start(), &r),
+            Decision::Deny(DenyReason::BadServiceUrl),
+            "IPC transport must deny {bad}"
+        );
+        assert_eq!(
+            dispatch(&url(bad), &start_at_start(), &r),
+            Decision::Deny(DenyReason::BadServiceUrl),
+            "URL transport must deny {bad}"
+        );
+    }
 }
 
 #[test]

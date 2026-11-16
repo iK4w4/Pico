@@ -65,7 +65,12 @@ var DlRows = (function () {
   function normalizeTask(t) {
     t = t || {};
     return {
-      id: t.id,
+      /* Coerced like percent/connections below: the id is
+         interpolated UNESCAPED into data-dl-id attributes
+         by both renderers, so a raw string id carrying a
+         quote would break out of the attribute (0.41.3,
+         Front D D-1). A non-numeric id becomes 0. */
+      id: Number.isFinite(+t.id) ? Math.trunc(+t.id) : 0,
       name: t.name || "",
       host: t.host || "",
       status: t.status || "",
@@ -304,6 +309,38 @@ var DlRows = (function () {
     return n;
   }
 
+  /* rowStory(task, tasks) — the ONE bar/line decision set
+     for a task row (0.41.3, Front D D-4), shared by the
+     popover and page renderers so both surfaces tell the
+     same story for the same task; the renderers differ
+     only in layout (compact vs full markup), never in
+     what is shown:
+       fill — an unknown percent is the indeterminate
+         wash on BOTH surfaces (the honest rendering of
+         "we don't know yet"); a done row with no percent
+         is a finished file: full bar (AUDIT 0.34.2 G3).
+       prog — always progressText; a pending retry never
+         REPLACES the progress line.
+       retry — the retry countdown rides its OWN line
+         wherever retry_text is present, beside the
+         progress line, so neither surface loses it.
+       error — shown on both surfaces for ANY status
+         that carries one (the popover's gating): an
+         error riding a downloading or done row is
+         information too, and hiding it on one surface
+         was the divergence. */
+  function rowStory(task, tasks) {
+    var w = percentWidth(task);
+    if (w === null && task.status === "done") w = 100;
+    return {
+      fillIndet: w === null,
+      fillWidth: w,
+      prog: progressText(task, tasks),
+      retry: task.retry_text || null,
+      error: task.error || null
+    };
+  }
+
   function connOptionsHtml(task) {
     var want = parseInt(task.connections, 10);
     var choices = CONN_CHOICES.slice();
@@ -329,15 +366,12 @@ var DlRows = (function () {
   function renderPopoverRow(task, tasks) {
     var st = task.status;
     var resume = st === "paused" || st === "failed";
-    var w = percentWidth(task);
-    /* A done row with no percent (a legacy record whose
-       total was unknown) is a FINISHED file: full bar, not
-       the indeterminate wash (AUDIT 0.34.2 G3 — the
-       producer also repairs the total on load now). */
-    if (w === null && st === "done") w = 100;
-    var fill = w === null
+    /* Bar + lines come from the shared rowStory (0.41.3
+       D-4) — the same decisions the page renders. */
+    var story = rowStory(task, tasks);
+    var fill = story.fillIndet
       ? '<div class="dl-fill indet" style="width:100%"></div>'
-      : '<div class="dl-fill" style="width:' + w + '%"></div>';
+      : '<div class="dl-fill" style="width:' + story.fillWidth + '%"></div>';
     var buttons = "";
     if (st === "done") {
       buttons += '<button class="dl-icon-btn dl-open-file" data-dl-action="open-file" data-dl-id="' + task.id +
@@ -353,14 +387,16 @@ var DlRows = (function () {
     var cancelTitle = st === "done" ? "Remove from list" : "Cancel";
     buttons += '<button class="dl-icon-btn dl-cancel" data-dl-action="' + cancelVerb + '" data-dl-id="' + task.id +
       '" aria-label="' + cancelTitle + '" title="' + cancelTitle + '">×</button>';
-    /* Failed + retry_pending: the countdown owns line 3
-       INSTEAD of the progress line (the popover rule). */
-    var prog = (st === "failed" && task.retry_pending && task.retry_text)
-      ? task.retry_text
-      : progressText(task, tasks);
-    var err = task.error
-      ? '<div class="dl-error">' + escapeHtml(task.error) + "</div>"
+    /* Progress line, error line, retry line — in the
+       page's order, from the shared story (0.41.3 D-4):
+       the countdown no longer replaces the progress. */
+    var prog = story.prog;
+    var err = story.error
+      ? '<div class="dl-error">' + escapeHtml(story.error) + "</div>"
       : '<div class="dl-error" style="display:none"></div>';
+    var retry = story.retry
+      ? '<div class="dl-retry">' + escapeHtml(story.retry) + "</div>"
+      : "";
     return '<div class="dl-row" data-dl-id="' + task.id + '" data-status="' + escapeHtml(st) + '">' +
       '<div class="dl-name-line"><span class="dl-name">' + escapeHtml(task.name) +
       '</span><span class="dl-status">' + escapeHtml(st) + "</span>" + buttons + "</div>" +
@@ -369,7 +405,7 @@ var DlRows = (function () {
       '<select class="dl-conn" data-dl-action="set-connections" data-dl-id="' + task.id +
       '" aria-label="Connections for this download"' + (st === "done" ? " disabled" : "") + ">" +
       connOptionsHtml(task) + "</select>" +
-      "</div>" + err + "</div>";
+      "</div>" + err + retry + "</div>";
   }
 
   function pageBtn(label, action, id, extraClass) {
@@ -379,18 +415,14 @@ var DlRows = (function () {
 
   function renderPageRow(task, tasks) {
     var st = task.status;
-    var w = percentWidth(task);
-    /* Done with no percent: full bar (AUDIT 0.34.2 G3,
-       same rule as the popover row). */
-    if (w === null && st === "done") w = 100;
-    var fill;
-    if (w === null) {
-      fill = st === "downloading"
-        ? '<div class="dlp-fill indet" style="width:100%"></div>'
-        : '<div class="dlp-fill" style="width:0%"></div>';
-    } else {
-      fill = '<div class="dlp-fill" style="width:' + w + '%"></div>';
-    }
+    /* Bar + lines come from the shared rowStory (0.41.3
+       D-4) — the same decisions the popover renders,
+       including the indeterminate wash for an unknown
+       percent on every status, not just downloading. */
+    var story = rowStory(task, tasks);
+    var fill = story.fillIndet
+      ? '<div class="dlp-fill indet" style="width:100%"></div>'
+      : '<div class="dlp-fill" style="width:' + story.fillWidth + '%"></div>';
     var out = '<div class="dlp-row" data-dl-id="' + task.id + '" data-status="' + escapeHtml(st) + '">' +
       '<div class="dlp-name-line"><span class="dlp-name">' + escapeHtml(task.name) +
       '</span><span class="dlp-status">' + escapeHtml(st) + "</span></div>";
@@ -415,27 +447,28 @@ var DlRows = (function () {
          the identical string the popover prints for the
          same task (legacy snapshots fall back to
          detail_text inside progressText itself). */
-      var progText = progressText(task, tasks);
+      var progText = story.prog;
       if (progText) {
         out += '<div class="dlp-detail">' + escapeHtml(progText) + "</div>";
       }
     } else if (task.detail_text) {
       out += '<div class="dlp-detail">' + escapeHtml(task.detail_text) + "</div>";
     }
-    /* The error line follows the ERROR, not just the
-       failed status: a paused/queued task can carry one
-       (a failed link-refresh keeps the task's status,
-       AUDIT 0.34.2 G2) — the popover already showed it;
-       the page used to hide it. The hint stays
-       failure-only (it is recovery advice). */
-    if (task.error && (st === "failed" || st === "paused" || st === "queued")) {
-      out += '<div class="dlp-error">' + escapeHtml(task.error) + "</div>";
+    /* The error line follows the ERROR, whatever the
+       status (0.41.3 D-4, widening AUDIT 0.34.2 G2): the
+       popover prints it for any status, so the page does
+       too — neither surface hides information the other
+       shows. The hint stays failure-only (it is recovery
+       advice). The retry countdown rides its own line
+       beside the progress line, on both surfaces. */
+    if (story.error) {
+      out += '<div class="dlp-error">' + escapeHtml(story.error) + "</div>";
     }
     if (st === "failed") {
       if (task.hint) out += '<div class="dlp-hint">' + escapeHtml(task.hint) + "</div>";
     }
-    if (task.retry_text) {
-      out += '<div class="dlp-retry">' + escapeHtml(task.retry_text) + "</div>";
+    if (story.retry) {
+      out += '<div class="dlp-retry">' + escapeHtml(story.retry) + "</div>";
     }
     if (st === "done" && task.sha256) {
       out += '<div class="dlp-sha"><span>SHA-256</span><span class="sha-val" data-dl-sha="' +

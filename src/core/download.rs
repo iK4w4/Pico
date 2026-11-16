@@ -1063,6 +1063,24 @@ pub fn file_name_from_disposition(header: &str) -> Option<String> {
 /// the never-overwrite promise. Candidates are also fitted
 /// to the name cap (P1-17): the suffix never pushes a
 /// capped name past it.
+/// AUDIT 0.41.1 (Front D D-6): is a candidate file name
+/// taken ON DISK — the file itself or its `.part` — in
+/// the current downloads folder OR the legacy one?
+/// Through 0.41.0 the name-claiming dedupe closures only
+/// consulted the current folder: a same-named
+/// re-download shadowed a legacy finished file (the old
+/// task's Open-file then resolved to the NEW file), and
+/// a disposition rename could claim an orphan legacy
+/// `.part`'s name, finalizing a NEW download INTO the
+/// legacy folder Pico promised to leave alone.
+pub fn name_taken_in_dirs(dir: &Path, legacy: Option<&Path>, candidate: &str) -> bool {
+    dir.join(candidate).exists()
+        || dir.join(format!("{candidate}.part")).exists()
+        || legacy.is_some_and(|d| {
+            d.join(candidate).exists() || d.join(format!("{candidate}.part")).exists()
+        })
+}
+
 pub fn dedupe_file_name(name: &str, exists: impl Fn(&str) -> bool) -> String {
     if !exists(name) {
         return name.to_string();
@@ -1972,17 +1990,22 @@ impl SpeedMeter {
     /// under [`SPEED_MIN_DT_MS`], or a backwards step.
     pub fn rate(&self, now_ms: u64) -> f64 {
         let floor = now_ms.saturating_sub(SPEED_WINDOW_MS);
-        let window: Vec<(u64, u64)> = self
-            .samples
-            .iter()
-            .filter(|(t, _)| *t >= floor)
-            .copied()
-            .collect();
-        if window.len() < 2 {
+        let mut first: Option<(u64, u64)> = None;
+        let mut last: Option<(u64, u64)> = None;
+        let mut count = 0usize;
+        for &sample in &self.samples {
+            if sample.0 >= floor {
+                if first.is_none() {
+                    first = Some(sample);
+                }
+                last = Some(sample);
+                count += 1;
+            }
+        }
+        if count < 2 {
             return 0.0;
         }
-        let (Some((t0, b0)), Some((t1, b1))) = (window.first().copied(), window.last().copied())
-        else {
+        let (Some((t0, b0)), Some((t1, b1))) = (first, last) else {
             return 0.0;
         };
         let dt = t1.saturating_sub(t0);
@@ -2113,9 +2136,239 @@ pub fn load_tasks(dir: &Path) -> Vec<TaskState> {
 /// concurrent save of the same task — supervisor, UI action,
 /// shutdown — collide on ONE temp path, losing updates and
 /// occasionally renaming a torn write into place.
+/// Two-process guard for task-state saves (0.41.0).
+///
+/// CHOICE (documented per the 0.41.0 brief): a lock FILE
+/// with a stale timeout, not read-merge-write. Pico has no
+/// single-instance mutex, and two running Picos share the
+/// one AppData state dir; each task file is already saved
+/// atomically (per-pid+seq temp + rename), so the worst
+/// case was never a torn file — it is two processes
+/// interleaving saves of the SAME task and the older
+/// snapshot winning the last rename. The lock serializes
+/// the write+rename window across processes: `save.lock`
+/// is claimed with `create_new` (atomic on Windows and
+/// POSIX), held only for the milliseconds a save takes,
+/// and released on drop. A lock older than
+/// [`SAVE_LOCK_STALE_MS`] is treated as a crashed holder's
+/// leftover and broken. If the lock cannot be taken within
+/// [`SAVE_LOCK_WAIT_MS`] the save proceeds WITHOUT it —
+/// the atomic rename remains the correctness floor and a
+/// stuck lock must never lose a state update outright.
+const SAVE_LOCK_STALE_MS: u64 = 30_000;
+const SAVE_LOCK_WAIT_MS: u64 = 2_000;
+
+pub struct SaveLock {
+    path: PathBuf,
+    held: bool,
+    /// The exact token line this holder wrote at claim
+    /// time (AUDIT 0.41.1, Front D D-4). `Drop` removes
+    /// the lock file only while it still carries OUR
+    /// token: through 0.41.0 the release deleted by path
+    /// unconditionally, so a holder whose lock had been
+    /// stale-broken (and re-claimed by a successor) deleted
+    /// the SUCCESSOR's live lock on its way out.
+    token: Option<String>,
+}
+
+/// The token a claim writes into the lock file: process
+/// id + a per-process sequence + a time nonce, so two
+/// claims never share a token — not even two claims by
+/// one process. (Public for the regression tests, like
+/// the other pure helpers in this module.)
+pub fn save_lock_token() -> String {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{}:{}:{}", std::process::id(), n, nanos)
+}
+
+/// Does the lock file at `path` currently carry `token`?
+/// The claim-confirmation read of AUDIT 0.41.3 (S-2):
+/// `SaveLock::acquire_named` re-reads through this after
+/// creating its claim, and the guard's Drop applies the
+/// same comparison before removing the file. A missing
+/// or unreadable file holds nothing. (Public for the
+/// regression tests, like the other pure helpers in this
+/// module.)
+pub fn save_lock_holds_token(path: &Path, token: &str) -> bool {
+    std::fs::read_to_string(path)
+        .map(|contents| contents.trim() == token)
+        .unwrap_or(false)
+}
+
+/// AUDIT 0.41.1 (Front D D-5): the wait budget ran out —
+/// break the lock and retry, or proceed unlocked? A live
+/// holder's critical section is milliseconds, so a lock
+/// whose mtime has not moved across the WHOLE wait is
+/// not making progress (a crashed holder's leftover, or
+/// a wedged one): break it, once. Through 0.41.0 the
+/// leftover taxed EVERY save the full wait for up to
+/// the 30 s stale horizon — a shutdown persisting ~50
+/// tasks could hang ~100 s. If the mtime moved (a live
+/// claim/release cycle is in flight) or we already broke
+/// one lock this acquire, proceed unlocked as before.
+#[derive(Debug, PartialEq, Eq)]
+pub enum LockWaitVerdict {
+    BreakAndRetry,
+    ProceedUnlocked,
+}
+
+pub fn lock_wait_verdict(
+    first_mtime: Option<std::time::SystemTime>,
+    now_mtime: Option<std::time::SystemTime>,
+    already_broke: bool,
+) -> LockWaitVerdict {
+    if !already_broke && first_mtime.is_some() && first_mtime == now_mtime {
+        LockWaitVerdict::BreakAndRetry
+    } else {
+        LockWaitVerdict::ProceedUnlocked
+    }
+}
+
+impl SaveLock {
+    pub fn acquire(dir: &Path) -> SaveLock {
+        Self::acquire_named(dir, "save.lock")
+    }
+
+    /// The same lock under a caller-chosen file name —
+    /// the nav store's merge-on-save (0.41.1, Front B
+    /// F9) guards its own file with the same discipline.
+    pub fn acquire_named(dir: &Path, name: &str) -> SaveLock {
+        let path = dir.join(name);
+        let start = std::time::Instant::now();
+        let mut first_mtime: Option<std::time::SystemTime> = None;
+        let mut broke = false;
+        loop {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(mut f) => {
+                    use std::io::Write;
+                    let token = save_lock_token();
+                    let _ = writeln!(f, "{token}");
+                    drop(f);
+                    // AUDIT 0.41.3 (Front B S-2): confirm
+                    // the claim before trusting it. The
+                    // stale-break paths above remove a lock
+                    // by PATH — a second process doing the
+                    // same in the same window can break
+                    // THIS fresh claim and create its own,
+                    // leaving two processes both believing
+                    // they hold the lock. Re-read: if the
+                    // file no longer carries this claim's
+                    // token, someone else won — fall back
+                    // to the bounded wait / unheld guard
+                    // instead of proceeding as holder. (The
+                    // check runs on every successful
+                    // creation, not only after a break: the
+                    // same interleave is possible whenever
+                    // two acquirers race a just-freed path.)
+                    if save_lock_holds_token(&path, &token) {
+                        return SaveLock {
+                            path,
+                            held: true,
+                            token: Some(token),
+                        };
+                    }
+                    if start.elapsed().as_millis() as u64 >= SAVE_LOCK_WAIT_MS {
+                        return SaveLock {
+                            path,
+                            held: false,
+                            token: None,
+                        };
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+                    if first_mtime.is_none() {
+                        first_mtime = mtime;
+                    }
+                    // AUDIT 0.41.1 (Front D D-4): an
+                    // mtime in the FUTURE (clock skew)
+                    // makes `elapsed()` fail — that is
+                    // not evidence of staleness, and
+                    // through 0.41.0 it made the lock
+                    // instantly "stale" and breakable.
+                    let stale = mtime
+                        .map(|t| {
+                            t.elapsed()
+                                .map(|age| age.as_millis() as u64 > SAVE_LOCK_STALE_MS)
+                                .unwrap_or(false)
+                        })
+                        .unwrap_or(false);
+                    if stale {
+                        let _ = std::fs::remove_file(&path);
+                        first_mtime = None;
+                        continue;
+                    }
+                    if start.elapsed().as_millis() as u64 >= SAVE_LOCK_WAIT_MS {
+                        match lock_wait_verdict(first_mtime, mtime, broke) {
+                            LockWaitVerdict::BreakAndRetry => {
+                                let _ = std::fs::remove_file(&path);
+                                broke = true;
+                                first_mtime = None;
+                                continue;
+                            }
+                            LockWaitVerdict::ProceedUnlocked => {
+                                return SaveLock {
+                                    path,
+                                    held: false,
+                                    token: None,
+                                };
+                            }
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(_) => {
+                    return SaveLock {
+                        path,
+                        held: false,
+                        token: None,
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl Drop for SaveLock {
+    fn drop(&mut self) {
+        if self.held {
+            // AUDIT 0.41.1 (Front D D-4): remove the lock
+            // only while it still carries OUR token. If
+            // the file now holds a successor's token (ours
+            // was stale-broken while we worked), it is
+            // theirs — leave it. If the file cannot be
+            // read it is gone or unreadable; leaving it is
+            // safe either way (the stale horizon reaps a
+            // true leftover).
+            if let Some(token) = &self.token {
+                if let Ok(contents) = std::fs::read_to_string(&self.path) {
+                    if contents.trim() == token.as_str() {
+                        let _ = std::fs::remove_file(&self.path);
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub fn save_task(dir: &Path, t: &TaskState) -> std::io::Result<()> {
     static SAVE_SEQ: AtomicU64 = AtomicU64::new(0);
     std::fs::create_dir_all(dir)?;
+    // 0.41.0: serialize the write+rename across processes
+    // (see SaveLock). Held for the whole save, released by
+    // the guard's Drop on every exit path.
+    let _lock = SaveLock::acquire(dir);
     let name = format!("{}.json", t.id);
     let seq = SAVE_SEQ.fetch_add(1, Ordering::Relaxed);
     let tmp = dir.join(format!("{name}.tmp-{}-{seq}", std::process::id()));
@@ -2127,7 +2380,16 @@ pub fn save_task(dir: &Path, t: &TaskState) -> std::io::Result<()> {
         f.write_all(text.as_bytes())?;
         f.sync_all()?;
     }
-    std::fs::rename(&tmp, dir.join(name))
+    let dest = dir.join(name);
+    if let Ok(meta) = std::fs::metadata(&dest) {
+        let mut perms = meta.permissions();
+        if perms.readonly() {
+            #[allow(clippy::permissions_set_readonly_false)]
+            perms.set_readonly(false);
+            let _ = std::fs::set_permissions(&dest, perms);
+        }
+    }
+    std::fs::rename(&tmp, dest)
 }
 
 /// Remove a task's state file (best-effort: cancel paths
@@ -2136,20 +2398,94 @@ pub fn delete_task_file(dir: &Path, id: u64) {
     let _ = std::fs::remove_file(dir.join(format!("{id}.json")));
 }
 
-/// Where downloads land: the exe folder's `Downloads` when
-/// the exe folder is writable; else the user's own Downloads
-/// folder when known; else the exe folder's `Downloads`
-/// anyway (last resort — the app logs the choice and why).
+/// Where downloads land (0.41.0): a user-changed downloads
+/// directory (a settings value, when one exists — none does
+/// yet) wins; else the standard Windows Downloads folder
+/// (FOLDERID_Downloads / `%USERPROFILE%\Downloads`, resolved
+/// by `core::state::user_downloads_dir`); else, as the last
+/// resort, a `Downloads` folder inside Pico's AppData home.
+/// NEVER beside the exe: through 0.40 the default was
+/// `<exe dir>\Downloads` when the exe folder was writable,
+/// which is exactly the beside-exe write 0.41.0 abolishes.
+/// Existing tasks are unaffected in their records — a task
+/// stores a file NAME, and its `.part`/finished file stays
+/// wherever it already is on disk; only NEW downloads pick
+/// their folder from this resolution.
 pub fn resolve_downloads_dir(
-    exe_dir: &Path,
+    custom_dir: Option<&Path>,
     user_downloads: Option<&Path>,
-    exe_writable: bool,
+    pico_home: &Path,
 ) -> PathBuf {
-    if exe_writable {
-        return exe_dir.join("Downloads");
+    if let Some(custom) = custom_dir.filter(|p| !p.as_os_str().is_empty()) {
+        return custom.to_path_buf();
     }
-    if let Some(user) = user_downloads {
+    if let Some(user) = user_downloads.filter(|p| !p.as_os_str().is_empty()) {
         return user.to_path_buf();
     }
-    exe_dir.join("Downloads")
+    pico_home.join("Downloads")
+}
+
+/// Resolve ONE task file against the current downloads
+/// folder, with the legacy beside-exe folder as fallback
+/// (0.41.0 Workstream D, F-A1). A task record stores only
+/// a file NAME; through the 0.41.0 relocation that name
+/// was resolved against the CURRENT folder alone, so a
+/// file finished (or a `.part` left) under ≤0.40.3 in
+/// `<exe>\Downloads` was missed by Open-file/Open-folder
+/// and by every `.part` resume check after the move.
+///
+/// The rule, with existence injected so it is pure and
+/// unit-testable:
+///
+/// - the file exists in the current folder → there
+///   (current wins when it exists in both);
+/// - else it exists in the legacy folder (when one is
+///   set and differs from the current folder) → there;
+/// - else → the current folder's path (the historical
+///   answer: callers that create, or that report a path
+///   for a file not on disk yet/anymore, behave exactly
+///   as before). A legacy folder that no longer exists
+///   on disk therefore degrades to current-only, because
+///   nothing in it can pass the existence check.
+///
+/// Nothing is moved, copied, or rewritten by resolving:
+/// the legacy file stays exactly where it is.
+pub fn resolve_task_file_with_exists(
+    current_dir: &Path,
+    legacy_dir: Option<&Path>,
+    file_name: &str,
+    exists: impl Fn(&Path) -> bool,
+) -> PathBuf {
+    let current = current_dir.join(file_name);
+    if exists(&current) {
+        return current;
+    }
+    if let Some(legacy) = legacy_dir.filter(|p| !p.as_os_str().is_empty() && *p != current_dir) {
+        let legacy_path = legacy.join(file_name);
+        if exists(&legacy_path) {
+            return legacy_path;
+        }
+    }
+    current
+}
+
+/// [`resolve_task_file_with_exists`] against the real
+/// filesystem.
+pub fn resolve_task_file(
+    current_dir: &Path,
+    legacy_dir: Option<&Path>,
+    file_name: &str,
+) -> PathBuf {
+    resolve_task_file_with_exists(current_dir, legacy_dir, file_name, |p| p.exists())
+}
+
+/// The `.part` twin of [`resolve_task_file`]: a task's
+/// partial file is its file name plus `.part`, resolved
+/// by exactly the same current-then-legacy rule.
+pub fn resolve_task_part_file(
+    current_dir: &Path,
+    legacy_dir: Option<&Path>,
+    file_name: &str,
+) -> PathBuf {
+    resolve_task_file(current_dir, legacy_dir, &format!("{file_name}.part"))
 }

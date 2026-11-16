@@ -119,3 +119,67 @@ fn embedded_userinfo_in_a_raw_body_is_stripped() {
     assert!(!out.contains("a:b@"), "{out}");
     assert!(out.contains("h.example/p"), "{out}");
 }
+
+#[test]
+fn schemeless_authority_userinfo_is_stripped() {
+    // AUDIT 0.41.3 (Front C F3 / D-S1): `//user:pass@host`
+    // has no scheme, so the `://` scan never saw it and
+    // the password survived into the log.
+    let out = redact_url("//user:pass@evil.example/x?y=1");
+    assert!(!out.contains("pass"), "password leaked: {out}");
+    assert!(!out.contains("user:"), "userinfo leaked: {out}");
+    assert!(out.contains("evil.example/x"), "host/path stay: {out}");
+    // Embedded in a JSON body: the `//` follows a quote,
+    // one of the authority-start delimiters.
+    let out = redact_url(r#"{"u":"//user:pass@h/x"}"#);
+    assert!(!out.contains("pass"), "password leaked: {out}");
+    assert!(!out.contains("user:"), "userinfo leaked: {out}");
+    assert!(out.contains("h/x"), "host/path stay: {out}");
+    // The other delimiter shapes: whitespace, `=`, `(`.
+    for input in [
+        "see //user:pass@h.example/x end",
+        "u=//user:pass@h.example/x",
+        "(//user:pass@h.example/x)",
+    ] {
+        let out = redact_url(input);
+        assert!(!out.contains("pass"), "{input} -> {out}");
+    }
+}
+
+#[test]
+fn schemeless_non_authorities_and_schemed_urls_are_unchanged() {
+    // AUDIT 0.41.3 (F3): shapes that must NOT change —
+    // `a//b` (the `//` follows a letter: no authority
+    // begins), ordinary paths, and the schemed URL the
+    // original branch already stripped (proving the
+    // `://` case is not double-processed: `:` is not a
+    // schemeless delimiter).
+    assert_eq!(redact_url("a//b"), "a//b");
+    assert_eq!(redact_url("some/path//other"), "some/path//other");
+    assert_eq!(
+        redact_url("https://user:pass@h.example/x"),
+        "https://h.example/x"
+    );
+}
+
+#[test]
+fn second_embedded_url_with_short_prefix_never_leaks_userinfo() {
+    let body = r#"{"url":"https://a.test/","ref":"https://user:hunter2@b.test/p"}"#;
+    let out = redact_url(body);
+    assert!(!out.contains("hunter2"), "password leaked: {out}");
+    assert!(!out.contains("user:"), "userinfo leaked: {out}");
+    assert!(out.contains("b.test/p"), "second host preserved: {out}");
+
+    let msg = redact_url("Failed https://a.test/ -> https://user:hunter2@b.test/p?tok=SECRET");
+    assert!(!msg.contains("hunter2"), "password leaked: {msg}");
+    assert!(!msg.contains("SECRET"), "query leaked: {msg}");
+    assert!(msg.starts_with("Failed "), "prose casing preserved: {msg}");
+
+    let nested =
+        redact_url("https://proxy.test/go/https://user:hunter2@b.test/file.zip?sig=SECRET");
+    assert!(
+        !nested.contains("hunter2"),
+        "path-embedded password leaked: {nested}"
+    );
+    assert!(!nested.contains("SECRET"), "query leaked: {nested}");
+}

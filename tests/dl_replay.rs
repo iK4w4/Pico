@@ -719,11 +719,17 @@ fn story5_add_url_dispatch_triages_and_notices() {
 
 #[test]
 fn story6_backend_changed_notice_machine() {
-    let (backend, mut coord) = coordinator();
+    // AUDIT 0.41.1 (Front D D-1): the coordinator is
+    // constructed AFTER the restored views exist —
+    // production order (the manager loads its tasks
+    // before `Coordinator::new`, app.rs) — because the
+    // silent-startup snapshot is seeded at construction.
+    let backend = FakeBackend::new();
+    backend.set_views(vec![view(1, TaskStatus::Complete)]);
+    let mut coord = Coordinator::new(backend.clone(), settings());
 
     // Startup silence: the first backend_changed never
     // notices, even with a Done task already present.
-    backend.set_views(vec![view(1, TaskStatus::Complete)]);
     coord.backend_changed();
     assert!(
         coord.snapshot().notice.is_none(),
@@ -766,6 +772,242 @@ fn story6_backend_changed_notice_machine() {
     // Visiting the page zeroes the unseen count.
     coord.page_visited();
     assert_eq!(coord.snapshot().failed_unseen, 0);
+}
+
+#[test]
+fn story6_born_and_final_failed_gets_notice_and_badge() {
+    // F-1 (0.41.0 WS-D, the audit's one real bug): a task
+    // that is born AND reaches Failed between two drains
+    // of the event loop is first seen already final —
+    // through 0.40.3 the `prev == None` arm treated that
+    // as "not a transition" and the failure was silent
+    // (no toast, no badge). The audit's named sequence:
+    // startup call with empty views, then a single
+    // never-before-seen Failed view.
+    let (backend, mut coord) = coordinator();
+    backend.set_views(vec![]);
+    coord.backend_changed(); // startup, empty
+    assert!(coord.snapshot().notice.is_none());
+    let mut failed = view(9, TaskStatus::Failed);
+    failed.error = Some("connection refused".to_string());
+    backend.set_views(vec![failed]);
+    let effects = coord.backend_changed();
+    assert!(effects.contains(&DlEffect::PushChrome));
+    let notice = coord.snapshot().notice.expect("failed notice");
+    assert_eq!(notice.kind, NoticeKind::Failed);
+    assert_eq!(notice.name, "file9.bin");
+    assert_eq!(notice.reason.as_deref(), Some("connection refused"));
+    assert_eq!(coord.snapshot().failed_unseen, 1);
+    // A second drain over the same final view must not
+    // count it again.
+    coord.backend_changed();
+    assert_eq!(coord.snapshot().failed_unseen, 1);
+}
+
+#[test]
+fn story6_born_and_final_complete_gets_finished_notice() {
+    // F-1, the Complete twin: a small file from a fast
+    // (localhost) server completes before the first
+    // post-creation drain reads the views.
+    let (backend, mut coord) = coordinator();
+    backend.set_views(vec![]);
+    coord.backend_changed(); // startup, empty
+    let mut done = view(9, TaskStatus::Complete);
+    done.downloaded = 2_048;
+    backend.set_views(vec![done]);
+    coord.backend_changed();
+    let notice = coord.snapshot().notice.expect("finished notice");
+    assert_eq!(notice.kind, NoticeKind::Finished);
+    assert_eq!(notice.name, "file9.bin");
+    assert_eq!(notice.reason.as_deref(), Some("2 KB"));
+    assert_eq!(coord.snapshot().failed_unseen, 0);
+}
+
+#[test]
+fn story6_restored_failed_at_startup_stays_silent() {
+    // F-1 guard rail: the seen-ids seed is the
+    // construction snapshot itself (0.41.1, Front D D-1
+    // — the coordinator is built after the manager has
+    // loaded its tasks, as in production) — a task
+    // restored already-Failed fires nothing at the first
+    // call (the 0.33 startup rule story 6 pins for
+    // Complete, here for Failed), and stays silent on
+    // the next drain too.
+    let backend = FakeBackend::new();
+    let mut failed = view(4, TaskStatus::Failed);
+    failed.error = Some("HTTP 404".to_string());
+    backend.set_views(vec![failed]);
+    let mut coord = Coordinator::new(backend.clone(), settings());
+    coord.backend_changed(); // startup
+    assert!(coord.snapshot().notice.is_none());
+    assert_eq!(coord.snapshot().failed_unseen, 0);
+    coord.backend_changed();
+    assert!(coord.snapshot().notice.is_none());
+    assert_eq!(coord.snapshot().failed_unseen, 0);
+}
+
+#[test]
+fn born_retry_pending_failed_is_not_final_until_the_retry_clears() {
+    // F-1 boundary: a first-sight Failed view that is
+    // still retry-pending is NOT final — no notice, no
+    // badge — and when its retries run out (same Failed
+    // status, pending cleared) the ordinary prev-view
+    // arm counts it exactly once.
+    let (backend, mut coord) = coordinator();
+    backend.set_views(vec![]);
+    coord.backend_changed(); // startup, empty
+    let mut retrying = view(5, TaskStatus::Failed);
+    retrying.retry_pending = true;
+    retrying.retry_text = Some("Retrying in 5 · attempt 1 of 3".to_string());
+    backend.set_views(vec![retrying]);
+    coord.backend_changed();
+    assert!(coord.snapshot().notice.is_none());
+    assert_eq!(coord.snapshot().failed_unseen, 0);
+    backend.set_views(vec![view(5, TaskStatus::Failed)]);
+    coord.backend_changed();
+    assert_eq!(
+        coord.snapshot().notice.map(|n| n.kind),
+        Some(NoticeKind::Failed)
+    );
+    assert_eq!(coord.snapshot().failed_unseen, 1);
+}
+
+#[test]
+fn blocked_record_first_sight_does_not_double_notice() {
+    // F-1 double-notice guard: a record the coordinator
+    // itself created already-Failed via `add_failed`
+    // (here the capture triage reject) already spoke
+    // through its Blocked notice. When the backend's
+    // views first show that id as Failed, it must not
+    // produce a second Failed notice or a badge count.
+    // (The fake's `add_failed` does not push a view, so
+    // the test installs the view the real manager would
+    // serve for the record it created — id 1.)
+    let (backend, mut coord) = coordinator();
+    backend.set_views(vec![]);
+    coord.backend_changed(); // startup, empty
+    let blob = "blob:https://example.com/9f2c";
+    let facts = CaptureFacts {
+        live_url: blob.to_string(),
+        captured_url: blob.to_string(),
+        chain: vec![blob.to_string()],
+        ..adopted_facts()
+    };
+    let (_token, _effects) =
+        coord.capture_started(42, blob.to_string(), String::new(), None, facts);
+    let blocked_seq = {
+        let notice = coord.snapshot().notice.expect("blocked notice");
+        assert_eq!(notice.kind, NoticeKind::Blocked);
+        notice.seq
+    };
+    let mut failed = view(1, TaskStatus::Failed);
+    failed.error = Some("Pico can only download http/https links".to_string());
+    backend.set_views(vec![failed]);
+    coord.backend_changed();
+    let notice = coord.snapshot().notice.expect("notice");
+    assert_eq!(notice.kind, NoticeKind::Blocked, "no second notice");
+    assert_eq!(notice.seq, blocked_seq);
+    assert_eq!(coord.snapshot().failed_unseen, 0);
+}
+
+#[test]
+fn runtime_born_final_before_the_first_drain_still_notices() {
+    // AUDIT 0.41.1 (Front D D-1): production has NO
+    // startup drain — the coordinator's first
+    // `backend_changed` is the first DownloadsChanged
+    // event, and a fast runtime download can be born AND
+    // finished before it. Through 0.41.0 that first call
+    // took the silent-startup branch (the restored set
+    // and the new task indistinguishable in an empty
+    // snapshot) and seeded the new task as seen: its
+    // Finished toast was lost permanently. The snapshot
+    // is now seeded at construction, when the backend
+    // holds exactly the restored set.
+    let backend = FakeBackend::new();
+    backend.set_views(vec![
+        view(1, TaskStatus::Complete),
+        view(2, TaskStatus::Failed),
+    ]);
+    let mut coord = Coordinator::new(backend.clone(), settings());
+    // No startup call. The runtime task arrives already
+    // Complete at the first drain.
+    backend.set_views(vec![
+        view(1, TaskStatus::Complete),
+        view(2, TaskStatus::Failed),
+        view(3, TaskStatus::Complete),
+    ]);
+    coord.backend_changed();
+    let notice = coord.snapshot().notice.expect("the fast task's notice");
+    assert_eq!(notice.kind, NoticeKind::Finished);
+    assert_eq!(notice.name, "file3.bin");
+    assert_eq!(
+        coord.snapshot().failed_unseen,
+        0,
+        "the restored failure stays silent"
+    );
+}
+
+#[test]
+fn blocked_record_restarted_before_any_drain_notices_its_new_failure() {
+    // AUDIT 0.41.1 (Front D D-2): a coordinator-created
+    // Blocked record is marked seen at creation — that
+    // mark speaks for the blocked attempt only. Restart
+    // it before any drain shows its Failed view, and let
+    // the new attempt fail: through 0.41.0 the permanent
+    // mark made first-sight impossible and the second
+    // failure never noticed. Restart/Resume/Refresh now
+    // clear the mark.
+    let (backend, mut coord) = coordinator();
+    backend.set_views(vec![]);
+    coord.backend_changed(); // startup, empty
+    let blob = "blob:https://example.com/9f2c";
+    let facts = CaptureFacts {
+        live_url: blob.to_string(),
+        captured_url: blob.to_string(),
+        chain: vec![blob.to_string()],
+        ..adopted_facts()
+    };
+    let (_token, _effects) =
+        coord.capture_started(42, blob.to_string(), String::new(), None, facts);
+    assert_eq!(
+        coord.snapshot().notice.map(|n| n.kind),
+        Some(NoticeKind::Blocked)
+    );
+    // Restart before any drain; the new attempt fails.
+    coord.dispatch(DlCommand::Restart(1), DlSource::Page);
+    let mut failed = view(1, TaskStatus::Failed);
+    failed.error = Some("Pico can only download http/https links".to_string());
+    backend.set_views(vec![failed]);
+    coord.backend_changed();
+    let notice = coord.snapshot().notice.expect("the new failure's notice");
+    assert_eq!(notice.kind, NoticeKind::Failed);
+    assert_eq!(coord.snapshot().failed_unseen, 1);
+}
+
+#[test]
+fn two_finals_in_one_drain_toast_the_newest() {
+    // AUDIT 0.41.1 (Front D D-3): views iterate
+    // newest-first; through 0.41.0 each newly-final task
+    // replaced the toast as the loop walked, so the
+    // OLDEST task of the drain won the single slot. The
+    // notice is now chosen once per drain: newest of the
+    // winning kind, Failed over Finished.
+    let (backend, mut coord) = coordinator();
+    // Newest-first, as the real manager serves them:
+    // task 2 is the newer of the two actives.
+    backend.set_views(vec![
+        view(2, TaskStatus::Downloading),
+        view(1, TaskStatus::Downloading),
+    ]);
+    coord.backend_changed(); // startup
+    backend.set_views(vec![
+        view(2, TaskStatus::Complete),
+        view(1, TaskStatus::Complete),
+    ]);
+    coord.backend_changed();
+    let notice = coord.snapshot().notice.expect("finished notice");
+    assert_eq!(notice.kind, NoticeKind::Finished);
+    assert_eq!(notice.name, "file2.bin", "the newest final wins the toast");
 }
 
 #[test]

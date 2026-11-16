@@ -1,19 +1,26 @@
 //! Persisted app state: theme + recent files + window geometry
 //! + the Shield's flag and lifetime counter.
 //!
-//! Stored as JSON in Pico's data directory. THROUGH v26 that
-//! was `%APPDATA%\Pico` and nothing was ever written next to
-//! the executable; **v27 reverses that by the user's explicit
-//! order** (AUDIT V27-C): the data directory is now
-//! `<exe dir>/data/` — state, log, and the WebView2 profile
-//! all live beside `Pico.exe`, so deleting that one folder is
-//! a factory reset and deleting the whole folder erases Pico
-//! completely. `%APPDATA%\Pico` remains the fallback when the
-//! exe's folder is not writable (and the one-time migration
-//! source on the first v27 run). The choice is made ONCE by
-//! [`resolve_data_dir`] over probed facts, cached, and logged
-//! at startup (`data: portable …` / `data: fallback appdata
-//! (…)`).
+//! Stored as JSON in Pico's data directory. **0.41.0 reverses
+//! the v27 portable design by the user's explicit order:**
+//! ALL persistent state now lives in `%LOCALAPPDATA%\Pico\` —
+//! state, log, downloads task state, and the WebView2 profile
+//! (`%LOCALAPPDATA%\Pico\WebView2`). NOTHING is written beside
+//! the exe ever again: no `data\`, no log, no `Downloads`
+//! folder. The home is resolved ONCE by [`resolve_data_dir`]
+//! over injected facts (the Windows known-folder value for
+//! FOLDERID_LocalAppData first, then the `LOCALAPPDATA`
+//! environment variable, then an APPDATA-derived Local path,
+//! then a home-based path) and cached; the pure resolver is
+//! host-tested with the values injected, exactly like the
+//! patterns before it. On the first 0.41 run the legacy
+//! homes — `<exe dir>/data/` (v27–0.40) and `%APPDATA%\Pico`
+//! (pre-v27 / the v27 fallback) — are migrated into the new
+//! home BEFORE anything reads state: copied, verified, and
+//! only then (for the beside-exe tree) removed. See
+//! [`migrate_legacy_home`]. Downloaded FILES are not state:
+//! they land in the user's Windows Downloads folder
+//! (`core::download::resolve_downloads_dir`).
 //!
 //! Schema **version 3** (v21 added `shield_on` and
 //! `blocked_total`; v22's header finally says so — v21's said
@@ -202,6 +209,22 @@ pub struct PersistState {
     /// unlimited; `sanitized()` caps it at 1_000_000.
     #[serde(default)]
     pub downloads_speed_limit_kbps: u64,
+    /// The legacy beside-exe downloads folder
+    /// (`<exe>\Downloads`, 0.41.0 Workstream D / F-A1):
+    /// set ONCE by the app during the first-0.41 startup
+    /// migration when that folder exists and differs from
+    /// the new default downloads folder, and never set on
+    /// a fresh install. Task file resolution
+    /// (`core::download::resolve_task_file`) falls back
+    /// to it when a task's file is not in the current
+    /// downloads folder — the files themselves are never
+    /// moved or copied and task records are never
+    /// rewritten. Serde-defaulted to `None`, so every
+    /// pre-WS-D file loads with no legacy folder;
+    /// `sanitized()` drops anything that is not a
+    /// plausible local path string (the recents rule).
+    #[serde(default)]
+    pub legacy_downloads_dir: Option<String>,
 }
 
 fn default_theme() -> String {
@@ -241,6 +264,7 @@ impl Default for PersistState {
             download_connections: default_download_connections(),
             downloads_max_concurrent: default_downloads_max_concurrent(),
             downloads_speed_limit_kbps: 0,
+            legacy_downloads_dir: None,
         }
     }
 }
@@ -302,14 +326,25 @@ impl PersistState {
             n => n.clamp(1, 5),
         };
         self.downloads_speed_limit_kbps = self.downloads_speed_limit_kbps.min(1_000_000);
+        // Legacy downloads folder (0.41.0 WS-D, F-A1):
+        // kept only when it is a plausible local path
+        // string — same lexical gate as recents (no
+        // filesystem access here; existence is the
+        // resolver's question, answered per task file).
+        self.legacy_downloads_dir = self.legacy_downloads_dir.take().filter(|dir| {
+            !dir.is_empty()
+                && dir.len() <= 4096
+                && !dir.chars().any(|c: char| c.is_control())
+                && crate::core::addr::is_safe_local_path(std::path::Path::new(dir))
+        });
         self
     }
 }
 
 /// The pre-v27 per-user Pico data directory (`%APPDATA%\Pico`
-/// on Windows, `$HOME/.config/Pico` elsewhere). In v27 this is
-/// the FALLBACK location (exe folder not writable) and the
-/// one-time migration source — never the first choice.
+/// on Windows — the ROAMING appdata — `$HOME/.config/Pico`
+/// elsewhere). Since 0.41.0 this is only a MIGRATION SOURCE
+/// (the v27 fallback home), never a live location.
 pub fn appdata_pico_dir() -> PathBuf {
     if let Ok(appdata) = std::env::var("APPDATA") {
         if !appdata.is_empty() {
@@ -322,77 +357,285 @@ pub fn appdata_pico_dir() -> PathBuf {
     PathBuf::from("Pico")
 }
 
+/// The legacy beside-exe data directory (`<exe dir>/data`,
+/// the v27–0.40 home). 0.41.0 reads it ONLY as the migration
+/// source; nothing writes there anymore.
+pub fn legacy_exe_data_dir(exe_dir: &Path) -> PathBuf {
+    exe_dir.join("data")
+}
+
+/// The legacy beside-exe DOWNLOADS folder candidate
+/// (0.41.0 Workstream D, F-A1): `<exe dir>\Downloads`,
+/// where downloads finished (and `.part` files were
+/// left) under ≤0.40.3. It becomes the persisted
+/// `PersistState::legacy_downloads_dir` only when it
+/// actually IS a directory and differs from the new
+/// default downloads folder — a folder equal to the
+/// current one needs no fallback, and a missing one
+/// must never be recorded (a fresh install's field
+/// stays unset). The directory test is injected so the
+/// decision is pure and host-testable.
+pub fn legacy_downloads_candidate_with(
+    exe_dir: &Path,
+    current_downloads: &Path,
+    is_dir: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    let candidate = exe_dir.join("Downloads");
+    if candidate == current_downloads {
+        return None;
+    }
+    if !is_dir(&candidate) {
+        return None;
+    }
+    Some(candidate)
+}
+
+/// [`legacy_downloads_candidate_with`] against the real
+/// filesystem.
+pub fn legacy_downloads_candidate(exe_dir: &Path, current_downloads: &Path) -> Option<PathBuf> {
+    legacy_downloads_candidate_with(exe_dir, current_downloads, |p| p.is_dir())
+}
+
+/// The Windows known folder for `folder_id`, via
+/// SHGetKnownFolderPath (0.41.0). Windows-only: on every
+/// other host this is `None` and the env chain decides —
+/// which is also what makes the resolver host-testable (the
+/// known-folder VALUE is just one more injected fact there).
+#[cfg(windows)]
+fn known_folder(folder_id: &windows_sys::core::GUID) -> Option<PathBuf> {
+    use windows_sys::Win32::UI::Shell::SHGetKnownFolderPath;
+    let mut raw: windows_sys::core::PWSTR = std::ptr::null_mut();
+    let hr = unsafe { SHGetKnownFolderPath(folder_id, 0, std::ptr::null_mut(), &mut raw) };
+    if hr < 0 || raw.is_null() {
+        return None;
+    }
+    let mut len = 0usize;
+    unsafe {
+        while *raw.add(len) != 0 {
+            len += 1;
+        }
+    }
+    let text = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(raw, len) });
+    unsafe {
+        windows_sys::Win32::System::Com::CoTaskMemFree(raw as *const std::ffi::c_void);
+    }
+    if text.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(text))
+    }
+}
+
+/// The FOLDERID_LocalAppData known folder (Windows only;
+/// `None` elsewhere or on failure).
+#[cfg(windows)]
+pub fn known_local_app_data() -> Option<PathBuf> {
+    known_folder(&windows_sys::Win32::UI::Shell::FOLDERID_LocalAppData)
+}
+
+/// The FOLDERID_Downloads known folder (Windows only;
+/// `None` elsewhere or on failure).
+#[cfg(windows)]
+pub fn known_downloads_dir() -> Option<PathBuf> {
+    known_folder(&windows_sys::Win32::UI::Shell::FOLDERID_Downloads)
+}
+
+#[cfg(not(windows))]
+pub fn known_local_app_data() -> Option<PathBuf> {
+    None
+}
+
+#[cfg(not(windows))]
+pub fn known_downloads_dir() -> Option<PathBuf> {
+    None
+}
+
+/// Does a path STRING have an absolute shape, on either
+/// platform's terms (AUDIT 0.41.1, Front A F11)? POSIX
+/// (`/…`), Windows drive (`C:\…` / `C:/…`), and UNC
+/// (`\\…`) forms all count. A pure string test, so the
+/// resolver chain behaves identically on the test host.
+fn looks_absolute(s: &str) -> bool {
+    if s.starts_with('/') || s.starts_with("\\\\") {
+        return true;
+    }
+    let b = s.as_bytes();
+    b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/')
+}
+
+/// The extended-length (`\\?\`) form of a Windows path
+/// string, when one is needed (AUDIT 0.41.1, Front A F6):
+/// Pico ships with NO embedded manifest (the gate law), so
+/// the classic 260-char Win32 limit applies to plain paths
+/// — and the new home's prefix is longer than the old
+/// beside-exe one, so a deep profile file that fit under
+/// `<exe>\data\…` can cross the limit under
+/// `%LOCALAPPDATA%\Pico\…` and fail its migration copy on
+/// EVERY start. Paths longer than
+/// [`EXTENDED_PATH_MIN_CHARS`] are rewritten to the
+/// verbatim form, which has no such limit. Returns `None`
+/// for short paths, already-verbatim paths, and shapes
+/// that are not Windows-absolute. Pure string work, so it
+/// is unit-tested on any host.
+pub fn verbatim_form(path_str: &str) -> Option<String> {
+    if path_str.len() <= EXTENDED_PATH_MIN_CHARS || path_str.starts_with("\\\\?\\") {
+        return None;
+    }
+    if let Some(rest) = path_str.strip_prefix("\\\\") {
+        // UNC \\server\share\... → \\?\UNC\server\share\...
+        return Some(format!("\\\\?\\UNC\\{}", rest.replace('/', "\\")));
+    }
+    let b = path_str.as_bytes();
+    if b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/')
+    {
+        return Some(format!("\\\\?\\{}", path_str.replace('/', "\\")));
+    }
+    None
+}
+
+/// Path-length threshold above which migration file
+/// operations use the extended-length form (see
+/// [`verbatim_form`]): comfortably below the 260-char
+/// classic limit, leaving room for the child names a
+/// migration joins onto the root.
+pub const EXTENDED_PATH_MIN_CHARS: usize = 240;
+
+/// The form of `path` migration file operations should
+/// use: the extended-length form when the path is long
+/// enough to need it, the path itself otherwise. On
+/// non-Windows-shaped paths this is always the identity.
+fn migration_fs_path(path: &Path) -> PathBuf {
+    verbatim_form(&path.to_string_lossy())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| path.to_path_buf())
+}
+
+/// The pure Pico-home resolver (0.41.0). Facts in, decision
+/// out — no I/O, so the whole chain is unit-tested:
+///
+/// 1. The Windows known folder FOLDERID_LocalAppData (the
+///    shell injects its value; `None` off Windows or on
+///    failure) → `<local>\Pico`.
+/// 2. The `LOCALAPPDATA` env value → `<local>\Pico`.
+/// 3. The `APPDATA` (Roaming) env value, with a trailing
+///    `Roaming` component swapped for `Local` (the standard
+///    profile layout) → `<local>\Pico`; a Roaming value with
+///    no such component is used as-is (still per-user
+///    AppData, still never beside the exe).
+/// 4. `HOME` → `<home>/.local/share/Pico` (the non-Windows /
+///    test fallback shape).
+/// 5. Nothing known → the relative `Pico` (the current
+///    directory): degraded, but never beside the exe by
+///    design and never a world-writable substitute.
+pub fn resolve_pico_home<'a>(
+    known_local: Option<&'a Path>,
+    env_local: Option<&'a Path>,
+    env_roaming: Option<&'a Path>,
+    home: Option<&'a Path>,
+) -> (PathBuf, &'static str) {
+    // AUDIT 0.41.1 (Front A F11): a candidate must be
+    // non-empty AND absolute-shaped. A relative or
+    // whitespace-only env value would make the home depend
+    // on the process working directory (data "vanishes"
+    // between launch methods); it now falls through to the
+    // next candidate instead. The absoluteness test is a
+    // string check so Windows-shaped values (`C:\…`, `\\…`)
+    // count as absolute on every host — the resolver's
+    // unit tests feed Windows paths on non-Windows hosts.
+    let usable = |p: Option<&'a Path>| -> Option<&'a Path> {
+        p.filter(|p| {
+            let s = p.to_string_lossy();
+            !s.trim().is_empty() && looks_absolute(&s)
+        })
+    };
+    if let Some(local) = usable(known_local) {
+        return (local.join("Pico"), "known folder FOLDERID_LocalAppData");
+    }
+    if let Some(local) = usable(env_local) {
+        return (local.join("Pico"), "LOCALAPPDATA env");
+    }
+    if let Some(roaming) = usable(env_roaming) {
+        // AUDIT 0.41.1 (Front A F11): the Roaming→Local swap
+        // compares case-insensitively — `…\AppData\roaming`
+        // is the same folder as `…\AppData\Roaming`, and an
+        // exact-case miss used to leave the home INSIDE the
+        // Roaming tree (silently un-relocating Pico, with
+        // the log still claiming "APPDATA-derived Local").
+        let local = match roaming.file_name() {
+            Some(name) if name.to_string_lossy().eq_ignore_ascii_case("Roaming") => roaming
+                .parent()
+                .map(|p| p.join("Local"))
+                .unwrap_or_else(|| roaming.to_path_buf()),
+            _ => roaming.to_path_buf(),
+        };
+        return (local.join("Pico"), "APPDATA-derived Local");
+    }
+    if let Some(home) = usable(home) {
+        return (
+            home.join(".local").join("share").join("Pico"),
+            "home fallback",
+        );
+    }
+    (PathBuf::from("Pico"), "last-resort relative Pico")
+}
+
 /// Where Pico's runtime data lives this run, and why
-/// (AUDIT V27-C). Resolved ONCE from probed facts by
-/// [`resolve_data_dir`], then cached by [`data_dir`]; the
+/// (0.41.0). Resolved ONCE by [`resolve_data_dir`] over the
+/// injected facts, then cached by [`data_dir_choice`]; the
 /// reason string is what the startup log prints after
-/// `data: portable …` / `data: fallback appdata (…)`.
+/// `data: appdata …`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DataDirChoice {
     pub dir: PathBuf,
-    pub portable: bool,
     pub reason: String,
 }
 
-/// The pure chooser. Facts in, decision out — no I/O, so the
-/// whole matrix is unit-tested:
-///
-/// - Exe folder writable → `<exe dir>/data`, portable. (A
-///   filesystem-root exe dir is fine: `C:\data` is a normal
-///   folder. A `data` path that exists as a FILE fails the
-///   caller's probe, arriving here as `writable = false`.)
-/// - Exe folder not writable → the pre-v27 appdata dir, with
-///   the reason carried through for the log.
-pub fn resolve_data_dir(exe_dir: &Path, appdata_dir: &Path, exe_writable: bool) -> DataDirChoice {
-    if exe_writable {
-        DataDirChoice {
-            dir: exe_dir.join("data"),
-            portable: true,
-            reason: "exe folder is writable".to_string(),
-        }
-    } else {
-        DataDirChoice {
-            dir: appdata_dir.to_path_buf(),
-            portable: false,
-            reason: "exe folder is not writable".to_string(),
-        }
+/// The pure chooser (see [`resolve_pico_home`] for the
+/// chain). Kept under the historical name: every path in
+/// the app derives from this one answer.
+pub fn resolve_data_dir<'a>(
+    known_local: Option<&'a Path>,
+    env_local: Option<&'a Path>,
+    env_roaming: Option<&'a Path>,
+    home: Option<&'a Path>,
+) -> DataDirChoice {
+    let (dir, why) = resolve_pico_home(known_local, env_local, env_roaming, home);
+    DataDirChoice {
+        dir,
+        reason: why.to_string(),
     }
 }
 
-/// Probe: can we actually write beside the exe? Creates
-/// `<exe dir>/data` and round-trips a temp file inside it.
-/// Any failure — including `data` existing as a regular file —
-/// is simply "not writable"; Pico then falls back, it never
-/// runs data-less and never crashes over a path. (AUDIT V28,
-/// A5-L4: `pub` so the data-as-file fallback is pinned by a
-/// real tempdir test, not just asserted in prose. The
-/// probe-then-use TOCTOU window is accepted: a probe that
-/// passes and a dir that later vanishes degrades to failed
-/// state saves, never to a crash.)
-pub fn probe_exe_dir(exe_dir: &Path) -> bool {
-    let data = exe_dir.join("data");
-    if std::fs::create_dir_all(&data).is_err() {
-        return false;
+/// The user's Downloads folder from injected facts
+/// (0.41.0): the FOLDERID_Downloads known folder when the
+/// shell could read it, else `%USERPROFILE%\Downloads`.
+/// Pure; the runtime wrapper is [`user_downloads_dir`].
+pub fn downloads_dir_from(
+    known_downloads: Option<&Path>,
+    user_profile: Option<&Path>,
+) -> Option<PathBuf> {
+    if let Some(d) = known_downloads.filter(|p| !p.as_os_str().is_empty()) {
+        return Some(d.to_path_buf());
     }
-    // AUDIT V29 (A5-7): the round-trip includes a RENAME.
-    // Through v28 the probe proved only write+delete, but the
-    // consumers need more: every state save is temp+rename and
-    // startup creates the profile dir — a filesystem that
-    // writes but won't rename passed the probe and then failed
-    // every save for the whole session with the fallback never
-    // reconsidered.
-    let probe = data.join(format!(".pico-probe-{}", std::process::id()));
-    let probe2 = data.join(format!(".pico-probe-{}-renamed", std::process::id()));
-    let ok = std::fs::write(&probe, b"pico").is_ok() && std::fs::rename(&probe, &probe2).is_ok();
-    let _ = std::fs::remove_file(&probe);
-    let _ = std::fs::remove_file(&probe2);
-    ok
+    user_profile
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|home| home.join("Downloads"))
+}
+
+/// Runtime form of [`downloads_dir_from`]: known folder
+/// first (Windows), then the USERPROFILE env value.
+pub fn user_downloads_dir() -> Option<PathBuf> {
+    let profile = std::env::var("USERPROFILE")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from);
+    downloads_dir_from(known_downloads_dir().as_deref(), profile.as_deref())
 }
 
 /// The process's executable directory, or the current
-/// directory if even that is unknowable (the fallback chain
-/// then decides).
-fn exe_dir() -> PathBuf {
+/// directory if even that is unknowable. 0.41.0 uses it ONLY
+/// to find the legacy migration sources beside the exe.
+pub fn exe_dir() -> PathBuf {
     std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
@@ -401,19 +644,28 @@ fn exe_dir() -> PathBuf {
 
 static DATA_DIR: std::sync::OnceLock<DataDirChoice> = std::sync::OnceLock::new();
 
-/// The chosen data directory + reason, resolved on first use
-/// (probe included) and cached for the process lifetime —
-/// every path in the app derives from this one answer, so the
-/// state, the log and the profile can never split across two
-/// locations mid-run.
-pub fn data_dir_choice() -> &'static DataDirChoice {
-    DATA_DIR.get_or_init(|| {
-        let exe = exe_dir();
-        let writable = probe_exe_dir(&exe);
-        resolve_data_dir(&exe, &appdata_pico_dir(), writable)
-    })
+fn env_path(name: &str) -> Option<PathBuf> {
+    std::env::var(name)
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
 }
 
+/// The chosen data directory + reason, resolved on first use
+/// and cached for the process lifetime — every path in the
+/// app derives from this one answer, so the state, the log
+/// and the profile can never split across two locations
+/// mid-run.
+pub fn data_dir_choice() -> &'static DataDirChoice {
+    DATA_DIR.get_or_init(|| {
+        resolve_data_dir(
+            known_local_app_data().as_deref(),
+            env_path("LOCALAPPDATA").as_deref(),
+            env_path("APPDATA").as_deref(),
+            env_path("HOME").as_deref(),
+        )
+    })
+}
 /// Pico's data directory for this run (see [`data_dir_choice`]).
 pub fn pico_dir() -> PathBuf {
     data_dir_choice().dir.clone()
@@ -428,107 +680,135 @@ pub fn state_path() -> PathBuf {
 /// any signed-in session live here — so its path is
 /// load-bearing: derived here exactly once from the resolved
 /// data dir and pinned by tests (AUDIT V18-3, re-pinned
-/// V22-16, moved by V27-C — the MIGRATION below is what
-/// carries an existing profile across the move, and nothing
-/// in Pico ever deletes it). (The state sanitizer above cannot
+/// V22-16, moved by V27-C, moved again by 0.41.0 to
+/// `%LOCALAPPDATA%\Pico\WebView2` — the MIGRATION below is
+/// what carries an existing profile across the move, and
+/// nothing in Pico ever deletes it). (The state sanitizer above cannot
 /// touch it either — it operates on the in-memory
 /// `PersistState` value.)
 pub fn webview_data_dir() -> PathBuf {
     pico_dir().join("WebView2")
 }
 
-/// The appdata install's WebView2 profile folder (the
-/// migration SOURCE; never a context folder in v27).
+/// The Roaming appdata install's WebView2 profile folder
+/// (a migration SOURCE; never a context folder).
 pub fn appdata_webview_dir() -> PathBuf {
     appdata_pico_dir().join("WebView2")
 }
 
-/// What the first v27 run should do about pre-v27 data
-/// (AUDIT V27-C3).
+/// What a migration should do about a legacy home
+/// (0.41.0: the beside-exe `data\` tree or the Roaming
+/// appdata tree, into the LocalAppData home).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MigrationPlan {
-    /// Nothing to migrate (no old data, or the portable dir
+    /// Nothing to migrate (no old data, or the new home
     /// already has state of its own — never clobber).
     None,
-    /// Copy state + profile from the appdata dir into the
-    /// portable dir.
+    /// Copy the whole legacy tree (state + profile +
+    /// downloads task state) into the new home.
     Copy { from: PathBuf, to: PathBuf },
-    /// Copy ONLY the state file: the portable dir already has
+    /// Copy ONLY the state file: the new home already has
     /// a profile of its own, which is never overwritten
     /// (AUDIT V28, A5-H1).
     CopyStateOnly { from: PathBuf, to: PathBuf },
+    /// Copy the whole legacy tree EXCEPT the state file
+    /// (AUDIT 0.41.1, Front A F1/F2): the new home's state
+    /// is LIVE (an interim session already saved its own,
+    /// or it was always healthy) and must not be rewound
+    /// to the legacy copy — but the tree (profile,
+    /// downloads task state) is still owed. With
+    /// `skip_profile`, the source's `WebView2` subtree is
+    /// left out too: the destination already has a live
+    /// profile of its own (the A5-H1 clobber law).
+    CopyTreeOnly {
+        from: PathBuf,
+        to: PathBuf,
+        skip_profile: bool,
+        /// Fill ONLY what is missing (AUDIT 0.41.3): a
+        /// file that already exists at the destination is
+        /// skipped, never rewound. Only the Live-no-pending
+        /// fill arm passes `true` — it completes a LIVE
+        /// home, whose existing files are newer by
+        /// definition of it being live. The pending-retry
+        /// and corrupt-rescue arms pass `false`: their
+        /// destinations are partial copies or rescues, and
+        /// the copy stays overwrite-idempotent as before.
+        missing_only: bool,
+    },
 }
 
-/// The pure migration planner. Migration is considered ONLY
-/// on the portable route (a fallback run reads appdata in
-/// place — copying it onto itself would be nonsense), only
-/// when the portable dir has no state yet, and only when the
-/// appdata dir actually holds something worth carrying (a
-/// state file OR a profile folder).
-///
-/// AUDIT V28 (A5-H1): the planner now also knows whether the
-/// portable dir already has a PROFILE. Through v27 it keyed on
-/// state alone, with two failure shapes: a profile-only
-/// portable dir (state lost, profile present) got its live
-/// profile CLOBBERED by the stale appdata copy; and because
-/// the performer copied state FIRST, an interrupted migration
-/// left state behind — the planner then stood down forever
-/// and the profile copy was never resumed, while the log
-/// could still claim a clean migration. The performer now
-/// copies the profile first and the state last (atomically),
-/// so state presence remains an honest completion marker,
-/// and a profile-only portable dir plans a state-only copy.
 /// Name of the migration-in-progress marker inside the
-/// portable data dir (AUDIT V29, A5-1): written by the
+/// destination data dir (AUDIT V29, A5-1): written by the
 /// performer before a full copy and removed only when the
 /// copy completes cleanly. Its presence is how the planner
-/// tells a PARTIAL portable profile (resume the copy — the
-/// appdata source is its own origin) from a LIVE one whose
-/// state was lost (never recopy — the v28 clobber law).
+/// tells a PARTIAL destination profile (resume the copy —
+/// the legacy source is its own origin) from a LIVE one
+/// whose state was lost (never recopy — the v28 clobber
+/// law).
 pub const MIGRATION_PENDING_NAME: &str = "migration.pending";
 
+/// The pure migration planner (0.41.0 form). Migration is
+/// considered only when the destination has no state yet,
+/// and only when the source actually holds something worth
+/// carrying (a state file OR a profile folder).
+///
+/// AUDIT V28 (A5-H1): the planner also knows whether the
+/// destination already has a PROFILE. A profile-only
+/// destination (state lost, profile present) must never
+/// get its live profile CLOBBERED by the stale source
+/// copy; it plans a state-only copy instead. A leftover
+/// pending marker overrides that: the destination profile
+/// is then a PARTIAL copy of the source's, and the full
+/// copy resumes.
 pub fn plan_migration(
-    choice: &DataDirChoice,
-    appdata_dir: &Path,
-    portable_has_state: bool,
-    portable_has_profile: bool,
-    appdata_has_state: bool,
-    appdata_has_profile: bool,
+    dest_dir: &Path,
+    source_dir: &Path,
+    dest_has_state: bool,
+    dest_has_profile: bool,
+    source_has_state: bool,
+    source_has_profile: bool,
+    dest_has_pending: bool,
 ) -> MigrationPlan {
-    if !choice.portable || portable_has_state || !(appdata_has_state || appdata_has_profile) {
+    if dest_has_state || !(source_has_state || source_has_profile) {
         return MigrationPlan::None;
     }
-    // A leftover pending marker means the portable profile is
-    // a partial copy of appdata's: resume the FULL copy
-    // (overwrite-idempotent), never the state-only shortcut.
-    if choice.dir.join(MIGRATION_PENDING_NAME).is_file() {
+    // A leftover pending marker means the destination
+    // profile is a partial copy of the source's: resume
+    // the FULL copy (overwrite-idempotent), never the
+    // state-only shortcut.
+    if dest_has_pending {
         return MigrationPlan::Copy {
-            from: appdata_dir.to_path_buf(),
-            to: choice.dir.clone(),
+            from: source_dir.to_path_buf(),
+            to: dest_dir.to_path_buf(),
         };
     }
-    if portable_has_profile {
-        return if appdata_has_state {
+    if dest_has_profile {
+        return if source_has_state {
             MigrationPlan::CopyStateOnly {
-                from: appdata_dir.to_path_buf(),
-                to: choice.dir.clone(),
+                from: source_dir.to_path_buf(),
+                to: dest_dir.to_path_buf(),
             }
         } else {
             MigrationPlan::None
         };
     }
     MigrationPlan::Copy {
-        from: appdata_dir.to_path_buf(),
-        to: choice.dir.clone(),
+        from: source_dir.to_path_buf(),
+        to: dest_dir.to_path_buf(),
     }
 }
 
 /// Outcome of a performed migration, for the startup log.
-/// `skipped` counts everything not copied; `failed` counts
-/// only entries that SHOULD have copied and could not (AUDIT
-/// V29, A5-1/A5-8: the completion-marker gate keys on
-/// failures — a deliberately-uncopied symlink is honest in
-/// `skipped` but must not stall migration forever).
+/// `profile_files` counts every file copied OTHER than
+/// `state.json` (the WebView2 profile tree is the bulk of
+/// it; downloads task files count too since 0.41.0, whose
+/// performer copies the whole legacy tree, not just the
+/// profile). `skipped` counts everything not copied;
+/// `failed` counts only entries that SHOULD have copied
+/// and could not (AUDIT V29, A5-1/A5-8: the
+/// completion-marker gate keys on failures — a
+/// deliberately-uncopied symlink is honest in `skipped`
+/// but must not stall migration forever).
 ///
 /// AUDIT 0.34.1 (field addition): `details` itemizes the
 /// FAILURES and the PURE SKIPS (never the successes — a
@@ -602,64 +882,141 @@ fn migration_rel(root: &Path, path: &Path) -> String {
     }
 }
 
-/// Perform a planned migration. Best-effort per file — a file
-/// that cannot be read or written (locked, vanished mid-copy)
-/// is counted as skipped, never fatal; the ORIGINAL appdata
-/// tree is left untouched as the backup. Must run BEFORE any
-/// WebView2 context is created against the new profile (the
-/// app calls it during startup, before window construction).
+/// Is this top-level legacy entry the log, the pending
+/// marker, or a state temp — entries the tree copy must
+/// not carry verbatim (0.41.0)? The log is carried by
+/// [`carry_legacy_log`] (append-shaped, not copy-shaped);
+/// temps are crash leftovers by definition.
+fn migration_excluded_top(name: &std::ffi::OsStr) -> bool {
+    let name = name.to_string_lossy();
+    name == "pico.log"
+        || name == MIGRATION_PENDING_NAME
+        || (name.starts_with("state.json.") && name.ends_with(".tmp"))
+}
+
+/// Perform a planned migration. Best-effort per file — a
+/// file that cannot be read or written (locked, vanished
+/// mid-copy) is counted and itemized, never fatal. Must
+/// run BEFORE any WebView2 context is created against the
+/// new profile and before anything reads state (the app
+/// runs it during startup, before the log even opens —
+/// the log itself initializes into the NEW home).
 ///
-/// AUDIT V28 (A5-H1/M1): for a full copy the PROFILE tree is
-/// copied first and `state.json` LAST, atomically (pid-unique
-/// temp + rename) — state presence is the planner's
-/// completion marker, so it may only appear once everything
-/// else has had its chance; an interrupted run is re-planned
-/// next start instead of standing down forever.
+/// AUDIT V28 (A5-H1/M1): for a full copy everything else
+/// is copied first and `state.json` LAST, atomically
+/// (pid-unique temp + rename) — state presence is the
+/// planner's completion marker, so it may only appear
+/// once everything else has had its chance; an
+/// interrupted run is re-planned next start instead of
+/// standing down forever. 0.41.0: the full copy carries
+/// the WHOLE legacy tree (profile, downloads task state,
+/// any other Pico file), not just `WebView2\` — the
+/// exclusions are the log (carried separately), the
+/// pending marker, and state temps.
 pub fn perform_migration(plan: &MigrationPlan) -> MigrationReport {
-    let (from, to, with_profile) = match plan {
-        MigrationPlan::Copy { from, to } => (from, to, true),
-        MigrationPlan::CopyStateOnly { from, to } => (from, to, false),
+    // AUDIT 0.41.1: the plan decomposes into (copy the
+    // tree?, copy the state?) plus the tree copy's profile
+    // guard. `Copy` is (yes, yes); `CopyStateOnly` is
+    // (no, yes); `CopyTreeOnly` is (yes, no) — the
+    // destination state is live and is never rewound.
+    let (from, to, tree, copy_state, skip_profile, missing_only) = match plan {
+        MigrationPlan::Copy { from, to } => (from, to, true, true, false, false),
+        MigrationPlan::CopyStateOnly { from, to } => (from, to, false, true, false, false),
+        MigrationPlan::CopyTreeOnly {
+            from,
+            to,
+            skip_profile,
+            missing_only,
+        } => (from, to, true, false, *skip_profile, *missing_only),
         MigrationPlan::None => return MigrationReport::default(),
     };
+    let full = tree;
     let mut report = MigrationReport::default();
     let _ = std::fs::create_dir_all(to);
-    // AUDIT V29 (A5-1): mark the copy in progress BEFORE the
-    // profile lands; the marker is removed only at clean
-    // completion (below). A crash or a failed file leaves it
-    // behind, and the planner (see plan_migration) resumes
-    // the full copy instead of mistaking the partial profile
-    // for a live one.
+    // AUDIT V29 (A5-1): mark the copy in progress BEFORE
+    // anything lands; the marker is removed only at clean
+    // completion (below). A crash or a failed file leaves
+    // it behind, and the planner (see plan_migration)
+    // resumes the full copy instead of mistaking the
+    // partial tree for a live one.
     let pending = to.join(MIGRATION_PENDING_NAME);
-    if with_profile {
+    if full {
         let _ = std::fs::write(&pending, b"pico migration in progress\n");
-        let src_profile = from.join("WebView2");
-        if src_profile.is_dir() {
-            // Rooted at `from` so detail paths read
-            // `WebView2/...` (0.34.1).
-            copy_tree_rooted(&src_profile, &to.join("WebView2"), from, &mut report);
+        // Deterministic order (sorted names) so reports
+        // and retries behave identically across runs.
+        let mut entries: Vec<PathBuf> = match std::fs::read_dir(from) {
+            Ok(rd) => rd.flatten().map(|e| e.path()).collect(),
+            Err(e) => {
+                report.note_failure("tree root", ".".to_string(), e);
+                return report;
+            }
+        };
+        entries.sort();
+        for src in entries {
+            let Some(name) = src.file_name() else {
+                continue;
+            };
+            if name == "state.json" || migration_excluded_top(name) {
+                continue;
+            }
+            // AUDIT 0.41.1 (Front A F2): a tree-only fill
+            // over a LIVE destination profile never touches
+            // the source's profile subtree (A5-H1).
+            if skip_profile && name == "WebView2" {
+                continue;
+            }
+            let dst = to.join(name);
+            match std::fs::metadata(&src) {
+                Ok(meta) if meta.is_dir() => {
+                    copy_tree_rooted(&src, &dst, from, &mut report, missing_only);
+                }
+                // AUDIT 0.41.3: a missing-only fill never
+                // rewinds a live destination file — an
+                // existing file is a pure skip, itemized
+                // with kind "(exists)".
+                Ok(meta) if meta.is_file() && missing_only && dst.exists() => {
+                    report.note_skip("(exists)", migration_rel(from, &src));
+                }
+                Ok(meta) if meta.is_file() => match copy_atomic(&src, &dst) {
+                    Ok(()) => report.profile_files += 1,
+                    Err(e) => {
+                        report.note_failure("file", migration_rel(from, &src), e);
+                    }
+                },
+                Ok(_) => {
+                    report.note_skip("entry (exotic)", migration_rel(from, &src));
+                }
+                Err(e) => {
+                    report.note_failure("entry", migration_rel(from, &src), e);
+                }
+            }
         }
     }
     // AUDIT V29 (A5-1): state is the planner's completion
-    // marker, so it may only land when the profile phase had
-    // no FAILURES. Through v28 any per-file failure (a locked
-    // Cookies file, an AV hold) still landed state — the
-    // planner then stood down forever with a half-copied
-    // profile and a success-shaped log line. Now a failed
-    // profile copy leaves the marker absent: the plan is
-    // re-issued next start, and copy_tree is
+    // marker, so it may only land when the copy phase had
+    // no FAILURES. Through v28 any per-file failure (a
+    // locked Cookies file, an AV hold) still landed state
+    // — the planner then stood down forever with a
+    // half-copied profile and a success-shaped log line.
+    // Now a failed copy leaves the marker absent: the plan
+    // is re-issued next start, and the copy is
     // overwrite-idempotent, so the retry simply resumes.
-    if with_profile && report.failed > 0 {
+    if full && report.failed > 0 {
         return report;
     }
-    let src_state = from.join("state.json");
-    if src_state.is_file() {
-        match copy_atomic(&src_state, &to.join("state.json")) {
-            Ok(()) => report.state_copied = true,
-            Err(e) => {
-                // 0.34.1: the error is CAPTURED into the
-                // detail, not discarded — a failed state
-                // copy is itemized like any profile failure.
-                report.note_failure("state file", "state.json".to_string(), e);
+    // AUDIT 0.41.1: a tree-only plan never lands state —
+    // the destination's own state is the live one.
+    if copy_state {
+        let src_state = from.join("state.json");
+        if src_state.is_file() {
+            match copy_atomic(&src_state, &to.join("state.json")) {
+                Ok(()) => report.state_copied = true,
+                Err(e) => {
+                    // 0.34.1: the error is CAPTURED into the
+                    // detail, not discarded — a failed state
+                    // copy is itemized like any other failure.
+                    report.note_failure("state file", "state.json".to_string(), e);
+                }
             }
         }
     }
@@ -667,10 +1024,637 @@ pub fn perform_migration(plan: &MigrationPlan) -> MigrationReport {
     // failure path above RETURNS EARLY and never reaches
     // this: the marker — and the withheld state — are what
     // make the next start resume honestly.)
-    if with_profile && report.failed == 0 {
+    if full && report.failed == 0 {
         let _ = std::fs::remove_file(&pending);
     }
     report
+}
+
+/// Verify a performed migration copy (0.41.0): every file
+/// the source holds (same exclusions as the copy) must
+/// exist at the destination with the same length, and
+/// `state.json` — the file whose loss is silent data loss
+/// — must additionally be byte-identical. Symlink entries
+/// are exempt (the copy deliberately skips them).
+/// Destination extras (the new home's own log, say) are
+/// ignored. This is the gate the legacy tree's REMOVAL
+/// keys on: unverified means untouched, however complete
+/// the copy looks.
+pub fn verify_migration_copy(from: &Path, to: &Path) -> bool {
+    verify_migration_copy_scoped(
+        from,
+        to,
+        VerifyScope::Full {
+            include_profile: true,
+        },
+    )
+}
+
+/// Which part of a performed copy a verification covers
+/// (AUDIT 0.41.1, Front A F2). Through 0.41.0 the single
+/// full-tree verify ran for EVERY plan — including
+/// `CopyStateOnly`, which by design copies nothing but
+/// the state file, so its verification demanded files
+/// the plan never carried and could essentially never
+/// pass (the source then stayed forever, the log said
+/// NOT VERIFIED forever, and any files the plan did not
+/// cover were stranded). Each plan now verifies exactly
+/// what it copied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VerifyScope {
+    /// Everything the full copy carries, state included.
+    Full { include_profile: bool },
+    /// Only `state.json`, byte-identical.
+    StateOnly,
+    /// Everything except `state.json` (the destination
+    /// state is live and is not the copy's business).
+    /// `missing_only` (AUDIT 0.41.3) mirrors the plan's
+    /// fill discipline — see the verify walk for what it
+    /// changes about the check.
+    TreeOnly {
+        include_profile: bool,
+        missing_only: bool,
+    },
+}
+
+/// Files at or below this size are byte-compared during
+/// verification, not just length-compared (AUDIT 0.41.1,
+/// Front A F8): a same-length torn copy of a small,
+/// high-value file (Cookies, History, a task JSON) used
+/// to verify clean right before the only other copy was
+/// deleted. Large files stay length-compared — the copy
+/// is a plain `fs::copy` of a quiescent tree, and reading
+/// back gigabytes of cache would punish every migration.
+const VERIFY_BYTE_COMPARE_MAX: u64 = 1 << 20;
+
+fn verify_migration_copy_scoped(from: &Path, to: &Path, scope: VerifyScope) -> bool {
+    if matches!(scope, VerifyScope::StateOnly) {
+        let (Ok(s), Ok(d)) = (
+            std::fs::read(from.join("state.json")),
+            std::fs::read(to.join("state.json")),
+        ) else {
+            return false;
+        };
+        return s == d;
+    }
+    let (include_profile, missing_only) = match scope {
+        VerifyScope::Full { include_profile } => (include_profile, false),
+        VerifyScope::TreeOnly {
+            include_profile,
+            missing_only,
+        } => (include_profile, missing_only),
+        VerifyScope::StateOnly => unreachable!(),
+    };
+    // AUDIT 0.41.1 (Front A F2): the walk mirrors the
+    // performer's depth discipline EXACTLY — the copy
+    // skips subtrees deeper than COPY_TREE_MAX_DEPTH as a
+    // pure skip, and through 0.41.0 this uncapped walk
+    // then demanded those very files at the destination,
+    // failing verification permanently. Top-level entries
+    // are depth-less (the performer's top loop); each
+    // top-level directory is walked at depth 0, like
+    // `copy_tree_rooted`.
+    fn walk_dir(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) -> bool {
+        if depth > COPY_TREE_MAX_DEPTH {
+            return true;
+        }
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return false;
+        };
+        for entry in rd {
+            let Ok(entry) = entry else { return false };
+            let Ok(kind) = entry.file_type() else {
+                return false;
+            };
+            if kind.is_symlink() {
+                continue;
+            }
+            let path = entry.path();
+            if kind.is_dir() {
+                if !walk_dir(&path, depth + 1, out) {
+                    return false;
+                }
+            } else if kind.is_file() {
+                out.push(path);
+            }
+        }
+        true
+    }
+    let mut files = Vec::new();
+    let Ok(rd) = std::fs::read_dir(from) else {
+        return false;
+    };
+    for entry in rd {
+        let Ok(entry) = entry else { return false };
+        let Ok(kind) = entry.file_type() else {
+            return false;
+        };
+        let path = entry.path();
+        if kind.is_symlink() {
+            // AUDIT 0.41.3 (A-S2): the performer follows
+            // TOP-LEVEL symlinks (its top loop reads
+            // `fs::metadata`, which resolves them), so a
+            // top-level symlink-to-dir is copied through
+            // like a directory — the verify walk must
+            // treat it the same way, with the same depth
+            // discipline, or files copied through a
+            // junction are never actually checked.
+            // (Symlinks BELOW the top level stay skipped
+            // in both walks: the performer's tree copy
+            // does not follow them either.)
+            match std::fs::metadata(&path) {
+                Ok(meta) if meta.is_dir() => {
+                    if !walk_dir(&path, 0, &mut files) {
+                        return false;
+                    }
+                }
+                Ok(meta) if meta.is_file() => files.push(path),
+                _ => continue,
+            }
+            continue;
+        }
+        if kind.is_dir() {
+            if !walk_dir(&path, 0, &mut files) {
+                return false;
+            }
+        } else if kind.is_file() {
+            files.push(path);
+        }
+    }
+    for src in files {
+        let Ok(rel) = src.strip_prefix(from) else {
+            return false;
+        };
+        if rel.components().count() == 1 {
+            if let Some(name) = rel.file_name() {
+                if migration_excluded_top(name) {
+                    continue;
+                }
+            }
+        }
+        if !include_profile
+            && rel.components().next() == Some(std::path::Component::Normal("WebView2".as_ref()))
+        {
+            continue;
+        }
+        if matches!(scope, VerifyScope::TreeOnly { .. }) && rel == Path::new("state.json") {
+            continue;
+        }
+        let dst = to.join(rel);
+        let (Ok(smeta), Ok(dmeta)) = (std::fs::metadata(&src), std::fs::metadata(&dst)) else {
+            return false;
+        };
+        if !dmeta.is_file() || smeta.len() != dmeta.len() {
+            return false;
+        }
+        // AUDIT 0.41.1 (Front A F8): byte-compare the
+        // small files (and state.json at any size), not
+        // just their lengths.
+        // AUDIT 0.41.3: a missing-only fill is the one
+        // exception — its destination files that already
+        // existed were deliberately NOT copied, so their
+        // bytes are the live home's own, not the source's;
+        // byte-comparing them would fail every honest
+        // fill. Presence + equal length is the honest
+        // fill check: which individual files the
+        // performer actually copied is not knowable
+        // post-hoc, so no stronger claim is made here.
+        if !missing_only
+            && (rel == Path::new("state.json") || smeta.len() <= VERIFY_BYTE_COMPARE_MAX)
+        {
+            let (Ok(s), Ok(d)) = (std::fs::read(&src), std::fs::read(&dst)) else {
+                return false;
+            };
+            if s != d {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Carry the legacy log into the new home (0.41.0). Runs
+/// BEFORE the logger initializes into the new home, so
+/// there is no open handle to fight: when the new home
+/// has no `pico.log` yet, the legacy log becomes it
+/// verbatim (the new session appends after the old
+/// history); when one already exists (a migration
+/// retry), the legacy log is preserved beside it as
+/// `pico-legacy.log` instead of being merged twice.
+fn carry_legacy_log(from: &Path, to: &Path) -> bool {
+    let src = from.join("pico.log");
+    if !src.is_file() {
+        return false;
+    }
+    let dst = if to.join("pico.log").exists() {
+        to.join("pico-legacy.log")
+    } else {
+        to.join("pico.log")
+    };
+    std::fs::copy(&src, &dst).is_ok()
+}
+
+/// The full first-run legacy migration outcome (0.41.0),
+/// for the startup log: every step the app must report —
+/// whether a migration ran at all, its copy report, the
+/// log carry, the verification verdict, and whether the
+/// legacy tree was removed (only ever after a verified
+/// copy, and only when the caller asked for removal —
+/// the beside-exe tree; the Roaming tree stays as the
+/// standing backup, as it did through the v27 move).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LegacyMigrationOutcome {
+    pub attempted: bool,
+    pub report: MigrationReport,
+    pub log_carried: bool,
+    pub verified: bool,
+    pub source_removed: bool,
+    pub remove_failed: bool,
+    /// The source held a `pico.log` (AUDIT 0.41.1, Front
+    /// A F7): lets the caller log honestly when the carry
+    /// failed, and gates source removal (a verified copy
+    /// whose log never arrived does not authorize deleting
+    /// the only copy of that log).
+    pub source_had_log: bool,
+    /// Removal was withheld because the legacy log could
+    /// not be carried (AUDIT 0.41.1, Front A F7) — the
+    /// source stays until a start manages the carry.
+    pub removal_withheld_for_log: bool,
+    /// When removal renamed the source aside but could
+    /// not finish deleting it: where the remains live
+    /// (AUDIT 0.41.1, Front A F5), so the log can say
+    /// exactly what is left instead of "left in place"
+    /// about a half-deleted tree.
+    pub remove_leftover: Option<PathBuf>,
+}
+
+/// The destination state file's health, for the
+/// migration stand-down decision (AUDIT 0.41.1, Front A
+/// F12): through 0.41.0 the check was existence-only, so
+/// a truncated or corrupt `state.json` counted as a live
+/// home and blocked rescue by an intact legacy state.
+enum DestState {
+    Absent,
+    Live,
+    Corrupt,
+}
+
+/// Remove a migrated legacy source (AUDIT 0.41.1, Front
+/// A F5): the tree is first RENAMED to a sibling
+/// quarantine name, and only the renamed tree is
+/// deleted. Through 0.41.0, verify walked the tree and
+/// `remove_dir_all` then deleted whatever was in the
+/// source at deletion time — anything written into the
+/// source between the two walks (a second Pico instance
+/// starting mid-migration, a script, an old build still
+/// running) was deleted unverified. After the rename,
+/// new writes to the original path land in a fresh
+/// folder that this removal never touches. A removal
+/// that fails after the rename reports the quarantine
+/// path, so the remains are findable.
+fn remove_migrated_source(source: &Path, outcome: &mut LegacyMigrationOutcome) {
+    let name = source
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "data".to_string());
+    let quarantine = source.with_file_name(format!("{name}.pico-migrated-{}", std::process::id()));
+    if quarantine.exists() {
+        // Our own earlier leftover: it was already
+        // verified-and-renamed once; clearing it is safe.
+        let _ = std::fs::remove_dir_all(&quarantine);
+    }
+    match std::fs::rename(source, &quarantine) {
+        Ok(()) => match std::fs::remove_dir_all(&quarantine) {
+            Ok(()) => outcome.source_removed = true,
+            Err(_) => {
+                outcome.remove_failed = true;
+                outcome.remove_leftover = Some(quarantine);
+            }
+        },
+        Err(_) => outcome.remove_failed = true,
+    }
+}
+
+/// Migrate one legacy home into the new home (0.41.0):
+/// plan → copy → carry the log → verify → (optionally)
+/// remove the source. A source equal to the destination,
+/// or not a directory at all, is a no-op. On ANY failure
+/// or failed verification the source is left exactly as
+/// it was and Pico runs from the migrated copies; the
+/// plan re-issues next start.
+///
+/// AUDIT 0.41.1 (Front A F1): through 0.41.0 ANY dest
+/// `state.json` stood the migration down and retired the
+/// pending marker — but a FAILED copy leaves the marker
+/// and withholds state precisely so the next start
+/// resumes, and the interim session then saves its own
+/// state (the F-A1 legacy-downloads save does so
+/// deterministically). The retry was therefore defeated
+/// by the session it was promised to: pending is now
+/// consulted FIRST, and a pending migration over a live
+/// dest state completes the TREE only (the interim state
+/// is newer and is never rewound).
+pub fn migrate_legacy_home(
+    source: &Path,
+    dest: &Path,
+    remove_source: bool,
+) -> LegacyMigrationOutcome {
+    let outcome = LegacyMigrationOutcome::default();
+    // AUDIT 0.41.3 (A-S1): a relative source stands down.
+    // A CWD-relative `data` must never become a migration
+    // source — its "verified removal" would delete
+    // whatever folder the process's working directory
+    // happens to name, which is not a legacy home.
+    if !source.is_absolute() {
+        return outcome;
+    }
+    if source == dest || !source.is_dir() {
+        return outcome;
+    }
+    // AUDIT 0.41.1 (Front A F6): the file operations run
+    // on extended-length roots when a root is long enough
+    // to need them (the outcome and the caller keep
+    // speaking of the original paths).
+    let source_fs = migration_fs_path(source);
+    let dest_fs = migration_fs_path(dest);
+    let source = &source_fs;
+    let dest = &dest_fs;
+    let dest_state = match load_from_checked(&dest.join("state.json")) {
+        LoadOutcome::Loaded(_) => DestState::Live,
+        LoadOutcome::Missing => DestState::Absent,
+        LoadOutcome::Corrupt(_) => DestState::Corrupt,
+    };
+    let pending = dest.join(MIGRATION_PENDING_NAME).is_file();
+    let source_has_state = source.join("state.json").is_file();
+    let source_has_profile = source.join("WebView2").is_dir();
+    let dest_has_profile = dest.join("WebView2").is_dir();
+
+    if matches!(dest_state, DestState::Live) && !pending {
+        // A healthy live home stands the migration down —
+        // with ONE completion exception (AUDIT 0.41.1,
+        // Front A F2/F4): the tree may still owe this home
+        // a profile it lacks, or non-profile files (the
+        // downloads task state) that a state-only copy
+        // never carried. Fill exactly what is missing,
+        // never touching the live state, and never
+        // overwriting a live profile.
+        let fill_profile = !dest_has_profile && source_has_profile;
+        let fill_tree = legacy_tree_fill_needed(source, dest);
+        if !fill_profile && !fill_tree {
+            return outcome;
+        }
+        let plan = MigrationPlan::CopyTreeOnly {
+            from: source.to_path_buf(),
+            to: dest.to_path_buf(),
+            skip_profile: dest_has_profile,
+            // AUDIT 0.41.3: the fill arm fills only what
+            // is missing — a live home's existing files
+            // (a NEWER downloads task file, say) are
+            // never rewound to the legacy copy.
+            missing_only: true,
+        };
+        return run_migration_plan(plan, source, dest, remove_source, outcome);
+    }
+
+    let plan = if pending {
+        // An earlier copy did not complete. Over a live
+        // dest state, complete the tree only; otherwise
+        // resume the full copy (state lands last, as
+        // always).
+        if matches!(dest_state, DestState::Live) {
+            MigrationPlan::CopyTreeOnly {
+                from: source.to_path_buf(),
+                to: dest.to_path_buf(),
+                // AUDIT 0.41.3 (Front A F1 companion):
+                // the interim session's LIVE profile must
+                // never be rewound either — this arm used
+                // to pass `false` unconditionally, unlike
+                // both sibling arms. The tree copy stays
+                // overwrite-shaped for everything else
+                // (missing_only: false): the destination
+                // tree outside the profile is a partial
+                // copy of this very source, not live data.
+                skip_profile: dest_has_profile,
+                missing_only: false,
+            }
+        } else {
+            MigrationPlan::Copy {
+                from: source.to_path_buf(),
+                to: dest.to_path_buf(),
+            }
+        }
+    } else if matches!(dest_state, DestState::Corrupt) {
+        // AUDIT 0.41.1 (Front A F12): a corrupt dest
+        // state does not stand the migration down when
+        // the legacy tree holds a state to rescue it
+        // with; plan as if the dest had no state (the
+        // copy lands state atomically over the corrupt
+        // file). A corrupt state with nothing to rescue
+        // it is the app loader's own affair.
+        if !source_has_state && !source_has_profile {
+            return outcome;
+        }
+        if source_has_profile && !source_has_state {
+            MigrationPlan::CopyTreeOnly {
+                from: source.to_path_buf(),
+                to: dest.to_path_buf(),
+                skip_profile: dest_has_profile,
+                missing_only: false,
+            }
+        } else {
+            plan_migration(
+                dest,
+                source,
+                false,
+                dest_has_profile,
+                source_has_state,
+                source_has_profile,
+                false,
+            )
+        }
+    } else {
+        plan_migration(
+            dest,
+            source,
+            false,
+            dest_has_profile,
+            source_has_state,
+            source_has_profile,
+            false,
+        )
+    };
+    if matches!(plan, MigrationPlan::None) {
+        return outcome;
+    }
+    run_migration_plan(plan, source, dest, remove_source, outcome)
+}
+
+/// Does the legacy tree hold a non-state, non-profile
+/// top-level entry the destination lacks (AUDIT 0.41.1,
+/// Front A F2)? Presence at the top level is the check —
+/// the stranded class is whole folders (the downloads
+/// task state), not individual files.
+fn legacy_tree_fill_needed(source: &Path, dest: &Path) -> bool {
+    let Ok(rd) = std::fs::read_dir(source) else {
+        return false;
+    };
+    for entry in rd.flatten() {
+        let name = entry.file_name();
+        if name == "state.json" || name == "WebView2" || migration_excluded_top(&name) {
+            continue;
+        }
+        if !dest.join(&name).exists() {
+            return true;
+        }
+    }
+    false
+}
+
+/// The shared tail of [`migrate_legacy_home`]: perform,
+/// carry the log, verify what the plan copied, and —
+/// only for a verified copy whose log arrived — remove
+/// the source when asked.
+fn run_migration_plan(
+    plan: MigrationPlan,
+    source: &Path,
+    dest: &Path,
+    remove_source: bool,
+    mut outcome: LegacyMigrationOutcome,
+) -> LegacyMigrationOutcome {
+    let scope = match &plan {
+        MigrationPlan::Copy { .. } => VerifyScope::Full {
+            include_profile: true,
+        },
+        MigrationPlan::CopyStateOnly { .. } => VerifyScope::StateOnly,
+        MigrationPlan::CopyTreeOnly {
+            skip_profile,
+            missing_only,
+            ..
+        } => VerifyScope::TreeOnly {
+            include_profile: !skip_profile,
+            missing_only: *missing_only,
+        },
+        MigrationPlan::None => return outcome,
+    };
+    outcome.attempted = true;
+    outcome.source_had_log = source.join("pico.log").is_file();
+    outcome.report = perform_migration(&plan);
+    outcome.log_carried = carry_legacy_log(source, dest);
+    outcome.verified =
+        outcome.report.failed == 0 && verify_migration_copy_scoped(source, dest, scope);
+    // AUDIT 0.41.1: source removal — the one irreversible
+    // step — keys on a FULL verified copy only. A
+    // state-only or tree-only plan carried a subset by
+    // design; the source remains the standing backup for
+    // the part it still solely holds (its state in the
+    // tree-only case, its profile in the state-only case).
+    let full_copy = matches!(plan, MigrationPlan::Copy { .. });
+    if outcome.verified && remove_source && full_copy {
+        // AUDIT 0.41.1 (Front A F7): the carried log is
+        // part of what "verified" must mean before the
+        // only other copy is deleted — through 0.41.0 a
+        // failed carry was silent and the source (with
+        // the log) was removed anyway.
+        if outcome.source_had_log && !outcome.log_carried {
+            outcome.removal_withheld_for_log = true;
+        } else {
+            remove_migrated_source(source, &mut outcome);
+        }
+    }
+    outcome
+}
+
+/// Migrate a beside-exe WebView2 user-data folder into
+/// the new home (0.41.0). What the current build creates:
+/// nothing beside the exe — every WebView is built on the
+/// one explicit [`webview_data_dir`] context (pinned by a
+/// source-scan test). But a default-context WebView2 (an
+/// older experiment, another build) leaves
+/// `<exe>\Pico.exe.WebView2\` — a full user-data folder
+/// whose `EBWebView` subtree is the profile — and some
+/// shapes leave a bare `<exe>\EBWebView\`. Both are
+/// carried into `<new home>\WebView2` (contents, so
+/// `EBWebView` lands where the runtime expects it)
+/// BEFORE any WebView is created. Best-effort per file:
+/// a locked file counts as failed in the report and the
+/// source is left in place — this migration never
+/// removes anything. An existing destination profile is
+/// never clobbered.
+/// Marker names for the beside-exe WebView2 migration
+/// (AUDIT 0.41.1, Front A F3), kept in the destination
+/// home: `webview-migration.pending` while a copy is
+/// incomplete, `webview-migration.done` once one has
+/// completed cleanly.
+pub const WEBVIEW_MIGRATION_PENDING_NAME: &str = "webview-migration.pending";
+/// See [`WEBVIEW_MIGRATION_PENDING_NAME`].
+pub const WEBVIEW_MIGRATION_DONE_NAME: &str = "webview-migration.done";
+
+pub fn migrate_beside_exe_webview(exe_dir: &Path, dest_home: &Path) -> (bool, MigrationReport) {
+    let mut report = MigrationReport::default();
+    let mut attempted = false;
+    // AUDIT 0.41.1 (Front A F6): long roots get the
+    // extended-length form for the file operations.
+    let exe_dir_fs = migration_fs_path(exe_dir);
+    let dest_home_fs = migration_fs_path(dest_home);
+    let exe_dir = &exe_dir_fs;
+    let dest_home = &dest_home_fs;
+    let dest_wv = dest_home.join("WebView2");
+    let candidates: [(PathBuf, PathBuf); 2] = [
+        (exe_dir.join("Pico.exe.WebView2"), dest_wv.clone()),
+        (exe_dir.join("EBWebView"), dest_wv.join("EBWebView")),
+    ];
+    // AUDIT 0.41.1 (Front A F3): through 0.41.0 the only
+    // stand-down guard was "the EBWebView directory
+    // exists at the destination" — but the copy CREATES
+    // that directory before copying any file, so one
+    // interrupted or locked-file attempt left an empty or
+    // partial profile that blocked every retry forever
+    // (and blocked the second candidate in the same run).
+    // The migration now keeps the main migration's marker
+    // discipline: stand down only on a recorded CLEAN
+    // completion, or when a destination profile exists
+    // that this migration did not start (a live profile —
+    // never clobbered). A leftover pending marker means
+    // the partial tree is ours: resume it.
+    let done_marker = dest_home.join(WEBVIEW_MIGRATION_DONE_NAME);
+    if done_marker.is_file() {
+        return (attempted, report);
+    }
+    let pending_marker = dest_home.join(WEBVIEW_MIGRATION_PENDING_NAME);
+    if dest_wv.join("EBWebView").is_dir() && !pending_marker.is_file() {
+        return (attempted, report);
+    }
+    if !candidates.iter().any(|(src, _)| src.is_dir()) {
+        return (attempted, report);
+    }
+    let _ = std::fs::create_dir_all(dest_home);
+    let _ = std::fs::write(&pending_marker, b"pico webview migration in progress\n");
+    for (src, dst) in candidates {
+        if !src.is_dir() {
+            continue;
+        }
+        // The second candidate is the fallback spelling
+        // of the same profile: it runs only when the
+        // first delivered no files at all.
+        if attempted && report.profile_files > 0 {
+            break;
+        }
+        attempted = true;
+        copy_tree_rooted(&src, &dst, exe_dir, &mut report, false);
+    }
+    if attempted && report.failed == 0 {
+        let _ = std::fs::write(&done_marker, b"pico webview migration complete\n");
+        let _ = std::fs::remove_file(&pending_marker);
+    }
+    (attempted, report)
+}
+/// Flush a just-copied file to disk (AUDIT 0.41.1, Front
+/// A F9). The handle is opened for writing because
+/// `sync_all` needs write access on Windows (the 0.40.2
+/// lesson from `copy_atomic`).
+fn sync_copied_file(path: &Path) -> std::io::Result<()> {
+    let f = std::fs::OpenOptions::new().write(true).open(path)?;
+    f.sync_all()
 }
 
 /// Copy one file atomically: write to a per-process temp
@@ -762,14 +1746,24 @@ const COPY_TREE_MAX_DEPTH: usize = 32;
 /// are relative to the tree root itself.
 #[cfg(test)]
 fn copy_tree(src: &Path, dst: &Path, report: &mut MigrationReport) {
-    copy_tree_at_depth(src, dst, src, report, 0)
+    copy_tree_at_depth(src, dst, src, report, 0, false)
 }
 
 /// The migration performer's entry: detail paths are
 /// relative to the migration SOURCE root, so a profile
 /// file reads `WebView2/...` in the log (0.34.1).
-fn copy_tree_rooted(src: &Path, dst: &Path, root: &Path, report: &mut MigrationReport) {
-    copy_tree_at_depth(src, dst, root, report, 0)
+/// `missing_only` (AUDIT 0.41.3) is the performer's fill
+/// discipline: directories are still created, but a file
+/// that already exists at the destination is skipped
+/// (kind "(exists)"), never rewound.
+fn copy_tree_rooted(
+    src: &Path,
+    dst: &Path,
+    root: &Path,
+    report: &mut MigrationReport,
+    missing_only: bool,
+) {
+    copy_tree_at_depth(src, dst, root, report, 0, missing_only)
 }
 
 fn copy_tree_at_depth(
@@ -778,6 +1772,7 @@ fn copy_tree_at_depth(
     root: &Path,
     report: &mut MigrationReport,
     depth: usize,
+    missing_only: bool,
 ) {
     // AUDIT 0.31 (A5-L10): depth cap — deeper entries are
     // skipped (and counted), never followed.
@@ -820,7 +1815,11 @@ fn copy_tree_at_depth(
             }
         };
         if kind.is_dir() {
-            copy_tree_at_depth(&s, &d, root, report, depth + 1);
+            copy_tree_at_depth(&s, &d, root, report, depth + 1, missing_only);
+        } else if kind.is_file() && missing_only && d.exists() {
+            // AUDIT 0.41.3: the fill never rewinds a live
+            // destination file (see copy_tree_rooted).
+            report.note_skip("(exists)", migration_rel(root, &s));
         } else if kind.is_file() {
             match std::fs::copy(&s, &d) {
                 // AUDIT 0.40.2: `fs::copy` copies the source's
@@ -830,7 +1829,20 @@ fn copy_tree_at_depth(
                 // clears a PRE-EXISTING destination on retry).
                 Ok(_) => {
                     clear_readonly(&d);
-                    report.profile_files += 1;
+                    // AUDIT 0.41.1 (Front A F9): the copy is
+                    // not done when the OS accepts the bytes —
+                    // a verified copy authorizes deleting the
+                    // only other one, so the file is synced
+                    // before it counts (the A5-8 discipline
+                    // copy_atomic already had; the tree copy
+                    // never did). A sync failure is a copy
+                    // failure.
+                    match sync_copied_file(&d) {
+                        Ok(()) => report.profile_files += 1,
+                        Err(e) => {
+                            report.note_failure("profile file", migration_rel(root, &s), e);
+                        }
+                    }
                 }
                 Err(first) => {
                     // AUDIT 0.34.1 (retry poisoning): a
@@ -853,7 +1865,16 @@ fn copy_tree_at_depth(
                             // clearing as the first-copy arm.
                             Ok(_) => {
                                 clear_readonly(&d);
-                                report.profile_files += 1;
+                                match sync_copied_file(&d) {
+                                    Ok(()) => report.profile_files += 1,
+                                    Err(e) => {
+                                        report.note_failure(
+                                            "profile file",
+                                            migration_rel(root, &s),
+                                            e,
+                                        );
+                                    }
+                                }
                             }
                             Err(second) => {
                                 report.note_failure(

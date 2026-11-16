@@ -30,7 +30,7 @@
 /// form must be the Cargo version or a dotted prefix of
 /// it — so a Cargo bump without a display bump (or the
 /// reverse) fails the suite.
-pub const DISPLAY_VERSION: &str = "0.40.2";
+pub const DISPLAY_VERSION: &str = "0.41.3";
 
 #[cfg(test)]
 mod tests {
@@ -57,6 +57,7 @@ pub mod download;
 pub mod fileopen;
 pub mod filterpipe;
 pub mod history;
+pub mod icons;
 pub mod ipc;
 pub mod layout;
 pub mod lite;
@@ -65,6 +66,8 @@ pub mod lite;
 // lists instead and has no such module.
 pub mod lists;
 pub mod media;
+pub mod navcmd;
+pub mod navstore;
 pub mod qr;
 pub mod redact;
 pub mod server;
@@ -72,6 +75,8 @@ pub mod sha256;
 pub mod shield;
 pub mod state;
 pub mod stats;
+pub mod tabcmd;
 pub mod teleport;
 pub mod themes;
 pub mod urlstate;
+pub mod visibility;

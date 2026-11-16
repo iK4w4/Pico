@@ -7,9 +7,9 @@
 //! domain list caused the v7 catastrophe (google.com blocked as a
 //! main document): the real filter lists (EasyList, EasyPrivacy,
 //! uBlock filters + privacy, see SOURCES.md) are fetched on
-//! first run from their canonical sources and cached beside
-//! the exe (`data/lists/`; acquisition policy in
-//! [`super::lists`]), then parsed once with Adblock-Plus
+//! first run from their canonical sources and cached in
+//! the Pico home (`%LOCALAPPDATA%\Pico\lists\`; acquisition
+//! policy in [`super::lists`]), then parsed once with Adblock-Plus
 //! semantics — anchors, wildcards, separators, exceptions,
 //! `$important`, `$badfilter`, party/type/`domain=` options — and
 //! every list line is accounted for in a [`CompileReport`]. Lines
@@ -104,6 +104,10 @@ use std::sync::{Mutex, RwLock};
 /// coverage of the v28 lists measures 341,567 bytes, so the
 /// old ceiling cut the last 10 hosts. 344,000 restores the
 /// every-host guarantee with ~2.4 KB of headroom.
+/// The most of a request URL the generic (AC needle)
+/// scan reads in `decide_with_method` (AUDIT 0.41.1,
+/// Front F F2). Host-anchored matching is unaffected.
+pub const GENERIC_SCAN_CAP: usize = 16 * 1024;
 pub const COSMETIC_SCRIPT_BUDGET: usize = 344_000;
 /// Scriptlets already ship every host (2,197) at 186,717 bytes
 /// under this budget on the canonical lists (measured, AUDIT V23);
@@ -276,7 +280,15 @@ pub fn host_span(url: &str, host: &str) -> Option<(usize, usize)> {
     if host_start + host_len > url.len() {
         return None;
     }
-    let after = url[host_start + host_len..]
+    // AUDIT 0.41.3 (Front C F1): the length guard above
+    // is not enough — `host` is supplied independently
+    // of `url`, so `host_start + host_len` can land
+    // INSIDE a multi-byte character of the URL (a short
+    // host measured against a non-ASCII authority), and
+    // slicing there panics. `.get(..)` returns None on a
+    // non-boundary instead: no span, no panic.
+    let after_host = url.get(host_start + host_len..)?;
+    let after = after_host
         .find(|c| ['/', '?', '#', ':'].contains(&c))
         .map(|i| host_start + host_len + i)
         .unwrap_or(url.len());
@@ -945,6 +957,34 @@ enum PageFlag {
     Elemhide,
 }
 
+/// Page-flag scopes partitioned by kind (PERF 0.41.2 — see
+/// the `ShieldEngine::page_flags` field note). `push` files
+/// a scope under its kind; `scopes` reads one kind back.
+#[derive(Debug, Default)]
+struct PageFlags {
+    generichide: Vec<Option<DomainSet>>,
+    genericblock: Vec<Option<DomainSet>>,
+    elemhide: Vec<Option<DomainSet>>,
+}
+
+impl PageFlags {
+    fn push(&mut self, scope: Option<DomainSet>, flag: PageFlag) {
+        match flag {
+            PageFlag::Generichide => self.generichide.push(scope),
+            PageFlag::Genericblock => self.genericblock.push(scope),
+            PageFlag::Elemhide => self.elemhide.push(scope),
+        }
+    }
+
+    fn scopes(&self, flag: PageFlag) -> &[Option<DomainSet>] {
+        match flag {
+            PageFlag::Generichide => &self.generichide,
+            PageFlag::Genericblock => &self.genericblock,
+            PageFlag::Elemhide => &self.elemhide,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct NetRule {
     /// The pattern text (lowercased, options stripped) — the
@@ -1107,9 +1147,17 @@ pub struct ShieldEngine {
     /// candidates. Kept few by construction; counted in the
     /// report.
     always: Vec<u32>,
-    /// Page-level flags (generichide / genericblock / elemhide)
-    /// with their domain scoping (None = everywhere).
-    page_flags: Vec<(Option<DomainSet>, PageFlag)>,
+    /// Page-level flags with their domain scoping
+    /// (None = everywhere), PARTITIONED by kind (PERF
+    /// 0.41.2): through 0.41.1 one mixed Vec held every
+    /// flag, so `decide`'s per-request `genericblock`
+    /// check scanned all ~405 shipped flags (nearly all
+    /// generichide) on every resource request just to
+    /// compare the kind tag. Each kind now keeps its own
+    /// Vec in compile order; every consumer reads exactly
+    /// the kind it asks about, with identical membership
+    /// and per-kind order, so every verdict is unchanged.
+    page_flags: PageFlags,
     generic_cosmetic: Vec<String>,
     specific_cosmetic: HashMap<String, Vec<String>>,
     /// AUDIT V28 (A2-M4): host/entity -> generic-set selectors a
@@ -1380,19 +1428,6 @@ fn split_options(rule: &str) -> (&str, Option<ParsedOptions>, OptSkip) {
     (rule, None, OptSkip::None)
 }
 
-fn host_suffix_walk(host: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut cur = host;
-    loop {
-        out.push(cur.to_string());
-        match cur.find('.') {
-            Some(i) => cur = &cur[i + 1..],
-            None => break,
-        }
-    }
-    out
-}
-
 impl ShieldEngine {
     /// Compile the given list texts into an engine. Every line
     /// is classified and counted in the report; nothing panics
@@ -1406,7 +1441,7 @@ impl ShieldEngine {
         // subtract after all lists are read.
         let mut specific: HashMap<String, HashSet<String>> = HashMap::new();
         let mut specific_exceptions: Vec<(DomainSet, String)> = Vec::new();
-        let mut page_flags: Vec<(Option<DomainSet>, PageFlag)> = Vec::new();
+        let mut page_flags = PageFlags::default();
         // Scriptlets (v23): per-host entries, generic entries,
         // and exceptions to subtract after all lists are read.
         let mut specific_scriptlets: HashMap<String, Vec<ScriptletEntry>> = HashMap::new();
@@ -1504,7 +1539,7 @@ impl ShieldEngine {
                         } else {
                             Some(domains)
                         };
-                        page_flags.push((scope, flag));
+                        page_flags.push(scope, flag);
                         report.page_flag_rules += 1;
                     } else {
                         report.skipped_other += 1;
@@ -1687,7 +1722,7 @@ impl ShieldEngine {
                         }),
                         (None, None) => None,
                     };
-                    page_flags.push((scope, flag));
+                    page_flags.push(scope, flag);
                     report.page_flag_rules += 1;
                     continue;
                 }
@@ -1928,9 +1963,14 @@ impl ShieldEngine {
     }
 
     fn page_flag_active(&self, flag: PageFlag, page_host: &str) -> bool {
-        self.page_flags.iter().any(|(scope, f)| {
-            *f == flag && scope.as_ref().map(|s| s.matches(page_host)).unwrap_or(true)
-        })
+        // PERF 0.41.2: only this kind's scopes are scanned
+        // (the flags are partitioned at compile — see
+        // `PageFlags`); the per-scope verdict is the old
+        // expression verbatim.
+        self.page_flags
+            .scopes(flag)
+            .iter()
+            .any(|scope| scope.as_ref().map(|s| s.matches(page_host)).unwrap_or(true))
     }
 
     /// Decide one request. Pure, total, panic-free; every doubt
@@ -1963,7 +2003,19 @@ impl ShieldEngine {
         if is_local_host(&page_host) {
             return Decision::Allow;
         }
-        let url_lower = url.to_ascii_lowercase();
+        // PERF (0.41.2): the lowercase copy is borrowed when
+        // the URL is already lowercase (the common case —
+        // `to_ascii_lowercase` only rewrites ASCII A–Z, so
+        // "no ASCII uppercase byte" means the copy would be
+        // byte-identical). The string every step below reads
+        // is the same either way.
+        let lowered;
+        let url_lower: &str = if url.bytes().any(|b| b.is_ascii_uppercase()) {
+            lowered = url.to_ascii_lowercase();
+            &lowered
+        } else {
+            url
+        };
         let third_party = registrable_domain(&req_host) != registrable_domain(&page_host);
         let generic_blocked = self.page_flag_active(PageFlag::Genericblock, &page_host);
 
@@ -2030,11 +2082,18 @@ impl ShieldEngine {
         // string over the whole URL can land inside userinfo or
         // the path when those contain the same text, and for an
         // IPv6 literal the first ':' sits inside the brackets.
-        let after_host = host_span(&url_lower, &req_host)
+        let after_host = host_span(url_lower, &req_host)
             .map(|(_, after)| after)
             .unwrap_or(url_lower.len());
-        for suffix in host_suffix_walk(&req_host) {
-            if let Some(idxs) = self.by_host.get(&suffix) {
+        // PERF (0.41.2): the suffix walk yields &str slices
+        // of the host instead of allocating one String per
+        // label (the old `host_suffix_walk`): the sequence
+        // of suffixes — full host, then each parent — is
+        // identical, and `by_host` lookups take the slice
+        // directly.
+        let mut suffix = req_host.as_str();
+        loop {
+            if let Some(idxs) = self.by_host.get(suffix) {
                 for &idx in idxs {
                     let rule = &self.rules[idx as usize];
                     // AUDIT 0.31 (A2-F10): an anchored pattern
@@ -2056,14 +2115,33 @@ impl ShieldEngine {
                             None => url_lower.len(),
                         };
                     }
-                    consider(rule, &url_lower, start, true);
+                    consider(rule, url_lower, start, true);
                 }
+            }
+            match suffix.find('.') {
+                Some(i) => suffix = &suffix[i + 1..],
+                None => break,
             }
         }
 
         // Generic candidates via the AC needle index.
+        // AUDIT 0.41.1 (Front F F2): the scan reads at
+        // most GENERIC_SCAN_CAP bytes of the URL. decide()
+        // had no length budget at all — its cost is
+        // linear in URL length (~110 ns/byte measured),
+        // so a page minting 100 KB request URLs (long
+        // query strings are page-controlled) taxed every
+        // resource check ~10 ms on the resource path.
+        // Real request URLs are far under the cap; a
+        // generic rule whose needle sits past it in an
+        // absurdly long URL no longer fires — the
+        // documented trade. Host-anchored rules above
+        // still see the full URL, and a candidate the
+        // scan DOES surface is still pattern-matched
+        // against the full URL below.
+        let scan_end = url_lower.floor_char_boundary(GENERIC_SCAN_CAP);
         let mut candidates: Vec<u32> = Vec::new();
-        self.ac.scan(url_lower.as_bytes(), |nid| {
+        self.ac.scan(&url_lower.as_bytes()[..scan_end], |nid| {
             if let Some(rs) = self.ac_rules.get(nid as usize) {
                 candidates.extend(rs.iter().copied());
             }
@@ -2073,7 +2151,7 @@ impl ShieldEngine {
         candidates.dedup();
         for idx in candidates {
             let rule = &self.rules[idx as usize];
-            consider(rule, &url_lower, 0, false);
+            consider(rule, url_lower, 0, false);
         }
 
         if any_important_block && !any_important_exception {
@@ -2120,19 +2198,32 @@ impl ShieldEngine {
         let mut gh_all = false;
         let mut eh_hosts: Vec<String> = Vec::new();
         let mut eh_all = false;
-        for (scope, flag) in &self.page_flags {
-            let (hosts, all) = match flag {
-                PageFlag::Generichide => (&mut gh_hosts, &mut gh_all),
-                PageFlag::Elemhide => (&mut eh_hosts, &mut eh_all),
-                PageFlag::Genericblock => continue,
-            };
-            match scope {
-                Some(set) => {
-                    for h in &set.include {
-                        hosts.push(h.clone());
+        // PERF 0.41.2: the flags are partitioned by kind;
+        // generichide scopes feed `gh_*`, elemhide scopes
+        // feed `eh_*`, genericblock never reaches the
+        // cosmetic payload — exactly the old mixed-Vec
+        // walk, per kind, in the same per-kind order.
+        for (scopes, hosts, all) in [
+            (
+                self.page_flags.scopes(PageFlag::Generichide),
+                &mut gh_hosts,
+                &mut gh_all,
+            ),
+            (
+                self.page_flags.scopes(PageFlag::Elemhide),
+                &mut eh_hosts,
+                &mut eh_all,
+            ),
+        ] {
+            for scope in scopes {
+                match scope {
+                    Some(set) => {
+                        for h in &set.include {
+                            hosts.push(h.clone());
+                        }
                     }
+                    None => *all = true,
                 }
-                None => *all = true,
             }
         }
         // Generic selectors are the core value and always ship in

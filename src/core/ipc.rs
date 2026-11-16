@@ -150,6 +150,38 @@ pub enum Command {
     /// the app restores the plain chrome bounds and drops the
     /// pending target.
     CtxClose,
+    /// The address-bar suggestions dropdown closed
+    /// (0.41.0): the app drops its chrome-rect extension
+    /// claim for the overlay. OPENING needs no command —
+    /// it is implied by the `suggestions-query` nav body,
+    /// whose answer push is what paints the dropdown.
+    SuggestClose,
+    /// Open the managed history page (0.41.0) — the chrome
+    /// document's Ctrl+H. (Content-view Ctrl+H never
+    /// reaches the chrome document; the app's accelerator
+    /// registration forwards it as a shell event instead,
+    /// the Ctrl+J choke point.)
+    HistoryPage,
+    /// Open the tab strip's context menu (0.41.0,
+    /// Workstream C): a right-click on a tab. Carries the
+    /// tab id and the click point in window DIP — the app
+    /// builds the menu model (`core::tabcmd::tab_menu_items`),
+    /// positions the card (`core::layout::ctx_menu_pos`,
+    /// the content menu's geometry) and owns the open
+    /// state, exactly like the content context menu; the
+    /// snapshot carries it back for the chrome to draw.
+    /// The menu's PICKS are not commands: they cross as
+    /// `core::tabcmd` bodies (`move-step` /
+    /// `open-in-new-pico`), the movable-tab vocabulary.
+    TabMenuOpen {
+        tab: u64,
+        x: u32,
+        y: u32,
+    },
+    /// The tab strip's context menu was dismissed without
+    /// a pick (0.41.0): the app drops the stored menu and
+    /// restores the plain chrome bounds, like `CtxClose`.
+    TabMenuClose,
     // Downloads commands are NOT chrome `Command`s since
     // 0.34: every downloads verb on every surface travels
     // as the canonical `{"kind":"dl", ...}` body and is
@@ -187,12 +219,16 @@ fn allowed_command_keys(t: &str) -> Option<&'static [&'static str]> {
     const DIR: &[&str] = &["t", "v", "boot", "req", "dir"];
     const TEXT: &[&str] = &["t", "v", "boot", "req", "text"];
     const ID: &[&str] = &["t", "v", "boot", "req", "id"];
+    const TABXY: &[&str] = &["t", "v", "boot", "req", "tab", "x", "y"];
     match t {
         "ready" | "new_tab" | "back" | "forward" | "reload" | "home" | "open_file"
         | "theme_toggle" | "shield_toggle" | "lite_toggle" | "teleport" | "teleport_close"
         | "teleport_copy" | "palette" | "palette_close" | "ctx_close" | "win_min" | "win_max"
-        | "win_drag" | "win_close" => Some(COMMON),
+        | "win_drag" | "win_close" | "suggest_close" | "history_page" | "tab_menu_close" => {
+            Some(COMMON)
+        }
         "social" => Some(SOCIAL),
+        "tab_menu_open" => Some(TABXY),
         "close_tab" | "switch_tab" => Some(TAB),
         "cycle_tab" => Some(DIR),
         "navigate" => Some(TEXT),
@@ -242,10 +278,166 @@ pub fn userinfo_adoption_allowed(url: &str, marker: Option<&str>) -> bool {
     !url_has_userinfo(url) || marker == Some(url)
 }
 
+/// Does this JSON text's TOP-LEVEL object repeat a key?
+/// (AUDIT 0.41.1, Front E F3.) serde_json's `Value`
+/// stage — which several app paths route bodies through
+/// before the strict core parsers see them — collapses
+/// duplicate keys last-wins, so `{"action":"pause",
+/// "action":"clear-all"}` reached the downloads parser
+/// as a clean ClearAll: the strict parsers' own
+/// duplicate rejection never saw the original text.
+/// This scanner is string/escape/depth aware, decodes
+/// each top-level key with serde_json (so an escaped
+/// spelling compares equal to its plain twin), and
+/// reports malformed input as "no duplicates" — the
+/// real parser downstream rejects malformed input on
+/// its own; this check only guards the well-formed
+/// case the reserialization would otherwise launder.
+pub fn json_object_has_duplicate_keys(body: &str) -> bool {
+    let b = body.as_bytes();
+    let mut i = 0usize;
+    let skip_ws = |i: &mut usize| {
+        while *i < b.len() && matches!(b[*i], b' ' | b'\t' | b'\n' | b'\r') {
+            *i += 1;
+        }
+    };
+    // Skip one JSON string starting at the quote;
+    // returns the index just past the closing quote.
+    let skip_string = |mut i: usize| -> Option<usize> {
+        if i >= b.len() || b[i] != b'"' {
+            return None;
+        }
+        i += 1;
+        while i < b.len() {
+            match b[i] {
+                b'\\' => i += 2,
+                b'"' => return Some(i + 1),
+                _ => i += 1,
+            }
+        }
+        None
+    };
+    // Skip one JSON value of any shape.
+    let skip_value = |mut i: usize| -> Option<usize> {
+        skip_ws(&mut i);
+        if i >= b.len() {
+            return None;
+        }
+        match b[i] {
+            b'"' => skip_string(i),
+            b'{' | b'[' => {
+                let mut depth = 0usize;
+                while i < b.len() {
+                    match b[i] {
+                        b'"' => {
+                            i = skip_string(i)?;
+                        }
+                        b'{' | b'[' => {
+                            depth += 1;
+                            i += 1;
+                        }
+                        b'}' | b']' => {
+                            depth -= 1;
+                            i += 1;
+                            if depth == 0 {
+                                return Some(i);
+                            }
+                        }
+                        _ => i += 1,
+                    }
+                }
+                None
+            }
+            _ => {
+                // number / true / false / null: runs to the
+                // next structural delimiter.
+                while i < b.len() && !matches!(b[i], b',' | b'}' | b']') {
+                    i += 1;
+                }
+                Some(i)
+            }
+        }
+    };
+    skip_ws(&mut i);
+    if i >= b.len() || b[i] != b'{' {
+        return false;
+    }
+    i += 1;
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    loop {
+        skip_ws(&mut i);
+        if i >= b.len() {
+            return false;
+        }
+        if b[i] == b'}' {
+            return false;
+        }
+        // A key string.
+        let start = i;
+        let Some(end) = skip_string(i) else {
+            return false;
+        };
+        let Ok(key) = serde_json::from_str::<String>(&body[start..end]) else {
+            return false;
+        };
+        if !seen.insert(key) {
+            return true;
+        }
+        i = end;
+        skip_ws(&mut i);
+        if i >= b.len() || b[i] != b':' {
+            return false;
+        }
+        i += 1;
+        let Some(next) = skip_value(i) else {
+            return false;
+        };
+        i = next;
+        skip_ws(&mut i);
+        if i < b.len() && b[i] == b',' {
+            i += 1;
+            continue;
+        }
+        return false;
+    }
+}
+
+/// The strict envelope identity of a command body that
+/// arrived as a parsed `Value` (AUDIT 0.41.1, Front E
+/// F2): protocol version (absent = 1, anything else
+/// refused) and boot id bounds (1..=MAX_BOOT_LEN),
+/// exactly as [`parse_command`] enforces them inline.
+/// Through 0.41.0 the app-side envelope extraction for
+/// the dl/nav/tab command paths read `v`/`boot` with NO
+/// validation at all — `{"v":999,…}` executed and a
+/// 138-char boot id was accepted on those paths while
+/// the sibling path refused both.
+pub fn strict_envelope_id(value: &serde_json::Value) -> Option<(String, u64)> {
+    if let Some(v) = value.get("v") {
+        match v.as_u64() {
+            Some(n) if n == PROTOCOL_VERSION => {}
+            _ => return None,
+        }
+    }
+    let boot = value.get("boot").and_then(|b| b.as_str())?;
+    if boot.is_empty() || boot.len() > MAX_BOOT_LEN {
+        return None;
+    }
+    let req = value.get("req").and_then(|r| r.as_u64())?;
+    Some((boot.to_string(), req))
+}
+
 /// Parse one raw IPC message body from the chrome webview.
 pub fn parse_command(body: &str) -> Result<Envelope, String> {
     if body.len() > MAX_COMMAND_BODY_BYTES {
         return Err(format!("command body too large ({} bytes)", body.len()));
+    }
+    // AUDIT 0.41.1 (Front E F3): a duplicate top-level
+    // key would be collapsed last-wins by the Value
+    // parse below, laundering a body the strict field
+    // checks never actually saw.
+    if json_object_has_duplicate_keys(body) {
+        return Err("duplicate key in command body".to_string());
     }
     let value: serde_json::Value =
         serde_json::from_str(body).map_err(|e| format!("bad json: {e}"))?;
@@ -309,6 +501,16 @@ pub fn parse_command(body: &str) -> Result<Envelope, String> {
         // as", "print") has no id here to hide behind.
         if id.is_empty() || id.len() > 32 || !super::ctxmenu::CTX_IDS.contains(&id.as_str()) {
             return Err("ctx id out of range".to_string());
+        }
+    }
+    if let Command::TabMenuOpen { x, y, .. } = &cmd {
+        // A menu anchor is a window-DIP point: any real
+        // window is far inside this bound, and a point
+        // outside it can only be a bug or an attack — the
+        // app clamps the card into the window anyway, but
+        // absurd input is rejected here, at the gate.
+        if *x > 20_000 || *y > 20_000 {
+            return Err("tab menu anchor out of range".to_string());
         }
     }
     if let Command::CycleTab { dir } = &cmd {
@@ -495,29 +697,58 @@ pub fn parse_nav_note(body: &str) -> Option<NavNote> {
     })
 }
 
+/// The structural kind check behind the three report
+/// pre-filters (AUDIT 0.41.3, Front C F5): trim, require
+/// `{`, parse the JSON Value, and compare the `kind`
+/// field EXACTLY — the same shape as the action/dl
+/// prefilters (`looks_like_action`, `looks_like_dl_body`).
+/// Through 0.41.2 these three matched the compact
+/// substring `"kind":"shield_prune"`, so a
+/// whitespace-variant body (`{ "kind" : "shield_prune",
+/// … }`) — valid JSON the real parser would accept —
+/// routed differently from the compact spelling. The
+/// A1-2 property is preserved structurally: a nav note
+/// whose page TITLE contains the quoted words has kind
+/// `"nav"`, not the report kind, so it still cannot be
+/// misrouted into a report branch.
+fn looks_like_kind(body: &str, kind: &str) -> bool {
+    if body.len() > MAX_NAV_BODY_BYTES {
+        return false;
+    }
+    let t = body.trim();
+    if !t.starts_with('{') {
+        return false;
+    }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(t) else {
+        return false;
+    };
+    v.get("kind").and_then(|k| k.as_str()) == Some(kind)
+}
+
 /// Cheap pre-filter for the content IPC handler: does this
 /// body claim to be a Shield prune report? Full validation is
 /// [`parse_shield_prune`]'s job.
 ///
-/// AUDIT 0.30 (A1-2): the needle is the kind ASSIGNMENT
-/// (`"kind":"shield_prune"`), not the bare quoted word — a
-/// nav note whose page title happens to contain the quoted
-/// word "shield_prune" must not be routed into this branch
-/// (the handler returns unconditionally per branch, so a
-/// misroute would swallow the note). The closing quote in
-/// the needle also keeps it disjoint from `shield_pruned`.
-/// All runtime bodies are `JSON.stringify` output with
-/// `kind` first and no spaces, so the needle costs the
-/// honest path nothing.
+/// AUDIT 0.30 (A1-2): the check is the kind ASSIGNMENT,
+/// not the bare quoted word — a nav note whose page
+/// title happens to contain the quoted word
+/// "shield_prune" must not be routed into this branch
+/// (the handler returns unconditionally per branch, so
+/// a misroute would swallow the note). The exact match
+/// also keeps it disjoint from `shield_pruned`.
+/// AUDIT 0.41.3 (F5): the check is structural now (see
+/// [`looks_like_kind`]) — whitespace-variant bodies
+/// route the same as compact ones.
 pub fn looks_like_shield_prune(body: &str) -> bool {
-    body.len() <= MAX_NAV_BODY_BYTES && body.contains("\"kind\":\"shield_prune\"")
+    looks_like_kind(body, "shield_prune")
 }
 
-/// Cheap pre-filter for lite-chosen bodies (AUDIT V29): the
-/// kind assignment present, same bound (AUDIT 0.30, A1-2 —
-/// see `looks_like_shield_prune`).
+/// Cheap pre-filter for lite-chosen bodies (AUDIT V29):
+/// the kind assignment present, same bound (AUDIT 0.30,
+/// A1-2 — see `looks_like_shield_prune`; structural
+/// since AUDIT 0.41.3, F5).
 pub fn looks_like_lite_chosen(body: &str) -> bool {
-    body.len() <= MAX_NAV_BODY_BYTES && body.contains("\"kind\":\"lite_chosen\"")
+    looks_like_kind(body, "lite_chosen")
 }
 
 /// Validate a lite-chosen report (AUDIT V29):
@@ -562,9 +793,10 @@ pub struct PrunedReport {
 /// Cheap pre-filter for measured prune reports (0.30): the
 /// kind assignment present, same bound as every content
 /// body (AUDIT 0.30, A1-2 — see `looks_like_shield_prune`
-/// for why the needle is the assignment, not the word).
+/// for why the check is the assignment, not the word;
+/// structural since AUDIT 0.41.3, F5).
 pub fn looks_like_shield_pruned(body: &str) -> bool {
-    body.len() <= MAX_NAV_BODY_BYTES && body.contains("\"kind\":\"shield_pruned\"")
+    looks_like_kind(body, "shield_pruned")
 }
 
 /// Validate a `shield_pruned` report:
@@ -653,9 +885,44 @@ pub fn parse_shield_prune(body: &str) -> Option<Vec<PruneItem>> {
             .next()
             .unwrap_or_default()
             .to_string();
+        // AUDIT 0.41.1 (Front F F1): the cut above strips
+        // a URL's query/fragment, but a forged "path"
+        // shaped like a CREDENTIALED URL
+        // (`https://user:pass@host/…`) carries its secret
+        // in the authority — nothing to cut — and reached
+        // pico.log verbatim at the call site, breaking
+        // the redactor's stated law that no log line
+        // carries userinfo. An item whose path is a URL
+        // with userinfo is dropped whole. (A bare URL
+        // path without userinfo stays what 0.32.1 made
+        // it: cut at the query, logged — it carries no
+        // credential.)
+        let has_url_userinfo = path
+            .split_once("://")
+            .is_some_and(|(_, rest)| rest.split('/').next().unwrap_or(rest).contains('@'));
+        // AUDIT 0.41.3 (Front C F2): the `://` check above
+        // misses CREDENTIAL-SHAPED HEADS with no scheme —
+        // `user:pass@evil.example`, `//user:pass@…`,
+        // `a:b@…` all carry the same secret in the same
+        // place and reached the log verbatim. Drop any
+        // item whose head segment — the path with leading
+        // `/`/`\` trimmed, up to the next `/`/`\` —
+        // contains `@`: a JS property path's head never
+        // does. (This parser feeds only the prune log
+        // sample — `app::on_shield_prune` logs the items
+        // and nothing else consumes them — so dropping
+        // the item whole is the whole cost.)
+        let head = path
+            .trim_start_matches(['/', '\\'])
+            .split(['/', '\\'])
+            .next()
+            .unwrap_or_default();
+        let has_credential_head = head.contains('@');
         if item.n == 0
             || path.is_empty()
             || path.len() > 256
+            || has_url_userinfo
+            || has_credential_head
             || path.chars().any(|c| c.is_control())
         {
             continue;
@@ -765,6 +1032,39 @@ mod tests {
         assert!(parse_command(&huge).is_err(), "oversized id rejected");
         // A missing id is not a pick either.
         assert!(parse_command(r#"{"boot":"b","req":1,"t":"ctx_pick"}"#).is_err());
+    }
+
+    #[test]
+    fn tab_menu_open_and_close_parse() {
+        let env = parse_command(
+            r#"{"v":1,"boot":"b","req":3,"t":"tab_menu_open","tab":7,"x":120,"y":40}"#,
+        )
+        .expect("tab_menu_open parses");
+        assert_eq!(
+            env.cmd,
+            Command::TabMenuOpen {
+                tab: 7,
+                x: 120,
+                y: 40
+            }
+        );
+        let env = parse_command(r#"{"v":1,"boot":"b","req":4,"t":"tab_menu_close"}"#)
+            .expect("tab_menu_close parses");
+        assert_eq!(env.cmd, Command::TabMenuClose);
+        // Missing a coordinate, an absurd coordinate, and
+        // an extra field are all rejected at the gate.
+        assert!(
+            parse_command(r#"{"boot":"b","req":1,"t":"tab_menu_open","tab":7,"x":1}"#).is_err()
+        );
+        assert!(parse_command(
+            r#"{"boot":"b","req":1,"t":"tab_menu_open","tab":7,"x":99999,"y":1}"#
+        )
+        .is_err());
+        assert!(parse_command(
+            r#"{"boot":"b","req":1,"t":"tab_menu_open","tab":7,"x":1,"y":2,"url":"https://e.com/"}"#
+        )
+        .is_err());
+        assert!(parse_command(r#"{"boot":"b","req":1,"t":"tab_menu_close","tab":7}"#).is_err());
     }
 
     #[test]

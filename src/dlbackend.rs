@@ -43,6 +43,15 @@ impl ManagerBackend {
             "downloads: {count} task(s) loaded; folder {}",
             dir.display()
         ));
+        // F-A1 (0.41.0 WS-D): say when the legacy fallback
+        // folder is armed, so a field log shows which
+        // folder a pre-0.41 task file was resolved from.
+        if let Some(legacy) = manager.legacy_downloads_dir() {
+            crate::log::info(&format!(
+                "downloads: legacy fallback folder {}",
+                legacy.display()
+            ));
+        }
         ManagerBackend(manager)
     }
 }

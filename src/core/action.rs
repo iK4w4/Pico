@@ -360,7 +360,8 @@ pub fn dispatch(source: &ActionSource, requester: &Requester, recents: &[String]
         return Decision::Deny(DenyReason::NotStartTab);
     }
     let current = normalize_pico_url(&requester.current_url);
-    if current != START_URL && current != "pico://start/" {
+    let current_base = current.split(['?', '#']).next().unwrap_or_default();
+    if current_base.trim_end_matches('/') != START_URL {
         return Decision::Deny(DenyReason::NotOnStartPage);
     }
     let raw = match source {
@@ -400,7 +401,20 @@ pub fn dispatch(source: &ActionSource, requester: &Requester, recents: &[String]
             None => Decision::Deny(DenyReason::UnknownSocialSite),
         },
         RawAction::Service(url) => {
-            if url.len() <= MAX_SERVICE_URL_BYTES && web_origin(&url).is_some() {
+            // AUDIT 0.41.3 (E-S-B hardening): a credentialed
+            // URL is refused too. There is no legitimate
+            // credentialed service URL — `detect` builds
+            // service URLs from localhost origins only —
+            // and `web_origin` ACCEPTS userinfo spellings
+            // (`https://google.com:443@evil.example/`
+            // parses with origin evil.example), so behind
+            // the start-page gate a page could otherwise
+            // register a "service" whose real host is
+            // attacker-chosen and credential-bearing.
+            if url.len() <= MAX_SERVICE_URL_BYTES
+                && web_origin(&url).is_some()
+                && !crate::core::ipc::url_has_userinfo(&url)
+            {
                 Decision::OpenService(url)
             } else {
                 Decision::Deny(DenyReason::BadServiceUrl)

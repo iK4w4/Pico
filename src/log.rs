@@ -1,6 +1,7 @@
 //! Tiny structured log at `<data dir>\pico.log` — Pico's data
-//! directory: `data\` beside the exe since v27 (appdata only
-//! as the not-writable fallback).
+//! directory: `%LOCALAPPDATA%\Pico` since 0.41.0 (the v27
+//! beside-exe `data\` home is migrated into it on the first
+//! 0.41 run, legacy log included; see core::state).
 //!
 //! Diagnostics only — nothing leaves the machine. One line per
 //! event: `[<unix-ms>] <message>`. The file is rotated at

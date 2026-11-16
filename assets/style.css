@@ -63,6 +63,20 @@
 
 * { box-sizing: border-box; }
 
+::selection {
+  background: var(--selection);
+  color: var(--text);
+}
+
+input, textarea {
+  caret-color: var(--accent);
+}
+
+input::placeholder, textarea::placeholder {
+  color: var(--faint);
+  opacity: 1;
+}
+
 html, body {
   margin: 0;
   padding: 0;

@@ -24,9 +24,9 @@ body { min-height: 100vh; }
 .dl-head .v {
   font-size: 11px; font-weight: 650; color: var(--accent);
   background: var(--surface); box-shadow: var(--neu-raised-sm);
-  border-radius: var(--r-pill); padding: 2px 6px; line-height: 18px;
+  border-radius: var(--r-pill); padding: 2px 8px; line-height: 18px;
 }
-#dl-count-line { margin: 0 0 18px; color: var(--muted); font-size: 13.5px; }
+#dl-count-line { margin: 0 0 16px; color: var(--muted); font-size: 13.5px; }
 
 .dl-toolbar {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
@@ -49,13 +49,15 @@ body { min-height: 100vh; }
 
 .dl-add-row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
 #dl-add-url {
-  flex: 1; height: 34px; border: none; border-radius: var(--r-md);
+  flex: 1; height: 34px; border: none; border-radius: var(--r-lg);
   padding: 0 12px; color: var(--text); font: inherit; font-size: 13px;
   min-width: 0; user-select: text;
 }
 #dl-add-url:focus-visible { box-shadow: var(--neu-inset), var(--neu-focus); }
 .dl-btn {
-  padding: 7px 12px; border-radius: var(--r-md); font-size: 12.5px; font-weight: 600;
+  display: inline-flex; align-items: center; justify-content: center;
+  min-height: 34px; padding: 6px 14px; border-radius: var(--r-md);
+  font-size: 12.5px; font-weight: 600;
   color: var(--text); background: var(--surface); box-shadow: var(--neu-raised-sm);
   transition: box-shadow 120ms ease, color 120ms ease;
   white-space: nowrap;
@@ -72,13 +74,14 @@ body { min-height: 100vh; }
 .dl-settings select {
   font: inherit; font-size: 12.5px; color: var(--text);
   background: var(--surface); border: none; border-radius: var(--r-md);
-  box-shadow: var(--neu-raised-sm); padding: 4px 8px; height: 28px;
+  box-shadow: var(--neu-raised-sm); padding: 4px 10px; height: 30px;
 }
+.dl-settings select:focus-visible { box-shadow: var(--neu-focus-ring); }
 .dl-settings .spacer { flex: 1; }
 
-#dl-page-list { display: flex; flex-direction: column; gap: 10px; }
+#dl-page-list { display: flex; flex-direction: column; gap: 12px; }
 .dlp-row {
-  border-radius: var(--r-xl); padding: 14px 16px;
+  border-radius: var(--r-xl); padding: 16px 18px;
   background: var(--surface); box-shadow: var(--neu-raised);
 }
 .dlp-name-line { display: flex; align-items: baseline; gap: 8px; }
@@ -130,7 +133,7 @@ body { min-height: 100vh; }
 <div class="page">
   <div class="dl-head">
     <h1>Downloads</h1>
-    <span class="v" id="dl-ver">0.40.2</span>
+    <span class="v" id="dl-ver">0.41.3</span>
   </div>
   <p id="dl-count-line"></p>
 
@@ -183,7 +186,7 @@ body { min-height: 100vh; }
   <div class="empty" id="dl-page-empty" hidden>No downloads yet — add a link above, or start one from any page.</div>
   <div class="empty" id="dl-page-nomatch" hidden>Nothing matches.</div>
 
-  <div class="footer">Pico 0.40.2 · by @iK4w4</div>
+  <div class="footer">Pico 0.41.3 · by @iK4w4</div>
 </div>
 
 <script>
@@ -376,10 +379,37 @@ function renderNow() {
       " · " + snapshot.active_count + " active";
 
   var filtered = tasks.filter(matchesFilter);
+  /* 0.41.3 (Front D D-3): the wholesale innerHTML rebuild
+     below destroys the open refresh editor's element on
+     every push — other downloads' progress ticks included.
+     The draft text survives in DlRows.ui, but focus and
+     the caret die with the element. Mirror the chrome
+     popover's .dl-conn save/restore in syncDownloads:
+     record the focused refresh input and its selection
+     range before the re-render, restore both to the new
+     input element after it. */
+  var refreshFocus = null;
+  var ae = document.activeElement;
+  if (ae && listEl.contains(ae) && ae.classList &&
+      ae.classList.contains("dl-refresh-input")) {
+    refreshFocus = { start: ae.selectionStart, end: ae.selectionEnd };
+  }
   /* 0.35: the full snapshot list rides along as the
      queue-position context, so a queued row's "ahead"
      count is computed against reality, not the filter. */
   listEl.innerHTML = DlRows.renderTaskList({ tasks: filtered }, "page", tasks);
+  if (refreshFocus) {
+    var refreshInput = listEl.querySelector(".dl-refresh-input");
+    if (refreshInput) {
+      try { refreshInput.focus(); } catch (e) {}
+      if (refreshInput.setSelectionRange &&
+          refreshFocus.start !== null && refreshFocus.start !== undefined) {
+        try {
+          refreshInput.setSelectionRange(refreshFocus.start, refreshFocus.end);
+        } catch (e) {}
+      }
+    }
+  }
   /* Clear completed is gated like the popover's Clear
      finished: hidden unless a done task exists. */
   document.getElementById("dl-clear-completed").hidden =

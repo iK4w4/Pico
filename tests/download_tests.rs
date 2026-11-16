@@ -12,7 +12,8 @@ use pico_core::core::download::{
     dedupe_file_name, delete_task_file, eta_seconds, eta_text, failure_hint,
     file_name_from_disposition, file_name_from_url, http_status_of, is_downloadable_url,
     load_tasks, parse_content_range, percent, plan_segments, refresh_decision,
-    resolve_downloads_dir, resume_decision, retry_policy, sanitize_cookies, sanitize_file_name,
+    resolve_downloads_dir, resolve_task_file, resolve_task_file_with_exists,
+    resolve_task_part_file, resume_decision, retry_policy, sanitize_cookies, sanitize_file_name,
     save_task, speed_text, strip_url_userinfo, triage_download_uri, url_host, Claim, CookiePair,
     DownloadTriage, FailureClass, GenerationGate, Planner, ProbeFacts, RefreshDecision,
     ResumeDecision, RetryPolicy, Segment, SpeedMeter, TaskState, TaskStatus, TokenBucket,
@@ -996,22 +997,124 @@ fn eta_percent_and_text_helpers() {
 
 #[test]
 fn resolve_downloads_dir_prefers_the_exe_folder_when_writable() {
-    let exe = Path::new("D:/Pico");
+    // RENAMED IN MEANING by 0.41.0 (name kept for history):
+    // the exe folder is NEVER a downloads destination
+    // anymore. A custom (user-changed) dir wins, then the
+    // standard Windows Downloads folder, then a Downloads
+    // folder inside Pico's AppData home as the last resort.
+    let home = Path::new("C:/Users/x/AppData/Local/Pico");
     let user = Path::new("C:/Users/x/Downloads");
+    let custom = Path::new("E:/My Downloads");
     assert_eq!(
-        resolve_downloads_dir(exe, Some(user), true),
-        exe.join("Downloads")
+        resolve_downloads_dir(Some(custom), Some(user), home),
+        custom.to_path_buf(),
+        "a user-changed directory is honored first"
     );
     assert_eq!(
-        resolve_downloads_dir(exe, Some(user), false),
+        resolve_downloads_dir(None, Some(user), home),
         user.to_path_buf(),
-        "not writable: the user's Downloads folder"
+        "the standard Downloads folder is the default"
     );
     assert_eq!(
-        resolve_downloads_dir(exe, None, false),
-        exe.join("Downloads"),
-        "no user folder known: exe dir is the last resort"
+        resolve_downloads_dir(None, None, home),
+        home.join("Downloads"),
+        "no user folder known: the AppData home is the last resort — never beside the exe"
     );
+}
+
+// ---------------------------------------------------------------------------
+// resolve_task_file — the F-A1 legacy fallback (0.41.0 WS-D)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn resolve_task_file_prefers_current_when_the_file_is_in_both() {
+    let current = Path::new("C:/Users/x/Downloads");
+    let legacy = Path::new("D:/Pico/Downloads");
+    // Existence is injected: BOTH folders hold the file.
+    let resolved = resolve_task_file_with_exists(current, Some(legacy), "tool.zip", |_| true);
+    assert_eq!(
+        resolved,
+        current.join("tool.zip"),
+        "current wins over legacy"
+    );
+}
+
+#[test]
+fn resolve_task_file_falls_back_to_legacy_when_only_there() {
+    let current = Path::new("C:/Users/x/Downloads");
+    let legacy = Path::new("D:/Pico/Downloads");
+    let legacy_path = legacy.join("tool.zip");
+    let resolved =
+        resolve_task_file_with_exists(current, Some(legacy), "tool.zip", |p| p == legacy_path);
+    assert_eq!(resolved, legacy_path, "only in legacy: the legacy path");
+}
+
+#[test]
+fn resolve_task_file_without_legacy_is_current_only() {
+    let current = Path::new("C:/Users/x/Downloads");
+    let legacy = Path::new("D:/Pico/Downloads");
+    // The file exists ONLY at the legacy-shaped path, but
+    // no legacy folder is set (fresh install): the answer
+    // stays the current folder — the fallback is opt-in
+    // via the persisted field, never a guess.
+    let legacy_path = legacy.join("tool.zip");
+    let resolved = resolve_task_file_with_exists(current, None, "tool.zip", |p| p == legacy_path);
+    assert_eq!(resolved, current.join("tool.zip"));
+    // A legacy folder EQUAL to the current one is no
+    // fallback either.
+    let resolved =
+        resolve_task_file_with_exists(current, Some(current), "tool.zip", |p| p == legacy_path);
+    assert_eq!(resolved, current.join("tool.zip"));
+}
+
+#[test]
+fn resolve_task_file_with_legacy_gone_or_file_nowhere_is_current() {
+    let current = Path::new("C:/Users/x/Downloads");
+    let legacy = Path::new("D:/Pico/Downloads");
+    // Legacy folder deleted after being recorded: nothing
+    // exists anywhere, so resolution degrades to the
+    // current folder (the create/report default).
+    let resolved = resolve_task_file_with_exists(current, Some(legacy), "tool.zip", |_| false);
+    assert_eq!(resolved, current.join("tool.zip"));
+}
+
+#[test]
+fn resolve_task_part_file_applies_the_same_rule_on_disk() {
+    // The `.part` twin against the real filesystem: a
+    // part that exists only in the legacy folder resolves
+    // there; once it also exists in the current folder,
+    // current wins; with the legacy folder removed, the
+    // answer is the current folder again.
+    let root = std::env::temp_dir().join(format!("pico-fa1-resolve-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let current = root.join("current");
+    let legacy = root.join("legacy");
+    fs::create_dir_all(&current).expect("current dir");
+    fs::create_dir_all(&legacy).expect("legacy dir");
+    fs::write(legacy.join("half.bin.part"), b"half").expect("legacy part");
+    assert_eq!(
+        resolve_task_part_file(&current, Some(&legacy), "half.bin"),
+        legacy.join("half.bin.part")
+    );
+    assert_eq!(
+        resolve_task_file(&current, Some(&legacy), "done.bin"),
+        current.join("done.bin"),
+        "a finished file that is nowhere resolves to current (the report default)"
+    );
+    fs::write(current.join("half.bin.part"), b"half").expect("current part");
+    assert_eq!(
+        resolve_task_part_file(&current, Some(&legacy), "half.bin"),
+        current.join("half.bin.part"),
+        "in both folders: current wins for .part too"
+    );
+    fs::remove_dir_all(&legacy).expect("remove legacy");
+    fs::remove_file(current.join("half.bin.part")).expect("remove current part");
+    assert_eq!(
+        resolve_task_part_file(&current, Some(&legacy), "half.bin"),
+        current.join("half.bin.part"),
+        "legacy gone: current only"
+    );
+    let _ = fs::remove_dir_all(&root);
 }
 
 // ---------------------------------------------------------------------------
@@ -2627,4 +2730,123 @@ fn baseline_without_repair_a_committed_file_unwinds_to_start_page() {
         UnwindAction::StartPage,
         "unrepaired: the committed file entry forces StartPage"
     );
+}
+
+// ---------------------------------------------------------------------------
+// 0.41.1 — Front D: SaveLock verdict + token (D-4/D-5)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn lock_wait_verdict_breaks_only_an_unmoved_lock_once() {
+    use pico_core::core::download::{lock_wait_verdict, LockWaitVerdict};
+    let t0 = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    let t1 = t0 + std::time::Duration::from_secs(1);
+    // Unmoved across the whole wait, never broken yet:
+    // a leftover — break it and retry the claim.
+    assert_eq!(
+        lock_wait_verdict(Some(t0), Some(t0), false),
+        LockWaitVerdict::BreakAndRetry
+    );
+    // Already broke one this acquire: no second break.
+    assert_eq!(
+        lock_wait_verdict(Some(t0), Some(t0), true),
+        LockWaitVerdict::ProceedUnlocked
+    );
+    // The mtime moved: a live claim cycle is in flight.
+    assert_eq!(
+        lock_wait_verdict(Some(t0), Some(t1), false),
+        LockWaitVerdict::ProceedUnlocked
+    );
+    // Nothing observed (or the file vanished mid-wait):
+    // no evidence to break on.
+    assert_eq!(
+        lock_wait_verdict(None, Some(t0), false),
+        LockWaitVerdict::ProceedUnlocked
+    );
+    assert_eq!(
+        lock_wait_verdict(Some(t0), None, false),
+        LockWaitVerdict::ProceedUnlocked
+    );
+}
+
+#[test]
+fn save_lock_tokens_never_repeat() {
+    use pico_core::core::download::save_lock_token;
+    let a = save_lock_token();
+    let b = save_lock_token();
+    assert_ne!(a, b, "two claims must never share a token");
+    assert!(a.starts_with(&format!("{}:", std::process::id())));
+}
+
+#[test]
+fn save_lock_holds_token_matches_only_the_claims_own_token() {
+    // AUDIT 0.41.3 (Front B S-2): the predicate behind
+    // acquire's claim confirmation. The true interleave
+    // (a second process breaking the lock between this
+    // process's create and its re-read) cannot be staged
+    // deterministically from outside `acquire_named`
+    // with this file's patterns — the break window is
+    // the create→re-read gap inside the call — so the
+    // predicate itself is pinned here: a file carrying
+    // ANOTHER claim's token confirms nothing, our own
+    // token confirms, a missing file confirms nothing.
+    use pico_core::core::download::{save_lock_holds_token, save_lock_token};
+    let dir = std::env::temp_dir().join(format!(
+        "pico-s2-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("downloads.lock");
+    let mine = save_lock_token();
+    let theirs = save_lock_token();
+    assert!(!save_lock_holds_token(&path, &mine), "missing file");
+    std::fs::write(&path, format!("{theirs}\n")).unwrap();
+    assert!(
+        !save_lock_holds_token(&path, &mine),
+        "a successor's token is not our claim"
+    );
+    assert!(save_lock_holds_token(&path, &theirs));
+    std::fs::write(&path, format!("{mine}\n")).unwrap();
+    assert!(save_lock_holds_token(&path, &mine), "our own claim");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn name_taken_in_dirs_consults_the_legacy_folder() {
+    // AUDIT 0.41.1 (Front D D-6).
+    use pico_core::core::download::name_taken_in_dirs;
+    let root = std::env::temp_dir().join(format!(
+        "pico-d6-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    let cur = root.join("current");
+    let legacy = root.join("legacy");
+    std::fs::create_dir_all(&cur).expect("cur");
+    std::fs::create_dir_all(&legacy).expect("legacy");
+    // Free everywhere.
+    assert!(!name_taken_in_dirs(&cur, Some(&legacy), "a.zip"));
+    assert!(!name_taken_in_dirs(&cur, None, "a.zip"));
+    // A finished file in legacy takes the name.
+    std::fs::write(legacy.join("a.zip"), b"old").expect("legacy file");
+    assert!(name_taken_in_dirs(&cur, Some(&legacy), "a.zip"));
+    assert!(
+        !name_taken_in_dirs(&cur, None, "a.zip"),
+        "no legacy, no take"
+    );
+    // An orphan legacy .part takes it too.
+    assert!(!name_taken_in_dirs(&cur, Some(&legacy), "b.zip"));
+    std::fs::write(legacy.join("b.zip.part"), b"partial").expect("legacy part");
+    assert!(name_taken_in_dirs(&cur, Some(&legacy), "b.zip"));
+    // And the current folder's own claims still count.
+    std::fs::write(cur.join("c.zip.part"), b"partial").expect("cur part");
+    assert!(name_taken_in_dirs(&cur, Some(&legacy), "c.zip"));
+    let _ = std::fs::remove_dir_all(&root);
 }

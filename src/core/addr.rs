@@ -334,16 +334,19 @@ pub fn web_origin(url: &str) -> Option<(String, String, u16)> {
     let (host, port) = if let Some(stripped) = host_port.strip_prefix('[') {
         let close = stripped.find(']')?;
         let host = &stripped[..close];
-        if host.parse::<std::net::Ipv6Addr>().is_err() {
-            return None;
-        }
+        // AUDIT 0.41.3 (Front A F7): the host is rendered
+        // from the PARSED address (its canonical
+        // compressed form), not the as-written literal —
+        // `[0:0:0:0:0:0:0:1]` and `[::1]` are one origin,
+        // and the literal spellings used to split it.
+        let parsed = host.parse::<std::net::Ipv6Addr>().ok()?;
         let tail = &stripped[close + 1..];
         let port = if tail.is_empty() {
             None
         } else {
             Some(valid_port(tail.strip_prefix(':')?)?)
         };
-        (host.to_ascii_lowercase(), port)
+        (parsed.to_string(), port)
     } else {
         if host_port.matches(':').count() > 1 {
             return None;
@@ -371,6 +374,10 @@ pub fn is_allowed_navigation_url(url: &str) -> bool {
         // document; same exact-spelling rule as the start page.
         || url == "pico://downloads"
         || url == "pico://downloads/"
+        // 0.41.0 (Workstream B): the history page is the third
+        // internal document; same exact-spelling rule.
+        || url == "pico://history"
+        || url == "pico://history/"
         || web_origin(url).is_some()
 }
 
@@ -405,6 +412,7 @@ pub fn normalize_pico_url(u: &str) -> String {
                 && (host == "chrome"
                     || host == "start"
                     || host == "downloads"
+                    || host == "history"
                     || host == "recent"
                     || host == "social"
                     || host == "recent-remove"
@@ -488,6 +496,12 @@ pub fn route_new_window(raw_url: &str) -> NewWindowRoute {
     if url == "pico://downloads" || url == "pico://downloads/" {
         return NewWindowRoute::Deny("internal-page");
     }
+    // 0.41.0: the history page gets the same treatment — it
+    // renders the user's browsing record; no page may mint
+    // a tab showing it.
+    if url == "pico://history" || url == "pico://history/" {
+        return NewWindowRoute::Deny("internal-page");
+    }
     if is_allowed_navigation_url(&url) {
         // Canonicalize the start page's trailing-slash spelling
         // so the shell's `url == START_URL` check recognizes it.
@@ -549,6 +563,54 @@ pub fn submit_route(active_is_start: bool, target: &Target) -> SubmitRoute {
 fn is_start_spelling(candidate: &str) -> bool {
     let base = candidate.split(['?', '#']).next().unwrap_or_default();
     base.trim_end_matches('/') == START_URL
+}
+
+/// A managed internal page named by typed address-bar input
+/// (0.41.0, Workstream B — the routing fix). The downloads
+/// and history pages are MANAGED documents: their command
+/// verbs are gated on the tab KIND the shell assigns when
+/// it opens them, so loading their URL into a normal tab
+/// would strand the user on a page whose every control is
+/// gate-denied. Typed (or otherwise submitted) spellings
+/// therefore route to the shell's openers
+/// (`open_downloads_page` / `open_history_page`), never to
+/// a bare load — `navigate_active` consults this classifier
+/// before the generic parse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypedInternalPage {
+    Downloads,
+    History,
+}
+
+/// Classify raw address-bar text as a managed internal
+/// page. The comparison is the start spelling's rule —
+/// fold wry's rewrite, strip query/fragment, trim trailing
+/// slashes, then compare EXACTLY — so lookalikes stay
+/// refused by the wall below: `pico://downloads.evil`,
+/// `pico://historyx`, `pico://downloads.` all classify as
+/// nothing (and `parse_input` then refuses the `pico:`
+/// scheme as it always has).
+pub fn typed_internal_page(raw: &str) -> Option<TypedInternalPage> {
+    let s = clean_input(raw)?;
+    // AUDIT 0.41.1 (Front E F4): the comparison is
+    // case-SENSITIVE, like every sibling gate — through
+    // 0.41.0 this one classifier lowercased the folded
+    // string first, so `PICO://DOWNLOADS` classified as
+    // a managed page here while the navigation wall
+    // refused the same spelling everywhere else. (The
+    // only caller is the user's own typed input, so this
+    // was an inconsistency, not a bypass.)
+    let folded = normalize_pico_url(&s);
+    let base = folded
+        .split(['?', '#'])
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches('/');
+    match base {
+        "pico://downloads" => Some(TypedInternalPage::Downloads),
+        "pico://history" => Some(TypedInternalPage::History),
+        _ => None,
+    }
 }
 
 /// Parse raw address-bar text. `None` for empty or unsafe input.

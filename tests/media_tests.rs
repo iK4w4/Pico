@@ -138,6 +138,42 @@ fn probe_targets_googlevideo_hosts_and_videoplayback_paths() {
     let t = probe_target("https://googlevideo.com@evil.example/videoplayback")
         .expect("path still makes it a target");
     assert_eq!(t.host, "evil.example");
+
+    // Trailing-dot FQDNs normalize to the real host, while
+    // prefix-only path words (/videoplayback-guide) stay out.
+    let t = probe_target("https://rr1.googlevideo.com./videoplayback?id=1")
+        .expect("trailing-dot googlevideo FQDN is a target");
+    assert_eq!(t.host, "rr1.googlevideo.com");
+    assert!(probe_target("https://api.example/v1/videoplayback-guide").is_none());
+}
+
+#[test]
+fn probe_uses_the_one_lite_stream_definition() {
+    // AUDIT 0.41.3 (Front D D-2) — CHANGED EXPECTATIONS,
+    // enumerated: these shapes were NOT probe targets
+    // through 0.41.2 (the probe's hand-rolled matcher was
+    // case-sensitive, never percent-decoded, and knew no
+    // extensions) even though Lite's stream definition —
+    // the one that decides what may play — recognized
+    // every one. They encoded the drift, not a contract;
+    // probe_target is now lite::is_media_stream_url OR
+    // the googlevideo host rule.
+    for uri in [
+        "https://cdn.example/media/VIDEO.MP4",
+        "https://cdn.example/media/clip.m3u8",
+        "https://cdn.example/media/movie.webm?tok=1",
+        "https://www.youtube.com/video%70layback?x=1",
+        "https://cdn.example/media/master.m3u8%3Ftok",
+        "https://www.youtube.com/videoplayback;session=abc",
+    ] {
+        assert!(
+            probe_target(uri).is_some(),
+            "stream shape must probe: {uri}"
+        );
+    }
+    // The googlevideo host rule is unchanged and stands
+    // alone: a non-stream path on the CDN still probes.
+    assert!(probe_target("https://rr1.googlevideo.com/generate_204").is_some());
 }
 
 #[test]
@@ -716,15 +752,17 @@ fn source_scan_got_focus_registration_lives_in_build_content_view() {
     // `close_all_panels()` (with parens) matches ONLY call
     // sites — the definition is `fn close_all_panels(&mut
     // self)`, which does not contain that pattern. Exactly
-    // three call sites: the ContentFocus arm, the window's
-    // Focused(false) arm, and (0.34.1) `on_context_menu` —
-    // an opening context menu closes every panel first,
-    // through the same funnel.
+    // four call sites: the ContentFocus arm, the window's
+    // Focused(false) arm, (0.34.1) `on_context_menu` — an
+    // opening context menu closes every panel first,
+    // through the same funnel — and (0.41.0)
+    // `open_tab_menu`, the tab strip's menu, which follows
+    // the identical law.
     assert_eq!(
         app.matches("close_all_panels()").count(),
-        3,
-        "close_all_panels is called from the ContentFocus arm, the Focused(false) arm \
-         and on_context_menu"
+        4,
+        "close_all_panels is called from the ContentFocus arm, the Focused(false) arm, \
+         on_context_menu and open_tab_menu"
     );
 }
 

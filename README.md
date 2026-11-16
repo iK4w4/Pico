@@ -1,39 +1,36 @@
-# Pico - a Tiny Browser
+<p align="center">
+  <img src="pico-icon.png" width="120" alt="Pico icon">
+</p>
 
-A tiny, neumorphic Windows browser for local
-development — and, since 0.32, a download manager.
-One portable `Pico.exe`: no installer, no embedded
-manifest, static CRT. Pico auto-detects the dev
-servers already running on your machine, serves
-local files with live reload, and stays out of the
-way the rest of the time.
+<h1 align="center">Pico - a Tiny Browser</h1>
 
-[![Release](https://img.shields.io/github/v/release/iK4w4/Pico)](https://github.com/iK4w4/Pico/releases) ![Platform](https://img.shields.io/badge/platform-Windows_10_%2F_11-333) ![Built with](https://img.shields.io/badge/built_with-Rust-007ec6) ![Download size](https://img.shields.io/badge/download_size-~1.6_MB-brightgreen) ![License](https://img.shields.io/badge/license-MIT-333)
+<p align="center">
+  A tiny, neumorphic Windows browser for local development — and a download manager.<br>
+  One portable <code>Pico.exe</code>: no installer, no accounts, no telemetry.
+</p>
 
-[![YouTube](https://img.shields.io/badge/YouTube-@iK4w4-FF0000?logo=youtube&logoColor=white)](https://www.youtube.com/@iK4w4)
-[![Telegram](https://img.shields.io/badge/Telegram-@iK4w4-26A5E4?logo=telegram&logoColor=white)](https://t.me/iK4w4)
-[![Telegram Bot](https://img.shields.io/badge/Telegram_Bot-@AskKawaBot-26A5E4?logo=telegram&logoColor=white)](https://t.me/AskKawaBot)
+<p align="center">
+  <a href="https://github.com/iK4w4/Pico/releases"><img src="https://img.shields.io/github/v/release/iK4w4/Pico" alt="Release"></a>
+  <img src="https://img.shields.io/badge/platform-Windows_10_%2F_11-333" alt="Platform">
+  <img src="https://img.shields.io/badge/built_with-Rust-007ec6" alt="Built with">
+  <img src="https://img.shields.io/badge/download_size-~1.9_MB-brightgreen" alt="Download size">
+  <img src="https://img.shields.io/badge/license-MIT-333" alt="License">
+</p>
+
+<p align="center">
+  <a href="https://www.youtube.com/@iK4w4"><img src="https://img.shields.io/badge/YouTube-@iK4w4-FF0000?logo=youtube&logoColor=white" alt="YouTube"></a>
+  <a href="https://t.me/iK4w4"><img src="https://img.shields.io/badge/Telegram-@iK4w4-26A5E4?logo=telegram&logoColor=white" alt="Telegram"></a>
+  <a href="https://t.me/AskKawaBot"><img src="https://img.shields.io/badge/Telegram_Bot-@AskKawaBot-26A5E4?logo=telegram&logoColor=white" alt="Telegram Bot"></a>
+</p>
 
 ## Download
 
-Grab `Pico.exe` from the
-[Releases](https://github.com/iK4w4/Pico/releases)
-page and run it. It needs the Microsoft Edge
-WebView2 Runtime, which ships with Windows 11 and
-recent Windows 10.
+Get `Pico.exe` from the [Releases](https://github.com/iK4w4/Pico/releases)
+page and run it. It needs the Microsoft Edge WebView2 Runtime, which
+ships with Windows 11 and recent Windows 10.
 
-- Size: 1,639,936 bytes
-- SHA-256: 805d9c4e2a87792d11fd99662f3d0c640bb2dc1af5ae3c33bd876764d95342e4
-
-Everything Pico keeps — settings, the log, the
-cached filter lists and the WebView2 profile —
-lives in a `data\` folder beside the exe, so Pico
-is fully portable: copy the folder anywhere and it
-works the same. Download state lives there too
-(`data\downloads\`); finished files land in a
-`Downloads` folder beside the exe when it is
-writable (otherwise your Windows Downloads
-folder).
+- Size: 1,935,360 bytes
+- SHA-256: f1a393c1be54274443fe81dfc09d455f5f1351e465d532848719d7780f2c5788
 
 ## Screenshots
 
@@ -45,130 +42,85 @@ folder).
 
 *The download manager: every file with its progress, live speed, and controls; finished files carry a SHA-256.*
 
-## What's inside
+## Features
 
-- **Tabs and navigation** — the usual browser
-  basics, nothing else: no bookmarks, no history
-  page, no accounts, no sync, no telemetry, no
-  extensions, no settings page.
-- **A real download manager** — downloads are
-  handled by Pico itself, not handed to the
-  browser engine: multi-connection HTTP(S)
-  downloads with ranged segments that split and
-  rebalance as they go, pause and resume (across
-  restarts, too), 1–5 downloads at a time with a
-  per-download connection count and an optional
-  overall speed limit. Clicks that start a
-  download confirm with a toast; failures say why
-  and retry on their own with backoff.
-- **A downloads popover and page** — the toolbar
-  button opens a compact card: every active
-  download with its progress bar, live speed and
-  time left, plus pause / resume / cancel. The
-  full page (`pico://downloads`, or Ctrl+J) holds
-  the whole history with search and status
-  filters, per-file actions, a SHA-256 for every
-  finished file, and **Refresh link** for the
-  download whose signed link has expired — Pico
-  re-reads a fresh link from the page you got it
-  from instead of starting over.
-- **Pico's own right-click menu** — links, images
-  and selections get a small menu in Pico's style
-  (the browser's built-in menu is off): open in a
-  new tab, copy link / image / selection, save
-  image, paste, select all.
-- **The Shield** — a three-layer ad and tracker
-  blocker (network rules, cosmetic hiding,
-  scriptlets) running the real EasyList,
-  EasyPrivacy and uBlock filter lists with
-  Adblock-Plus semantics. The lists are **not
-  bundled**: on first run Pico downloads them from
-  their canonical sources (see [SOURCES.md](SOURCES.md))
-  and caches them in `data\lists\`. A main-frame
-  page is never blocked, loopback is never
-  blocked, and the Shield fails open — if the
-  lists are missing or the engine is unsure, the
-  page loads.
-- **Lite mode** — an aggressive page diet for
-  heavy sites, with chosen-video semantics:
-  exactly one video per page may play (the one
-  you chose); previews and background videos stay
-  dead.
-- **A start page that finds your servers** —
-  running localhost services appear as cards,
-  with a savings band showing what the Shield and
-  Lite have blocked and saved (bandwidth and time
-  figures are estimates, marked as estimates).
-- **Sixteen themes** — palette themes in light
-  and dark that recolor everything live,
-  including the start page and the downloads page
-  while they are open.
-- **Local files done right** — drag an `.html`
-  file in (or open one) and it is served from a
-  loopback-only local server with live reload
-  when the file changes.
+| | |
+|---|---|
+| **Finds your servers** | Dev servers already running on your machine appear as cards on the start page |
+| **Live reload** | Local `.html` files are served from a loopback-only server and reload when the file changes |
+| **Download manager** | Pico's own engine — multi-connection ranged segments that split and rebalance, pause and resume (across restarts too), 1–5 at a time, optional speed limit |
+| **Downloads page & popover** | Toolbar popover with live speed and time left; full page (Ctrl+J) with search, filters, per-file actions and a SHA-256 for every finished file |
+| **Refresh link** | A download whose signed link expired re-reads a fresh link from the page it came from, keeping its progress |
+| **Bookmarks & history** | Star or Ctrl+D to bookmark; the address bar suggests bookmarks first, then history ranked by visits and recency; Ctrl+H opens the history page |
+| **Site icons** | Bookmark cards, recent tiles and history rows show each site's own favicon, cached locally |
+| **Movable tabs** | Drag tabs to reorder (or Ctrl+Shift+PageUp / PageDown); a tab's right-click menu can hand its page to a new Pico window |
+| **The Shield** | Three-layer ad and tracker blocking on the real EasyList, EasyPrivacy and uBlock lists — downloaded on first run, never bundled; fails open, loopback never blocked |
+| **Lite mode** | A page diet for heavy sites: exactly one video per page may play — the one you chose |
+| **16 themes** | Palette themes in light and dark that recolor everything live, internal pages included |
+| **Own right-click menu** | A small menu in Pico's style for links, images and selections; the browser's built-in menu is off |
+| **No extras** | No accounts, no sync, no telemetry, no extensions, no settings page |
+
+## Where your data lives
+
+Nothing is written beside the exe — `Pico.exe` can live anywhere and
+be replaced on its own when you update. Everything Pico keeps lives
+in `%LOCALAPPDATA%\Pico`: settings, bookmarks and history, the log,
+download state, the cached filter lists and the WebView2 profile.
+Downloaded files land in your Windows Downloads folder.
+
+The first run of 0.41.0 or later moves an old `data\` folder from
+beside the exe into the new home by itself: the copy is verified
+before the old folder is removed, and if anything cannot be verified
+the old folder is left exactly where it was and Pico runs from the
+copies. Files an older Pico put in a `Downloads` folder beside the
+exe stay where they are — Pico still finds them for its records.
 
 ## Troubleshooting
 
-- **A download failed with 403 / an expired
-  link** — open the downloads page and use
-  **Refresh link** on that row; Pico revisits the
-  page the download came from and picks up the
-  fresh link, keeping your progress where the
-  server allows it.
-- **The Shield seems off on first run** — the
-  filter lists download once, in the background;
-  on a slow connection the first run may browse
-  unfiltered for a minute. `pico.log` (in `data\`)
+- **A download failed with 403 / an expired link** — open the
+  downloads page and use **Refresh link** on that row.
+- **The Shield seems off on first run** — the filter lists download
+  once, in the background; `pico.log` (in `%LOCALAPPDATA%\Pico\`)
   says `shield: lists compiled` when they land.
-- **A site looks broken** — turn the Shield or
-  Lite off for a moment (toolbar toggles); both
-  fail open by design, and Pico keeps no other
-  content policies.
+- **A site looks broken** — turn the Shield or Lite off for a moment
+  (toolbar toggles); both fail open by design.
 
 ## Security
 
-[SECURITY.md](SECURITY.md) describes the design:
-how downloads are captured and routed, how
-cookies are scoped per task and never logged,
-how file names are made safe, the host wall on
-the local server, what the log redacts, and the
-0.40.1 audit pass and the 0.40.2 external-review
-fixes. In short: Pico stores no
-passwords, sends nothing anywhere except the
-requests your browsing makes and the one-time
-filter-list download, and its internal pages
-cannot be opened or driven by web content.
+Pico stores no passwords and sends nothing anywhere except the
+requests your browsing makes and the one-time filter-list download.
+Cookies are scoped per download task and never logged, file names
+are made safe, the local server sits behind a host wall, and Pico's
+internal pages cannot be opened or driven by web content.
+[SECURITY.md](SECURITY.md) describes the design in full, including
+the audit passes and the 0.41.0 move of all data into
+`%LOCALAPPDATA%\Pico`.
 
-## Building from source
+## Build from source
 
-You need Rust and the Windows target tooling
-(`cargo-xwin` with LLVM). Then:
+You need Rust and the Windows target tooling (`cargo-xwin` with
+LLVM). Then:
 
 ```
 cargo xwin build --release --target x86_64-pc-windows-msvc
 python scripts/check_no_manifest.py target/x86_64-pc-windows-msvc/release/Pico.exe
 ```
 
-The gate script proves the shipped binary carries
-**no embedded manifest** (zero RT_MANIFEST
-entries), only the icon resource, and no CRT
-imports — Pico's hard laws, checked on the final
-artifact. The test battery is `scripts/battery.sh`
-(Rust suites plus a DOM suite that drives the real
-pages in jsdom).
+The gate script proves the shipped binary carries **no embedded
+manifest** (zero RT_MANIFEST entries), only the icon resource, and
+no CRT imports — Pico's hard laws, checked on the final artifact.
+The test battery is `scripts/battery.sh` (Rust suites plus a DOM
+suite that drives the real pages in jsdom). Filter lists are
+downloaded, never bundled; their licenses stay with them
+([SOURCES.md](SOURCES.md)).
 
-## Notes
+## Credits
 
-- Language: Rust only (tao / wry / WebView2).
-- Filter lists are downloaded, never bundled;
-  their licenses stay with them
-  ([SOURCES.md](SOURCES.md)).
-- Rendering: Microsoft Edge WebView2.
-- Find the author on Telegram (https://t.me/iK4w4) and
-  YouTube (https://www.youtube.com/@iK4w4).
+Created by **iK4w4** —
+[GitHub](https://github.com/iK4w4) ·
+[YouTube](https://www.youtube.com/@iK4w4) ·
+Telegram [@AskKawaBot](https://t.me/AskKawaBot)
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Copyright (c) 2026
-iK4w4.
+MIT — see [LICENSE](LICENSE). Copyright (c) 2026 iK4w4.

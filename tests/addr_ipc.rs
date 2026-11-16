@@ -1165,3 +1165,148 @@ fn shield_prune_paths_are_cut_at_query_and_fragment() {
     assert!(!items[0].path.contains("SECRET"));
     assert_eq!(items[1].path, "real.prop.path");
 }
+
+// ---------------------------------------------------------------------------
+// 0.41.1 — Front E/F: envelope strictness, duplicate keys, prune drop
+// ---------------------------------------------------------------------------
+
+#[test]
+fn strict_envelope_id_enforces_version_and_boot_bounds() {
+    // AUDIT 0.41.1 (Front E F2).
+    use pico_core::core::ipc::strict_envelope_id;
+    let ok = serde_json::json!({"v": 1, "boot": "b1", "req": 7});
+    assert_eq!(strict_envelope_id(&ok), Some(("b1".to_string(), 7)));
+    let absent_v = serde_json::json!({"boot": "b1", "req": 7});
+    assert_eq!(strict_envelope_id(&absent_v), Some(("b1".to_string(), 7)));
+    let future = serde_json::json!({"v": 999, "boot": "b1", "req": 7});
+    assert_eq!(strict_envelope_id(&future), None);
+    let long_boot = serde_json::json!({"boot": "x".repeat(138), "req": 7});
+    assert_eq!(strict_envelope_id(&long_boot), None);
+    let empty_boot = serde_json::json!({"boot": "", "req": 7});
+    assert_eq!(strict_envelope_id(&empty_boot), None);
+    let no_req = serde_json::json!({"boot": "b1"});
+    assert_eq!(strict_envelope_id(&no_req), None);
+}
+
+#[test]
+fn duplicate_top_level_keys_are_detected() {
+    // AUDIT 0.41.1 (Front E F3).
+    use pico_core::core::ipc::{json_object_has_duplicate_keys, parse_command};
+    assert!(json_object_has_duplicate_keys(
+        r#"{"action":"pause","action":"clear-all"}"#
+    ));
+    // An escaped spelling of the same key is the same key.
+    assert!(json_object_has_duplicate_keys(
+        r#"{"action":"pause","acti\u006fn":"clear-all"}"#
+    ));
+    // Duplicates in NESTED objects are not this check's
+    // business (the strict parsers own those shapes).
+    assert!(!json_object_has_duplicate_keys(
+        r#"{"a":{"x":1,"x":2},"b":[1,2]}"#
+    ));
+    assert!(!json_object_has_duplicate_keys(
+        r#"{"a":"} not a brace","b":2}"#
+    ));
+    assert!(!json_object_has_duplicate_keys(r#"{"a":1,"b":2}"#));
+    assert!(!json_object_has_duplicate_keys("not json"));
+    // And parse_command refuses a duplicated key outright.
+    let dup = r#"{"boot":"b","req":1,"req":2,"t":"win_min"}"#;
+    assert!(parse_command(dup).is_err());
+}
+
+#[test]
+fn web_origin_canonicalizes_ipv6_spellings() {
+    // AUDIT 0.41.3 (Front A F7): the expanded and
+    // compressed spellings of one IPv6 host are ONE
+    // origin — the host renders from the parsed
+    // Ipv6Addr, not the as-written literal. (No test
+    // pinned the long form before this change; the
+    // split was the bug, not a contract.)
+    use pico_core::core::addr::{same_origin, web_origin};
+    assert_eq!(
+        web_origin("http://[0:0:0:0:0:0:0:1]/"),
+        web_origin("http://[::1]/")
+    );
+    assert_eq!(
+        web_origin("http://[::1]/"),
+        Some(("http".to_string(), "::1".to_string(), 80)),
+        "the host renders in the parsed address's compressed form"
+    );
+    assert!(same_origin(
+        "http://[0:0:0:0:0:0:0:1]:8080/a",
+        "http://[::1]:8080/b"
+    ));
+    assert!(!same_origin("http://[::1]/", "http://[::2]/"));
+}
+
+#[test]
+fn shield_prune_drops_url_shaped_paths() {
+    // AUDIT 0.41.1 (Front F F1): a forged prune "path"
+    // carrying a full credentialed URL must never reach
+    // the log; genuine property paths still parse.
+    use pico_core::core::ipc::parse_shield_prune;
+    let forged = r#"{"kind":"shield_prune","items":[
+        {"p":"https://user:pass@example.com/secret","n":3},
+        {"p":"document.body.firstChild","n":2}
+    ]}"#;
+    let items = parse_shield_prune(forged).expect("report parses");
+    assert_eq!(items.len(), 1, "the URL-shaped item is dropped");
+    assert_eq!(items[0].path, "document.body.firstChild");
+}
+
+#[test]
+fn shield_prune_drops_schemeless_credential_heads() {
+    // AUDIT 0.41.3 (Front C F2): credential-shaped heads
+    // with NO scheme slipped the `://` userinfo check —
+    // bare, slash-prefixed and colon-bearing spellings
+    // all carry the secret in the head segment.
+    use pico_core::core::ipc::parse_shield_prune;
+    let forged = r#"{"kind":"shield_prune","items":[
+        {"p":"user:pass@evil.example","n":1},
+        {"p":"//user:pass@evil.example/x","n":1},
+        {"p":"a:b@evil.example","n":1},
+        {"p":"\\\\user:pass@evil.example\\x","n":1},
+        {"p":"document.body.firstChild","n":2},
+        {"p":"entries.0.adClientParams","n":3}
+    ]}"#;
+    let items = parse_shield_prune(forged).expect("report parses");
+    let paths: Vec<&str> = items.iter().map(|i| i.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        vec!["document.body.firstChild", "entries.0.adClientParams"],
+        "every credential-headed item is dropped, genuine paths stay"
+    );
+}
+
+#[test]
+fn report_prefilters_are_structural_and_whitespace_tolerant() {
+    // AUDIT 0.41.3 (Front C F5): whitespace-variant
+    // bodies route exactly like compact ones; a kind
+    // that merely CONTAINS the word, or a non-object
+    // body, does not route at all.
+    use pico_core::core::ipc::{
+        looks_like_lite_chosen, looks_like_shield_prune, looks_like_shield_pruned,
+    };
+    assert!(looks_like_shield_prune(
+        r#"{ "kind" : "shield_prune", "items" : [] }"#
+    ));
+    assert!(looks_like_lite_chosen(r#"{ "kind" : "lite_chosen" }"#));
+    assert!(looks_like_shield_pruned(
+        r#"{ "kind" : "shield_pruned", "bytes" : 1, "events" : 1 }"#
+    ));
+    // Leading/trailing whitespace is trimmed away.
+    assert!(looks_like_shield_prune(
+        "  {\"kind\":\"shield_prune\",\"items\":[]}  "
+    ));
+    // Exact kind only: the pruned/prune pair stays disjoint.
+    assert!(!looks_like_shield_prune(
+        r#"{"kind":"shield_pruned","bytes":1,"events":1}"#
+    ));
+    assert!(!looks_like_shield_pruned(
+        r#"{"kind":"shield_prune","items":[]}"#
+    ));
+    // Not an object / not JSON / kind not a string.
+    assert!(!looks_like_shield_prune(r#"["shield_prune"]"#));
+    assert!(!looks_like_shield_prune(r#"{"kind":7}"#));
+    assert!(!looks_like_lite_chosen("shield_prune"));
+}

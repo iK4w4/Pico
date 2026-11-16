@@ -192,7 +192,7 @@ fn find_ascii_ci_from(haystack: &[u8], needle: &[u8], from: usize) -> Option<usi
 pub fn parse_title(html: &str) -> Option<String> {
     let bytes = html.as_bytes();
     let mut search_from = 0usize;
-    let start = loop {
+    let gt = loop {
         let cand = find_ascii_ci_from(bytes, b"<title", search_from)?;
         // Skip a candidate that sits inside an HTML comment.
         if let Some(cstart) = rfind_ascii_ci(&bytes[..cand], b"<!--") {
@@ -205,14 +205,41 @@ pub fn parse_title(html: &str) -> Option<String> {
             }
         }
         match bytes.get(cand + 6) {
-            Some(b) if b.is_ascii_whitespace() || *b == b'>' || *b == b'/' => break cand,
+            Some(b) if b.is_ascii_whitespace() || *b == b'>' || *b == b'/' => {}
             _ => {
                 search_from = cand + 1;
                 continue;
             }
         }
+        // AUDIT 0.41.3 (Front D D-5): an unclosed quote
+        // in THIS candidate's attributes makes
+        // find_tag_close_gt run to EOF and return None —
+        // through 0.41.2 that None ended the whole scan,
+        // so one broken tag hid every later, valid
+        // <title> in the document. Resume the candidate
+        // scan after this candidate's start instead (the
+        // same `cand + 1` step every other rejection
+        // here takes).
+        let Some(close_gt) = find_tag_close_gt(bytes, cand + 6) else {
+            search_from = cand + 1;
+            continue;
+        };
+        // Self-closing <title/> (e.g. inline SVG): keep scanning.
+        // The `/` counts as the self-closing flag only when it is
+        // the first byte after `<title` or follows whitespace or
+        // a quoted value — a `/` ending an UNQUOTED attribute
+        // value (`<title a=b/>`) is value text per HTML, and the
+        // tag is a real open tag with a body.
+        let self_closing = bytes[close_gt - 1] == b'/'
+            && (close_gt - 1 == cand + 6
+                || bytes[close_gt - 2].is_ascii_whitespace()
+                || matches!(bytes[close_gt - 2], b'"' | b'\''));
+        if self_closing {
+            search_from = close_gt + 1;
+            continue;
+        }
+        break close_gt + 1;
     };
-    let gt = find_ascii_ci_from(bytes, b">", start)? + 1;
     let end = find_ascii_ci_from(bytes, b"</title", gt)?;
     // `gt`/`end` sit on ASCII delimiters, so these are char boundaries.
     let raw = &html[gt..end];
@@ -223,6 +250,22 @@ pub fn parse_title(html: &str) -> Option<String> {
     } else {
         Some(collapsed.chars().take(512).collect())
     }
+}
+
+/// Find the closing `>` of an open tag starting at `from`, skipping
+/// `>` bytes inside single- or double-quoted attribute values.
+fn find_tag_close_gt(bytes: &[u8], from: usize) -> Option<usize> {
+    let mut quote: Option<u8> = None;
+    for (rel, &b) in bytes.get(from..)?.iter().enumerate() {
+        match quote {
+            Some(q) if b == q => quote = None,
+            Some(_) => {}
+            None if b == b'"' || b == b'\'' => quote = Some(b),
+            None if b == b'>' => return Some(from + rel),
+            None => {}
+        }
+    }
+    None
 }
 
 /// Find the last occurrence of `needle` before the given end offset.
@@ -523,9 +566,9 @@ enum CachedProbe {
 impl CachedProbe {
     fn fresh(&self, now: Instant) -> bool {
         match self {
-            CachedProbe::NotHttp { at } => now.duration_since(*at) < NOT_HTTP_TTL,
+            CachedProbe::NotHttp { at } => now.saturating_duration_since(*at) < NOT_HTTP_TTL,
             CachedProbe::Http { at, .. } | CachedProbe::Https { at, .. } => {
-                now.duration_since(*at) < HTTP_TITLE_TTL
+                now.saturating_duration_since(*at) < HTTP_TITLE_TTL
             }
         }
     }

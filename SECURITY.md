@@ -1,6 +1,6 @@
 # Pico — Security Model
 
-This document describes the **public build** of Pico 0.40.2 —
+This document describes the **public build** of Pico 0.41.3 —
 the one built from this source tree. The `Pico.exe` attached
 to this repository's releases is built from this tree.
 
@@ -19,6 +19,14 @@ slipped past the local-path gates, and corrects
 local-server error responses that advertised a
 body they never sent for non-GET requests.
 
+0.41.0 moves all of Pico's data out of the folder
+beside the exe and into `%LOCALAPPDATA%\Pico` (see
+"Your data"), makes the Windows Downloads folder
+the default place downloaded files land, and adds
+bookmarks and a browsing history, stored locally
+in the same home. Tabs can be reordered by
+dragging and handed to a new Pico window.
+
 Pico is a young, one-person project for **local
 development**. For banking, email and anything else
 sensitive, use a mainstream browser (Edge, Firefox,
@@ -26,9 +34,9 @@ Chrome).
 
 ## Verifying the release download
 
-The `Pico.exe` attached to the 0.40.2 release is 1,639,936
+The `Pico.exe` attached to the 0.41.3 release is 1,935,360
 bytes with SHA-256
-`805d9c4e2a87792d11fd99662f3d0c640bb2dc1af5ae3c33bd876764d95342e4`.
+`f1a393c1be54274443fe81dfc09d455f5f1351e465d532848719d7780f2c5788`.
 If your copy's hash differs, it is not the file published
 from this tree.
 
@@ -73,11 +81,11 @@ program, so the routing is deliberately narrow:
   that arrives without its delivery envelope, so a
   replayed or misdirected body is inert.
 - **Internal pages can't be opened by web content.**
-  The start page and the downloads page are the only
-  internal pages. A website cannot navigate or pop up a
-  tab onto either of them, and their commands are
-  accepted only from the tab that is actually showing
-  them.
+  The start page, the downloads page and the history
+  page are the only internal pages. A website cannot
+  navigate or pop up a tab onto any of them, and their
+  commands are accepted only from the tab that is
+  actually showing them.
 - **Transport.** Downloads run over WinHTTP with system
   TLS validation — no certificate checks are disabled
   anywhere in Pico, and there is no flag in the code
@@ -192,7 +200,8 @@ machine:
   input: each file is validated (size, encoding, list
   shape) and the whole set must compile into a sane
   engine before anything is cached or installed. The
-  cache in `data\lists\` is written atomically, and
+  cache in `%LOCALAPPDATA%\Pico\lists\` is written
+  atomically, and
   Pico retries a failed download on the next launch
   and once after 60 seconds.
 - Until the lists land, the Shield is **idle** and
@@ -218,17 +227,41 @@ Shield blocked.
 
 ## Your data
 
-- Everything Pico keeps lives in a **`data\` folder
-  beside the exe**: settings/state, `pico.log`, the
-  filter lists, download task records and the WebView2
-  browser profile. If that folder is not writable,
-  Pico falls back to `%APPDATA%\Pico` and logs that it
-  did.
+- Everything Pico keeps lives in **`%LOCALAPPDATA%\Pico`**:
+  settings/state, `pico.log`, the filter lists, the
+  bookmarks/history store (`nav.json`), download task
+  records and the WebView2 browser profile (in the
+  `WebView2` subfolder). Nothing is written beside
+  the exe.
+- **First run of 0.41.0 migrates the old layout.** A
+  legacy `data\` folder beside the exe (and the older
+  `%APPDATA%\Pico` fallback home, if one exists) is
+  copied into the new home, the legacy log included;
+  the filter-list cache rides along with the rest of
+  the folder. The copy is verified before the
+  beside-exe folder is removed; on any failure the
+  old folder is left exactly where it was and Pico
+  runs from the copies. The roaming copy is kept as
+  a standing backup. A beside-exe WebView2 profile
+  left by an older experiment is carried the same
+  way and its source is never removed.
+- **Bookmarks and history stay on this machine.**
+  They live only in `nav.json` in the Pico home,
+  are capped (2,000 history entries, 1,000
+  bookmarks, oldest pruned first), and Pico's own
+  internal pages are never recorded. Nothing about
+  them is sent anywhere.
+- Downloaded files land in your **Windows Downloads
+  folder** by default. Files an older Pico put in a
+  `Downloads` folder beside the exe are never moved;
+  Pico remembers that folder so records for those
+  files keep resolving.
 - **Pico itself stores no passwords.** Password
   autosave and general autofill are switched off via
   the WebView2 profile API. Page logins live in the
   WebView2 profile, which **is not encrypted by
-  Pico**: whoever can copy the `data\` folder can copy
+  Pico**: whoever can copy the `%LOCALAPPDATA%\Pico`
+  folder can copy
   the logins inside it — treat the folder as private.
   Deleting the folder is a factory reset.
 - Download task records store the file's name, URL,
@@ -258,7 +291,7 @@ product token removed. Several sign-in flows — notably
 Google's — reject or degrade the Edge token; this is
 a compatibility choice, disclosed here rather than
 hidden. Pico's own requests (the filter-list download
-and the download engine) identify as `Pico/0.40.2`.
+and the download engine) identify as `Pico/0.41.3`.
 
 ## Phone Teleport
 

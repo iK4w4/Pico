@@ -65,8 +65,9 @@ pub fn enable() {
                     // Note: ERROR_ACCESS_DENIED (5) on rung 1
                     // usually means awareness was already set — a
                     // success in effect, just not by us.
+                    let already_locked = if e1 == 5 { " [already locked]" } else { "" };
                     return store(format!(
-                        "no DPI call succeeded (errors: context={e1}, awareness={e2}, legacy={e3}); \
+                        "no DPI call succeeded{already_locked} (errors: context={e1}, awareness={e2}, legacy={e3}); \
                          tao's become_dpi_aware() will retry at EventLoop creation"
                     ));
                 }

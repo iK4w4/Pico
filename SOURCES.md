@@ -4,7 +4,7 @@ Pico's Shield does not bundle any filter lists. On first run
 it downloads the four lists below from their canonical
 sources — the same distribution points uBlock Origin and
 other ad-blockers fetch from — and caches them as plain text
-in `data/lists/` beside the executable. Nothing else is ever
+in `%LOCALAPPDATA%\Pico\lists\`. Nothing else is ever
 downloaded; the URL set is a closed constant in
 `src/core/lists.rs`, and every downloaded byte is validated
 before the Shield compiles it (a failed download leaves the

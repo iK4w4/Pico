@@ -3,9 +3,10 @@
 
 use pico_core::core::history::{TabHistory, MAX_ENTRIES};
 use pico_core::core::state::{
-    load_from_checked, push_recent, save_to, LoadOutcome, PersistState, WindowRect,
+    legacy_downloads_candidate_with, load_from_checked, push_recent, save_to, LoadOutcome,
+    PersistState, WindowRect,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn hist_with(urls: &[&str]) -> TabHistory {
     let mut h = TabHistory::new();
@@ -83,6 +84,38 @@ fn drop_top_entry_does_not_splice_equal_neighbours() {
     assert_eq!(h.entries(), ["http://a/"]);
     assert_eq!(h.index(), Some(0));
     assert!(!h.can_go_forward());
+}
+
+#[test]
+fn drop_top_entry_at_index_zero_lands_on_the_new_first_entry() {
+    // S-3 (0.41.0 WS-D): [a,b,c] with the cursor on a —
+    // dropping a must land on b (the new entry 0), with
+    // Back disabled and Forward enabled, and the
+    // invariant "index is None only when entries is
+    // empty" must hold. Through 0.40.3 the drop left
+    // index None over [b,c], and the next push_new
+    // cleared the survivors away.
+    let mut h = hist_with(&["http://a/", "http://b/", "http://c/"]);
+    h.record_pop("http://a/");
+    assert_eq!(h.index(), Some(0));
+    assert_eq!(h.current(), Some("http://a/"));
+    h.drop_top_entry();
+    assert_eq!(h.entries(), ["http://b/", "http://c/"]);
+    assert_eq!(h.index(), Some(0));
+    assert_eq!(h.current(), Some("http://b/"));
+    assert!(!h.can_go_back());
+    assert!(h.can_go_forward());
+    // The survivors are really kept: a fresh navigation
+    // from b truncates the forward branch normally
+    // instead of clearing the whole list first.
+    h.record_commit("http://d/");
+    assert_eq!(h.entries(), ["http://b/", "http://d/"]);
+    // And the invariant's other half: dropping down to
+    // empty is the only way to reach index None.
+    let mut h = hist_with(&["http://a/"]);
+    h.drop_top_entry();
+    assert!(h.is_empty());
+    assert_eq!(h.index(), None);
 }
 
 #[test]
@@ -822,6 +855,75 @@ fn window_rect_validation_bounds() {
         ..PersistState::default()
     };
     assert!(s.sanitized().window.is_none());
+}
+
+#[test]
+fn legacy_downloads_dir_roundtrips_and_defaults_unset() {
+    // F-A1 (0.41.0 WS-D): the field is unset by default
+    // (fresh install), a pre-WS-D file (no such key)
+    // loads unset, and a set value round-trips verbatim.
+    assert_eq!(PersistState::default().legacy_downloads_dir, None);
+    let dir = temp_state_dir("legacy-dl");
+    let path = dir.join("state.json");
+    std::fs::write(&path, r#"{"version":3,"theme":"dark","recents":[]}"#).expect("write old file");
+    match load_from_checked(&path) {
+        LoadOutcome::Loaded(loaded) => assert_eq!(loaded.legacy_downloads_dir, None),
+        other => panic!("expected Loaded, got {other:?}"),
+    }
+    let s = PersistState {
+        legacy_downloads_dir: Some("D:\\Pico\\Downloads".to_string()),
+        ..PersistState::default()
+    };
+    save_to(&path, &s).expect("save");
+    match load_from_checked(&path) {
+        LoadOutcome::Loaded(loaded) => {
+            assert_eq!(
+                loaded.legacy_downloads_dir.as_deref(),
+                Some("D:\\Pico\\Downloads")
+            );
+        }
+        other => panic!("expected Loaded, got {other:?}"),
+    }
+    // The sanitizer drops a hostile value (UNC) and keeps
+    // a plausible local path.
+    let s = PersistState {
+        legacy_downloads_dir: Some("\\\\evil\\share\\Downloads".to_string()),
+        ..PersistState::default()
+    };
+    assert_eq!(s.sanitized().legacy_downloads_dir, None);
+    let s = PersistState {
+        legacy_downloads_dir: Some("/home/x/Downloads".to_string()),
+        ..PersistState::default()
+    };
+    assert_eq!(
+        s.sanitized().legacy_downloads_dir.as_deref(),
+        Some("/home/x/Downloads")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn legacy_downloads_candidate_needs_an_existing_different_folder() {
+    // F-A1: `<exe>\Downloads` is recorded only when it
+    // exists as a directory AND differs from the new
+    // default downloads folder.
+    let exe = Path::new("D:/Pico");
+    let current = Path::new("C:/Users/x/Downloads");
+    assert_eq!(
+        legacy_downloads_candidate_with(exe, current, |_| true),
+        Some(exe.join("Downloads")),
+        "existing and different: recorded"
+    );
+    assert_eq!(
+        legacy_downloads_candidate_with(exe, current, |_| false),
+        None,
+        "missing folder (fresh install): never recorded"
+    );
+    assert_eq!(
+        legacy_downloads_candidate_with(exe, &exe.join("Downloads"), |_| true),
+        None,
+        "equal to the current folder: no fallback needed"
+    );
 }
 
 #[test]

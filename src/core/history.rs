@@ -443,8 +443,11 @@ impl TabHistory {
     /// [`Self::record_push`] (WS1) — the shell drops the file
     /// entry the push created so the tab's history is what it
     /// was before the captured navigation. The index becomes
-    /// `index - 1` when it was > 0, and `None` when it was 0
-    /// or the entries are now empty. Pending intent and the
+    /// `index - 1` when it was > 0; when it was 0 the entry
+    /// that shifted into slot 0 becomes current (`Some(0)`)
+    /// — or `None` when no entries remain (0.41.0 WS-D,
+    /// S-3: `index` is `None` only when `entries` is
+    /// empty). Pending intent and the
     /// remembered commit-start are cleared, mirroring
     /// `record_push`'s hygiene: neither may survive pointing
     /// at an entry that no longer exists. No-op when there
@@ -469,18 +472,26 @@ impl TabHistory {
                 self.entries.remove(i);
             }
         }
-        self.index = if self.entries.is_empty() || i == 0 {
+        self.index = if self.entries.is_empty() {
             None
+        } else if i == 0 {
+            // S-3 (0.41.0 WS-D): dropping entry 0 while
+            // forward entries remain lands on the NEW
+            // entry 0. Through 0.40.3 this arm set `None`
+            // over a non-empty list, and the next
+            // `push_new` reconciled a `None` index by
+            // CLEARING all entries — the surviving
+            // forward entries were silently discarded.
+            // No production caller exists (see
+            // BUILD_NOTES WS-D), so the change is
+            // reachable only from tests today; every
+            // previously pinned drop (single-entry →
+            // empty/None, top-entry → previous) is
+            // unchanged.
+            Some(0)
         } else {
             Some(i - 1)
         };
-        // Edge: removing entry 0 while later entries remain
-        // leaves index None with a non-empty list — the same
-        // shape a fresh history has before its first commit;
-        // the next commit/pop reconciles by push. (The WS1
-        // repair case is a single-entry or top-entry drop,
-        // where this lands exactly on the previous page or
-        // on no page at all.)
         self.clear_pending();
         self.commit_start = None;
     }

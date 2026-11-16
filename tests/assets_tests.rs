@@ -41,8 +41,8 @@ fn chrome_final_html_is_complete() {
     // Static skeleton: the version badge is correct BEFORE any Rust
     // message arrives.
     assert!(
-        html.contains(">0.40.2<"),
-        "static version badge must say 0.40.2"
+        html.contains(">0.41.3<"),
+        "static version badge must say 0.41.3"
     );
 }
 
@@ -61,7 +61,7 @@ fn start_final_html_is_complete() {
         );
     }
     assert!(html.contains("\"marker\":true"), "init JSON not embedded");
-    assert!(html.contains(">0.40.2<"), "start page must say 0.40.2");
+    assert!(html.contains(">0.41.3<"), "start page must say 0.41.3");
     // Script-breakout neutralization is part of assembly: a hostile
     // title inside the init JSON cannot close the script element.
     let hostile = assemble_start_html("{\"t\":\"x</script><script>alert(1)</script>\"}");
@@ -76,6 +76,50 @@ fn start_final_html_is_complete() {
     );
 }
 
+/// 0.41.2 favicon contract, assembled-page half: the
+/// icon slots ship in all three rendering surfaces, the
+/// letter/glyph fallbacks ship beside them, and the
+/// transport stays the CSP the pages already had
+/// (`img-src data:` — no widening, no icon route). The
+/// core half (keying, bounds, the shell wiring) is
+/// pinned in tests/icon_pair.rs.
+#[test]
+fn favicon_slots_ship_in_the_assembled_pages() {
+    let start = assemble_start_html("{}");
+    assert!(start.contains("fav-img"), "start icon slot missing");
+    assert!(start.contains("attachIcon"), "start icon attach missing");
+    assert!(
+        start.contains("data:image/png;base64,"),
+        "start must validate the core's data URI prefix"
+    );
+    let history = pico_core::core::assets::assemble_history_html("{}");
+    assert!(history.contains("hist-fav"), "history icon slot missing");
+    assert!(
+        history.contains("attachIcon"),
+        "history icon attach missing"
+    );
+    let chrome = assemble_chrome_html();
+    assert!(chrome.contains("sug-img"), "suggestion icon slot missing");
+    assert!(
+        chrome.contains("sugIconUri"),
+        "suggestion icon validation missing"
+    );
+    for (name, page) in [
+        ("chrome", chrome.as_str()),
+        ("start", start.as_str()),
+        ("history", history.as_str()),
+    ] {
+        assert!(
+            page.contains("img-src data:;"),
+            "{name} must keep img-src data: (the favicon transport)"
+        );
+        assert!(
+            !page.contains("pico.icons") && !page.contains("pico://icon"),
+            "{name} must not reference an icon protocol route"
+        );
+    }
+}
+
 /// Syntax-check every inline script with node's parser when node is
 /// available. (node --check validates syntax only; behavior is
 /// covered by the DOM test in scripts/dom_test.mjs when jsdom is
@@ -85,6 +129,17 @@ fn inline_scripts_parse_under_node() {
     let pages = [
         ("chrome", assemble_chrome_html()),
         ("start", assemble_start_html("{}")),
+        // 0.41.1: the downloads and history pages' scripts
+        // join the syntax check (their behavior is covered
+        // by the DOM suite).
+        (
+            "downloads",
+            pico_core::core::assets::assemble_downloads_html("{}"),
+        ),
+        (
+            "history",
+            pico_core::core::assets::assemble_history_html("{}"),
+        ),
     ];
     let node = which_node();
     for (name, html) in pages {
@@ -139,11 +194,11 @@ fn branding_is_present_and_enum_wired() {
 
     let start = assemble_start_html("{}");
     // Hero heading + byline row + footer line.
-    assert!(start.contains("Pico <span class=\"v\">0.40.2</span>"));
+    assert!(start.contains("Pico <span class=\"v\">0.41.3</span>"));
     assert!(start.contains("by @iK4w4"), "start byline text missing");
     assert!(
-        start.contains("Pico 0.40.2 · by @iK4w4"),
-        "start footer must read 'Pico 0.40.2 · by @iK4w4'"
+        start.contains("Pico 0.41.3 · by @iK4w4"),
+        "start footer must read 'Pico 0.41.3 · by @iK4w4'"
     );
     // Chips: action-URL hrefs carrying ONLY the enum name, plus the
     // data-social attributes the DOM test drives.

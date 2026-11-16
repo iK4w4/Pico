@@ -172,6 +172,26 @@ pub fn downloads_toast_h() -> f64 {
     (DL_TOAST_TOP + DL_TOAST_H + 10.0 - CHROME_H).max(0.0)
 }
 
+/// Address-bar suggestions geometry (0.41.0): the dropdown
+/// card hangs under the address bar at top 82 and is at
+/// most 330 DIP tall (8 rows + the "go" row, scrolling
+/// past that). These numbers are the contract shared with
+/// the CSS in assets/chrome.html (#suggest): top 82,
+/// max-height 330; keep both places in sync.
+pub const SUGGEST_TOP: f64 = 82.0;
+pub const SUGGEST_MAX_H: f64 = 330.0;
+
+/// The chrome-rect EXTENSION in DIP beyond CHROME_H
+/// needed to contain the suggestions dropdown at its
+/// full height, with the same 10 DIP of shadow slack the
+/// popover gets. The claim is fixed (not row-counted):
+/// the dropdown's height changes per keystroke, and a
+/// rect that chased it would resize the chrome HWND on
+/// every answer push.
+pub fn suggestions_h() -> f64 {
+    (SUGGEST_TOP + SUGGEST_MAX_H + 10.0 - CHROME_H).max(0.0)
+}
+
 /// Context menu geometry: Pico's own right-click menu is a
 /// card drawn by the chrome page, anchored at the resolved
 /// cursor point (see `core::ctxmenu::resolve_anchor`). These

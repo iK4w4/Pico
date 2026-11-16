@@ -16,6 +16,9 @@ pub const CHROME_TEMPLATE: &str = include_str!("../../assets/chrome.html");
 pub const START_TEMPLATE: &str = include_str!("../../assets/start.html");
 /// The raw downloads-page template (assets/downloads.html, 0.33).
 pub const DOWNLOADS_TEMPLATE: &str = include_str!("../../assets/downloads.html");
+/// The raw history-page template (assets/history.html, 0.41.0):
+/// the downloads page's sibling in the internal-page family.
+pub const HISTORY_TEMPLATE: &str = include_str!("../../assets/history.html");
 /// The shared downloads row renderer (assets/dlrows.js, 0.34):
 /// ONE implementation spliced into BOTH the chrome document
 /// and the downloads page — never duplicated in a template.
@@ -23,9 +26,10 @@ pub const DLROWS: &str = include_str!("../../assets/dlrows.js");
 /// The design system shared by both pages (assets/style.css).
 pub const SHARED_CSS: &str = include_str!("../../assets/style.css");
 
-/// The runtime window icon: raw 64×64 RGBA drawn by
-/// `scripts/gen_icon.py` (AUDIT V24-1) — the same artwork the
-/// exe's compiler-built `.ico` carries. The app hands these
+/// The runtime window icon: raw 64×64 RGBA resampled from
+/// the master artwork (`assets/icon-master.png`) by
+/// `scripts/gen_icon.py` — the same artwork the exe's
+/// compiler-built `.ico` carries. The app hands these
 /// bytes to tao at window creation, so the taskbar mark does
 /// not depend on the resource section at all.
 pub const ICON_RGBA_64: &[u8] = include_bytes!("../../assets/icon_64.rgba");
@@ -111,6 +115,16 @@ pub const REQUIRED_CHROME_IDS: &[&str] = &[
     // Downloads popover footer (0.33): the All-downloads
     // button that opens the full downloads page.
     "dl-all",
+    // Bookmarks + suggestions (0.41.0): the star toggle in
+    // the address-bar well and the suggestions dropdown
+    // under it.
+    "bookmark-star",
+    "suggest",
+    "suggest-list",
+    // Movable tabs (0.41.0, Workstream C): the tab strip's
+    // context menu card and the drag insertion indicator.
+    "tabmenu",
+    "tab-drop",
 ];
 
 /// Control ids the downloads page must contain (0.33). The
@@ -129,6 +143,18 @@ pub const REQUIRED_DOWNLOADS_IDS: &[&str] = &[
     "dl-page-nomatch",
     "dl-count-line",
     "dl-ver",
+];
+
+/// Control ids the history page must contain (0.41.0). The
+/// asset tests assert every one survives assembly.
+pub const REQUIRED_HISTORY_IDS: &[&str] = &[
+    "hist-search",
+    "hist-clear",
+    "hist-list",
+    "hist-empty",
+    "hist-nomatch",
+    "hist-count-line",
+    "hist-ver",
 ];
 
 /// The full shared stylesheet as served: the hand-written
@@ -172,6 +198,18 @@ pub fn assemble_downloads_html(init_json: &str) -> String {
     DOWNLOADS_TEMPLATE
         .replacen(CSS_TOKEN, shared_css_full(), 1)
         .replacen(DLROWS_TOKEN, DLROWS, 1)
+        .replacen(INIT_TOKEN, &safe_json, 1)
+}
+
+/// Build the history-page document (0.41.0): template +
+/// shared CSS + initial data, exactly like
+/// [`assemble_downloads_html`] — including the `</`
+/// neutralization of the init JSON. (No DlRows splice:
+/// the history page renders its own rows.)
+pub fn assemble_history_html(init_json: &str) -> String {
+    let safe_json = init_json.replace("</", "<\\/");
+    HISTORY_TEMPLATE
+        .replacen(CSS_TOKEN, shared_css_full(), 1)
         .replacen(INIT_TOKEN, &safe_json, 1)
 }
 
@@ -305,6 +343,36 @@ mod tests {
         assert!(
             scripts[0].contains("__picoSetDownloads"),
             "downloads renderer missing __picoSetDownloads"
+        );
+    }
+
+    #[test]
+    fn history_assembly_is_complete_and_escapes_script_breakout() {
+        let html = assemble_history_html("{\"theme\":\"dark\",\"x\":\"</script>\"}");
+        assert!(html.len() > 1_000, "history html too small: {}", html.len());
+        assert!(!html.contains(CSS_TOKEN), "CSS token survived assembly");
+        assert!(!html.contains(INIT_TOKEN), "init token survived assembly");
+        assert!(html.contains("--bg:"), "shared CSS variables missing");
+        assert!(
+            html.contains("<\\/script>"),
+            "init JSON was not neutralized"
+        );
+        assert!(html.trim_end().ends_with("</html>"));
+        for id in REQUIRED_HISTORY_IDS {
+            assert!(
+                html.contains(&format!("id=\"{id}\"")),
+                "history page is missing control id {id}"
+            );
+        }
+        let scripts = extract_inline_scripts(&html);
+        assert_eq!(
+            scripts.len(),
+            1,
+            "history page ships exactly one inline script"
+        );
+        assert!(
+            scripts[0].contains("__picoSetHistory"),
+            "history renderer missing __picoSetHistory"
         );
     }
 

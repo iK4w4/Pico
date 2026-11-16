@@ -25,7 +25,7 @@ fn main() {
     // (state/count/speed_bps/paused/queued/newest_name/unseen),
     // active with the humanizer-pinned speed 1258291 ("1.26 MB").
     let start = pico_core::core::assets::assemble_start_html(
-        "{\"services\":[{\"port\":5173,\"pid\":4242,\"process\":\"node.exe\",\"title\":\"Fixture App\",\"label\":\"Fixture App\",\"url\":\"http://localhost:5173\",\"kind\":\"http\"}],\"otherListeners\":0,\"recents\":[\"C:\\\\Users\\\\Fixture\\\\Downloads\\\\First Page.html\",\"C:\\\\Users\\\\Fixture\\\\Desktop\\\\Second.html\"],\"recentsHidden\":false,\"theme\":\"dark\",\"palette\":\"ember\",\"downloads\":{\"state\":\"active\",\"count\":2,\"speed_bps\":1258291,\"paused\":0,\"queued\":0,\"newest_name\":null,\"unseen\":false},\"stats\":{\"shield\":{\"blocked\":1234,\"estBytes\":86400000,\"estDurationMs\":864000,\"prunedEvents\":34,\"prunedBytes\":512000,\"sessionBlocked\":12,\"sessionEstBytes\":640000,\"sessionEstDurationMs\":9600},\"lite\":{\"blocked\":56,\"estBytes\":22400000,\"estDurationMs\":140000,\"prunedEvents\":0,\"prunedBytes\":0,\"sessionBlocked\":3,\"sessionEstBytes\":1200000,\"sessionEstDurationMs\":7500}}}",
+        "{\"services\":[{\"port\":5173,\"pid\":4242,\"process\":\"node.exe\",\"title\":\"Fixture App\",\"label\":\"Fixture App\",\"url\":\"http://localhost:5173\",\"kind\":\"http\"}],\"otherListeners\":0,\"recents\":[\"C:\\\\Users\\\\Fixture\\\\Downloads\\\\First Page.html\",\"C:\\\\Users\\\\Fixture\\\\Desktop\\\\Second.html\"],\"recentsHidden\":false,\"theme\":\"dark\",\"palette\":\"ember\",\"downloads\":{\"state\":\"active\",\"count\":2,\"speed_bps\":1258291,\"paused\":0,\"queued\":0,\"newest_name\":null,\"unseen\":false},\"bookmarks\":[{\"url\":\"https://example.com/docs\",\"title\":\"Example Docs\",\"addedAt\":1730000000000,\"icon\":\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=\"},{\"url\":\"http://localhost:5173\",\"title\":\"Fixture App\",\"addedAt\":1730000100000}],\"recentHistory\":[{\"url\":\"https://example.org/beta\",\"title\":\"Beta Page\",\"lastVisited\":1730000200000,\"visits\":3},{\"url\":\"https://example.com/docs\",\"title\":\"Example Docs\",\"lastVisited\":1730000100000,\"visits\":1,\"icon\":\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=\"}],\"stats\":{\"shield\":{\"blocked\":1234,\"estBytes\":86400000,\"estDurationMs\":864000,\"prunedEvents\":34,\"prunedBytes\":512000,\"sessionBlocked\":12,\"sessionEstBytes\":640000,\"sessionEstDurationMs\":9600},\"lite\":{\"blocked\":56,\"estBytes\":22400000,\"estDurationMs\":140000,\"prunedEvents\":0,\"prunedBytes\":0,\"sessionBlocked\":3,\"sessionEstBytes\":1200000,\"sessionEstDurationMs\":7500}}}",
     );
     std::fs::write(dir.join("chrome.html"), &chrome).expect("write chrome");
     std::fs::write(dir.join("start.html"), &start).expect("write start");
@@ -47,6 +47,18 @@ fn main() {
     );
     std::fs::write(dir.join("downloads.html"), &downloads).expect("write downloads");
     println!("downloads.html {} bytes", downloads.len());
+
+    // The History page (0.41.0): the page-data shape the
+    // runtime pushes ({entries} — the same shape as the
+    // page's init JSON and every full __picoSetHistory
+    // push), two entries with distinct visit counts, so
+    // the DOM test can assert row rendering, the search
+    // round-trip and the remove/clear emissions.
+    let history = pico_core::core::assets::assemble_history_html(
+        "{\"theme\":\"dark\",\"palette\":\"ember\",\"entries\":[{\"url\":\"https://example.org/beta\",\"title\":\"Beta Page\",\"lastVisited\":1730000200000,\"visits\":3},{\"url\":\"https://example.com/docs\",\"title\":\"Example Docs\",\"lastVisited\":1730000100000,\"visits\":1,\"icon\":\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=\"}]}",
+    );
+    std::fs::write(dir.join("history.html"), &history).expect("write history");
+    println!("history.html {} bytes", history.len());
 
     // The Shield fixture (AUDIT V23): a minimal page whose head
     // installs page-environment stubs FIRST (the "native" fetch /

@@ -43,28 +43,79 @@ pub const MAX_LOG_VALUE_CHARS: usize = 300;
 /// that cannot appear in an authority (path/query starts,
 /// quotes, whitespace, angle brackets).
 fn strip_embedded_userinfo(text: &str) -> String {
+    // AUDIT 0.41.3 (Front C F3 / D-S1): the scan now
+    // recognizes TWO authority shapes:
+    // - the schemed `://` authority (the original rule),
+    // - a schemeless `//` authority, when the `//`
+    //   BEGINS one: at the string start, or immediately
+    //   after whitespace, `"`, `'`, `<`, `(` or `=` (the
+    //   shapes a URL takes inside prose, JSON, markup or
+    //   an attribute). Through 0.41.2 `//user:pass@host`
+    //   kept its password — no scheme, no strip.
+    // A `//` preceded by `:` is the schemed case (the
+    // same occurrence, handled once — `:` is not in the
+    // delimiter set, so it can never be re-processed as
+    // a schemeless start), and a `//` preceded by any
+    // other character (a letter in `a//b`, a path
+    // separator) begins no authority and is left alone.
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
-    while let Some(pos) = rest.find("://") {
-        let after = &rest[pos + 3..];
+    loop {
+        // Find the first ACTIONABLE `//` in `rest`.
+        let mut search_from = 0usize;
+        let actionable = loop {
+            let Some(rel) = rest[search_from..].find("//") else {
+                break None;
+            };
+            let pos = search_from + rel;
+            if pos >= 1 && rest.as_bytes()[pos - 1] == b':' {
+                break Some(pos);
+            }
+            let qualifies = pos == 0
+                || rest[..pos].chars().last().is_some_and(|prev| {
+                    prev.is_whitespace() || matches!(prev, '"' | '\'' | '<' | '(' | '=')
+                });
+            if qualifies {
+                break Some(pos);
+            }
+            search_from = pos + 2;
+        };
+        let Some(pos) = actionable else {
+            out.push_str(rest);
+            return out;
+        };
+        let after = &rest[pos + 2..];
         let auth_len = after
-            .find(|c| ['/', '?', '#', '"', '\'', ' ', '<', '>'].contains(&c))
+            .find(|c| ['/', '?', '#', '"', '\'', '<', '>'].contains(&c) || c.is_whitespace())
             .unwrap_or(after.len());
         let authority = &after[..auth_len];
-        out.push_str(&rest[..pos + 3]);
+        out.push_str(&rest[..pos + 2]);
         match authority.rfind('@') {
             Some(at) => out.push_str(&authority[at + 1..]),
             None => out.push_str(authority),
         }
         rest = &after[auth_len..];
     }
-    out.push_str(rest);
-    out
+}
+
+fn is_valid_scheme(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 32
+        && s.as_bytes()[0].is_ascii_alphabetic()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
 }
 
 pub fn redact_url(url: &str) -> String {
     let (scheme, rest) = match url.split_once("://") {
-        Some((s, r)) if !s.is_empty() && s.len() <= 32 => (s, r),
+        Some((s, r))
+            if is_valid_scheme(s)
+                && !r
+                    .chars()
+                    .any(|c| c.is_whitespace() || matches!(c, '"' | '\'')) =>
+        {
+            (s, r)
+        }
         _ => {
             // Not a schemed URL (an error string, a raw IPC
             // body): still hide anything behind ? or # — callers
@@ -105,7 +156,11 @@ pub fn redact_url(url: &str) -> String {
     out.push_str(&scheme.to_ascii_lowercase());
     out.push_str("://");
     out.push_str(host_port);
-    out.push_str(path);
+    if path.contains("://") {
+        out.push_str(&strip_embedded_userinfo(path));
+    } else {
+        out.push_str(path);
+    }
     if suffix.starts_with('?') {
         out.push_str("?\u{2026}");
         if suffix.contains('#') {

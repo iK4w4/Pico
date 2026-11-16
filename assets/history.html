@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light" data-palette="forest">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; connect-src 'none'; base-uri 'none'; form-action 'none';">
+<title>History</title>
+<style>
+/*__SHARED_CSS__*/
+
+body { min-height: 100vh; }
+.page { max-width: 880px; margin: 0 auto; padding: 32px 28px 44px; }
+
+/* 0.41.0: the History page — the downloads page's sibling
+   in the internal-page family. Same laws: initial data
+   arrives in the INIT object, live updates arrive through
+   __picoSetHistory, every dynamic string is placed with
+   textContent only, and theme has exactly ONE channel
+   story (INIT at serve, then window.__picoTheme pushes).
+   Every gesture posts the canonical nav body
+   {kind:"nav", action:…} (core::navcmd) through postNav;
+   the page never edits the list itself — it keeps only
+   the search text and the Clear button's armed state. */
+.hist-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 6px; }
+.hist-head h1 { margin: 0; font-size: 25px; font-weight: 700; letter-spacing: -0.01em; }
+.hist-head .v {
+  font-size: 11px; font-weight: 650; color: var(--accent);
+  background: var(--surface); box-shadow: var(--neu-raised-sm);
+  border-radius: var(--r-pill); padding: 2px 8px; line-height: 18px;
+}
+#hist-count-line { margin: 0 0 16px; color: var(--muted); font-size: 13.5px; }
+
+.hist-toolbar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+#hist-search {
+  flex: 1 1 220px; height: 34px; border: none; border-radius: var(--r-pill);
+  padding: 0 14px; color: var(--text); font: inherit; font-size: 13px;
+  min-width: 160px; user-select: text;
+}
+#hist-search:focus-visible { box-shadow: var(--neu-inset), var(--neu-focus); }
+.hist-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-height: 34px; padding: 6px 14px; border-radius: var(--r-md);
+  font-size: 12.5px; font-weight: 600;
+  color: var(--text); background: var(--surface); box-shadow: var(--neu-raised-sm);
+  transition: box-shadow 120ms ease, color 120ms ease;
+  white-space: nowrap;
+}
+.hist-btn:hover { color: var(--accent); }
+.hist-btn:active { box-shadow: var(--neu-pressed); }
+.hist-btn.armed { color: var(--warn); box-shadow: var(--neu-pressed); }
+
+#hist-list { display: flex; flex-direction: column; gap: 12px; }
+.hist-row {
+  border-radius: var(--r-xl); padding: 16px 18px;
+  background: var(--surface); box-shadow: var(--neu-raised);
+}
+.hist-title-line { display: flex; align-items: center; gap: 8px; }
+/* Favicons (0.41.2): every row leads with the same
+   fixed 22px slot — the host's initial letter, covered
+   by the site's real icon when the payload carries
+   one. The slot exists whether or not an icon does,
+   so rows never shift; a bad icon field or an image
+   error leaves the letter. */
+.hist-fav {
+  position: relative; width: 22px; height: 22px; flex: none;
+  display: grid; place-items: center;
+  border-radius: var(--r-md); font-size: 12px; font-weight: 700;
+  color: var(--accent); box-shadow: var(--neu-inset);
+}
+.hist-fav .fav-img {
+  position: absolute; top: 3px; right: 3px; bottom: 3px; left: 3px;
+  object-fit: contain; border-radius: var(--r-sm);
+  background: var(--surface);
+}
+.hist-title {
+  flex: 1; min-width: 0; font-size: 14px; font-weight: 650; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.hist-visits { flex: none; font-size: 11.5px; font-weight: 600; color: var(--accent); }
+.hist-x {
+  flex: none; width: 26px; height: 26px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 14px; line-height: 1; color: var(--faint);
+  background: var(--surface); box-shadow: var(--neu-raised-sm);
+}
+.hist-x:hover { color: var(--warn); }
+.hist-url {
+  margin-top: 3px; font-size: 12px; color: var(--faint);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.hist-when { margin-top: 3px; font-size: 12px; color: var(--muted); }
+
+.empty {
+  border-radius: var(--r-xl); padding: 24px; text-align: center; color: var(--faint);
+  font-size: 13px; line-height: 1.55;
+  box-shadow: var(--neu-inset);
+}
+.footer { margin-top: 36px; text-align: center; font-size: 11.5px; color: var(--faint); line-height: 1.7; }
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="hist-head">
+    <h1>History</h1>
+    <span class="v" id="hist-ver">0.41.3</span>
+  </div>
+  <p id="hist-count-line"></p>
+
+  <div class="hist-toolbar">
+    <input class="well" id="hist-search" type="text" spellcheck="false" autocomplete="off"
+           placeholder="Search title or address" aria-label="Search history">
+    <button class="hist-btn" id="hist-clear" type="button">Clear history</button>
+  </div>
+
+  <div id="hist-list"></div>
+  <div class="empty" id="hist-empty" hidden>No history yet — pages you visit will appear here.</div>
+  <div class="empty" id="hist-nomatch" hidden>Nothing matches.</div>
+
+  <div class="footer">Pico 0.41.3 · by @iK4w4</div>
+</div>
+
+<script>
+"use strict";
+/* Pico 0.41.0 history page. Data story: INIT carries the
+   full entry list at serve; the page then asks once more
+   with history-list, searches with history-search (the
+   shell answers with a filtered push), removes rows with
+   history-remove, and clears with history-clear after a
+   two-step arm (the app's confirm pattern — the same one
+   the downloads rows use for Restart: first click arms,
+   second click within the window sends). Pushes arrive
+   through __picoSetHistory in two shapes: a FULL update
+   {entries:[…]} (serve, list answer, any mutation) and a
+   SEARCH answer {entries:[…], query:"…"} which the page
+   applies only while the search box still holds that
+   exact query, so a late answer can never stomp a newer
+   search. Rows are built with createElement + textContent
+   only — a page title is untrusted text. */
+var INIT = __PICO_INIT_JSON__ || {};
+
+var allEntries = Array.isArray(INIT.entries) ? INIT.entries : [];
+var viewEntries = allEntries;
+
+var listEl = document.getElementById("hist-list");
+var emptyEl = document.getElementById("hist-empty");
+var nomatchEl = document.getElementById("hist-nomatch");
+var countLineEl = document.getElementById("hist-count-line");
+var searchEl = document.getElementById("hist-search");
+var clearEl = document.getElementById("hist-clear");
+
+function postNav(payload) {
+  if (window.ipc && typeof window.ipc.postMessage === "function") {
+    try {
+      var msg = { kind: "nav" };
+      for (var k in payload) msg[k] = payload[k];
+      window.ipc.postMessage(JSON.stringify(msg));
+    } catch (e) { /* IPC died mid-click; the log line in Rust is the witness either way */ }
+  }
+}
+
+function applyTheme(t, p) {
+  document.documentElement.setAttribute("data-theme", t === "dark" ? "dark" : "light");
+  if (p) document.documentElement.setAttribute("data-palette", p);
+}
+
+/* The ONE theme entry point — the downloads page's hook,
+   verbatim (0.40.2): the app pushes only
+   window.__picoTheme({v:1, mode, palette}); any invalid
+   payload changes nothing, never throws, returns false. */
+var _knownPalettes = null;
+var _paletteScanFailed = false;
+function probeKnownPalettes() {
+  if (_knownPalettes !== null || _paletteScanFailed) return _knownPalettes;
+  var found = {};
+  var readable = false;
+  try {
+    var sheets = document.styleSheets;
+    for (var i = 0; i < sheets.length; i++) {
+      var rules = null;
+      try { rules = sheets[i].cssRules; } catch (e) { continue; }
+      if (!rules) continue;
+      readable = true;
+      for (var j = 0; j < rules.length; j++) {
+        var sel = rules[j] && rules[j].selectorText;
+        if (!sel) continue;
+        var re = /\[data-palette="([a-z0-9-]+)"\]/g;
+        var m;
+        while ((m = re.exec(sel)) !== null) found[m[1]] = true;
+      }
+    }
+  } catch (e) {
+    _paletteScanFailed = true;
+    _knownPalettes = null;
+    return null;
+  }
+  if (!readable || Object.keys(found).length === 0) {
+    _paletteScanFailed = true;
+    _knownPalettes = null;
+    return null;
+  }
+  _knownPalettes = found;
+  return _knownPalettes;
+}
+function warnInvalidTheme() {
+  try { console.warn("pico: ignored invalid theme payload"); } catch (e) {}
+}
+window.__picoTheme = function (payload) {
+  try {
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) { warnInvalidTheme(); return false; }
+    if (payload.v !== 1) { warnInvalidTheme(); return false; }
+    if (payload.mode !== "dark" && payload.mode !== "light") { warnInvalidTheme(); return false; }
+    if (typeof payload.palette !== "string") { warnInvalidTheme(); return false; }
+    var known = probeKnownPalettes();
+    if (known) {
+      if (!known[payload.palette]) { warnInvalidTheme(); return false; }
+    } else {
+      if (!/^[a-z][a-z0-9-]{0,31}$/.test(payload.palette)) { warnInvalidTheme(); return false; }
+    }
+    applyTheme(payload.mode, payload.palette);
+    return true;
+  } catch (e) {
+    warnInvalidTheme();
+    return false;
+  }
+};
+
+/* Favicons (0.41.2): the payload's `icon` field is the
+   host's cached icon as a data URI, or null. Anything
+   else — missing, not a string, not a PNG data URI —
+   degrades to the letter in the row's fixed slot,
+   never a broken row; an image error removes the
+   image and the letter is back. */
+function iconUri(v) {
+  return typeof v === "string" && v.indexOf("data:image/png;base64,") === 0 ? v : null;
+}
+function attachIcon(slot, v) {
+  var uri = iconUri(v);
+  if (!uri) return;
+  var img = document.createElement("img");
+  img.className = "fav-img";
+  img.alt = "";
+  img.src = uri;
+  img.addEventListener("error", function () { img.remove(); });
+  slot.appendChild(img);
+}
+
+function formatWhen(ms) {
+  var n = Number(ms);
+  if (!isFinite(n) || n <= 0) return "";
+  var d = new Date(n);
+  if (isNaN(d.getTime())) return "";
+  return d.toLocaleString();
+}
+
+function localFilter(entries, q) {
+  if (!q) return entries;
+  var needle = q.toLowerCase();
+  return entries.filter(function (e) {
+    return String(e.title || "").toLowerCase().indexOf(needle) !== -1 ||
+           String(e.url || "").toLowerCase().indexOf(needle) !== -1;
+  });
+}
+
+/* Guarded render, like the downloads page's: a throw
+   surfaces on the count line instead of a silent stale
+   list; the next push re-renders from scratch. */
+function render() {
+  try {
+    renderNow();
+  } catch (e) {
+    if (typeof console !== "undefined" && console.error) {
+      console.error("pico history render:", e);
+    }
+    window.__picoErrors = window.__picoErrors || {};
+    if (!window.__picoErrors.render) {
+      window.__picoErrors.render = String((e && e.message) || e);
+    }
+    countLineEl.textContent =
+      "History view hit a problem — details in the console";
+  }
+}
+
+function renderNow() {
+  var q = searchEl.value.trim();
+  countLineEl.textContent = allEntries.length === 0
+    ? "No history"
+    : allEntries.length + (allEntries.length === 1 ? " page" : " pages") + " remembered" +
+      (q ? " · " + viewEntries.length + " matching" : "");
+  clearEl.hidden = allEntries.length === 0;
+
+  listEl.textContent = "";
+  viewEntries.forEach(function (e) {
+    var row = document.createElement("div");
+    row.className = "hist-row";
+
+    var line = document.createElement("div");
+    line.className = "hist-title-line";
+    var fav = document.createElement("span");
+    fav.className = "hist-fav";
+    fav.textContent = (String(e.title || e.url || "?").charAt(0) || "?").toUpperCase();
+    attachIcon(fav, e.icon);
+    line.appendChild(fav);
+    var title = document.createElement("span");
+    title.className = "hist-title";
+    title.textContent = String(e.title || e.url || "");
+    var visits = document.createElement("span");
+    visits.className = "hist-visits";
+    var n = Number(e.visits) || 1;
+    visits.textContent = n + (n === 1 ? " visit" : " visits");
+    var x = document.createElement("button");
+    x.className = "hist-x";
+    x.type = "button";
+    x.textContent = "×";
+    x.setAttribute("aria-label", "Remove from history");
+    x.setAttribute("data-hist-remove", String(e.url || ""));
+    line.appendChild(title);
+    line.appendChild(visits);
+    line.appendChild(x);
+    row.appendChild(line);
+
+    var url = document.createElement("div");
+    url.className = "hist-url";
+    url.textContent = String(e.url || "");
+    row.appendChild(url);
+
+    var when = document.createElement("div");
+    when.className = "hist-when";
+    when.textContent = formatWhen(e.lastVisited);
+    row.appendChild(when);
+
+    listEl.appendChild(row);
+  });
+
+  emptyEl.hidden = allEntries.length !== 0;
+  nomatchEl.hidden = !(allEntries.length > 0 && viewEntries.length === 0);
+}
+
+/* One delegated handler for every row's remove button. */
+listEl.addEventListener("click", function (ev) {
+  var x = ev.target && ev.target.closest ? ev.target.closest("[data-hist-remove]") : null;
+  if (!x) return;
+  var url = x.getAttribute("data-hist-remove");
+  if (url) postNav({ action: "history-remove", url: url });
+});
+
+window.__picoSetHistory = function (payload) {
+  if (!payload || !Array.isArray(payload.entries)) { render(); return; }
+  if (typeof payload.query === "string") {
+    /* A search answer: apply only while the box still
+       holds that exact query. */
+    if (payload.query === searchEl.value.trim()) {
+      viewEntries = payload.entries;
+    }
+    render();
+    return;
+  }
+  allEntries = payload.entries;
+  viewEntries = localFilter(allEntries, searchEl.value.trim());
+  disarmClear();
+  render();
+};
+
+/* Search: ask the shell (debounced); the answer arrives
+   as a query-tagged push. Clearing the box restores the
+   full list locally at once and re-asks with the empty
+   query so the shell's view agrees. */
+var searchTimer = null;
+searchEl.addEventListener("input", function () {
+  var q = searchEl.value.trim();
+  viewEntries = localFilter(allEntries, q);
+  render();
+  if (searchTimer !== null) clearTimeout(searchTimer);
+  searchTimer = setTimeout(function () {
+    searchTimer = null;
+    postNav({ action: "history-search", query: searchEl.value.trim() });
+  }, 150);
+});
+
+/* Clear: the app's two-step confirm — first click arms
+   for 3 s, second click sends. Any push disarms. */
+var clearArmed = false;
+var clearTimer = null;
+function disarmClear() {
+  clearArmed = false;
+  if (clearTimer !== null) { clearTimeout(clearTimer); clearTimer = null; }
+  clearEl.classList.remove("armed");
+  clearEl.textContent = "Clear history";
+}
+clearEl.addEventListener("click", function () {
+  if (!clearArmed) {
+    clearArmed = true;
+    clearEl.classList.add("armed");
+    clearEl.textContent = "Click again to clear all history";
+    clearTimer = setTimeout(disarmClear, 3000);
+    return;
+  }
+  disarmClear();
+  postNav({ action: "history-clear" });
+});
+
+applyTheme(INIT.theme, INIT.palette);
+render();
+postNav({ action: "history-list" });
+
+</script>
+</body>
+</html>

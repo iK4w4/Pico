@@ -426,7 +426,8 @@ pub fn page_gate(is_downloads_tab: bool, on_downloads_url: bool) -> bool {
 /// accepted as the same page.
 pub fn is_downloads_url(url: &str) -> bool {
     let current = normalize_pico_url(url);
-    current == DOWNLOADS_URL || current == "pico://downloads/"
+    let base = current.split(['?', '#']).next().unwrap_or_default();
+    base.trim_end_matches('/') == DOWNLOADS_URL
 }
 
 /// True when an IPC body *claims* to be a downloads
@@ -706,6 +707,9 @@ mod tests {
         assert!(!page_gate(false, false));
         assert!(is_downloads_url("pico://downloads"));
         assert!(is_downloads_url("pico://downloads/"));
+        assert!(is_downloads_url("pico://downloads?filter=active"));
+        assert!(is_downloads_url("https://pico.downloads/#top"));
+        assert!(!is_downloads_url("pico://downloads."));
         assert!(!is_downloads_url("pico://start"));
     }
 

@@ -97,6 +97,7 @@ html, body { height: 86px; overflow: hidden; user-select: none; background: tran
 .wbtn.close:hover { background: var(--danger); color: var(--on-danger); }
 
 #tabstrip {
+  position: relative;
   flex: 1 1 auto; min-width: 0; height: 40px;
   display: flex; align-items: flex-end; gap: 6px;
   padding: 0 4px; overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
@@ -174,6 +175,20 @@ html, body { height: 86px; overflow: hidden; user-select: none; background: tran
 }
 .tab:hover .x, .tab:focus-visible .x, .tab[aria-selected="true"] .x { opacity: 1; }
 .tab .x:hover { box-shadow: var(--neu-raised-sm); color: var(--text); }
+/* Tab drag (0.41.0): past the movement threshold the
+   dragged tab dims (it is "in the hand") and the drop
+   indicator — a 2px accent line in the strip, positioned
+   by the drag code at the current gap — shows where the
+   tab will land. The indicator is an accent BACKGROUND,
+   not a border (the no-borders contract), and neither
+   rule touches a --glow token (the census is frozen). */
+.tab.dragging { opacity: 0.5; }
+#tab-drop {
+  position: absolute; top: 4px; height: 28px; width: 2px;
+  border-radius: var(--r-pill); background: var(--accent);
+  display: none; pointer-events: none; z-index: 2;
+}
+#tab-drop.on { display: block; }
 #newtab {
   width: 30px; height: 30px; align-self: center; border-radius: var(--r-md); flex: none;
   display: grid; place-items: center; color: var(--muted);
@@ -264,6 +279,70 @@ html, body { height: 86px; overflow: hidden; user-select: none; background: tran
 /* The input itself never draws a focus ring: the wrap's
    :focus-within glow IS the address bar's focus indication. */
 #addr:focus-visible { box-shadow: none; }
+/* Bookmark star (0.41.0): a quiet glyph button inside the
+   address well. OFF = faint outline; ON (aria-pressed) =
+   the star FILLS with the accent — the filled state is
+   the whole signal, mirrored from the snapshot's
+   `bookmarked` field like every other latch in this bar. */
+#bookmark-star {
+  flex: none; width: 24px; height: 24px; border-radius: var(--r-pill);
+  display: grid; place-items: center; color: var(--faint);
+  transition: color 120ms ease;
+}
+#bookmark-star:hover { color: var(--text); }
+#bookmark-star[aria-pressed="true"] { color: var(--accent); }
+#bookmark-star[aria-pressed="true"] svg.ic { fill: var(--accent); }
+/* Suggestions dropdown (0.41.0): ONE card under the
+   address bar — bookmark matches first, then history by
+   frecency, then the raw typed input as the final "go"
+   row (the order is core's; this page only paints it).
+   An overlay in the panel family: the app grows the
+   chrome rect while it is open (layout::SUGGEST_H), and
+   the card is top-anchored, never bottom-anchored. */
+#suggest {
+  position: fixed; top: 82px; left: 12px; right: 12px; z-index: 6;
+  display: none; flex-direction: column; gap: 2px;
+  max-height: 330px; overflow-y: auto;
+  padding: 8px;
+  background: var(--surface); border-radius: var(--r-xl);
+  box-shadow: var(--neu-raised);
+}
+#suggest.on { display: flex; }
+#suggest-list { display: flex; flex-direction: column; gap: 2px; }
+.sug-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 8px; border-radius: var(--r-md);
+  cursor: pointer; min-width: 0;
+}
+.sug-row.sel { box-shadow: var(--neu-pressed); }
+.sug-kind {
+  position: relative;
+  flex: none; width: 16px; height: 16px; display: grid; place-items: center;
+  color: var(--faint);
+}
+/* Favicon (0.41.2): when the row's payload carries the
+   host's real icon it paints over the kind glyph inside
+   the same fixed 16px slot (opaque surface backing, so
+   the glyph never bleeds through). No icon, a bad icon
+   field, or an image error leaves the glyph — the slot
+   size never depends on the image, so rows never
+   shift. */
+.sug-img {
+  position: absolute; top: 0; right: 0; bottom: 0; left: 0;
+  width: 16px; height: 16px; object-fit: contain;
+  border-radius: var(--r-sm); background: var(--surface);
+}
+.sug-row[data-kind="bookmark"] .sug-kind { color: var(--accent); }
+.sug-row[data-kind="bookmark"] .sug-kind svg.ic { fill: var(--accent); }
+.sug-title {
+  flex: 1; min-width: 0; font-size: 13px; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sug-url {
+  flex: none; max-width: 40%; font-size: 12px; color: var(--faint);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sug-row.go .sug-title { color: var(--accent); font-weight: 650; }
 /* Text selection (0.32.3): through 0.32.2 a selected URL
    painted the platform default — one solid OS-blue block,
    white text, edge to edge — foreign to every palette.
@@ -492,6 +571,16 @@ html, body { height: 86px; overflow: hidden; user-select: none; background: tran
   margin-top: -5px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+/* Retry countdown line (0.41.3): the popover row carries
+   it on its OWN line beside the progress line, like the
+   downloads page's .dlp-retry — the error line's 15px
+   rhythm, in the muted voice (a countdown is not an
+   error). */
+.dl-retry {
+  font-size: 11px; line-height: 15px; color: var(--muted);
+  margin-top: -5px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 .dl-icon-btn {
   width: 24px; height: 24px; border-radius: var(--r-md); flex: none;
   display: grid; place-items: center; color: var(--muted);
@@ -604,6 +693,20 @@ html, body { height: 86px; overflow: hidden; user-select: none; background: tran
   box-shadow: var(--neu-raised);
 }
 #ctxmenu.on { display: flex; }
+/* Tab context menu (0.41.0): the tab strip's right-click
+   menu — the content menu's card, verbatim material and
+   geometry (236 wide, rows reuse .ctx-row / .ctx-sep),
+   in its own element because its open state, its stored
+   tab and its picks (tabcmd bodies, not ctx_pick) are
+   its own. The app positions it and grows the chrome
+   rect to contain it, like the content menu's. */
+#tabmenu {
+  position: fixed; width: 236px; z-index: 8;
+  display: none; flex-direction: column; padding: 6px 6px;
+  background: var(--surface); border-radius: var(--r-lg);
+  box-shadow: var(--neu-raised);
+}
+#tabmenu.on { display: flex; }
 .ctx-row {
   display: flex; align-items: center; gap: 8px; height: 30px;
   padding: 0 8px; border-radius: var(--r-md);
@@ -738,8 +841,9 @@ html, body { height: 86px; overflow: hidden; user-select: none; background: tran
 <body>
   <div id="shell">
     <div id="topbar">
-      <div class="brand"><span class="dot">P</span> Pico <span class="ver" id="ver">0.40.2</span><button class="byline" id="brand-by" title="Telegram — @iK4w4" aria-label="Open the author's Telegram">by @iK4w4</button></div>
+      <div class="brand"><span class="dot">P</span> Pico <span class="ver" id="ver">0.41.3</span><button class="byline" id="brand-by" title="Telegram — @iK4w4" aria-label="Open the author's Telegram">by @iK4w4</button></div>
       <div id="tabstrip" role="tablist" aria-label="Tabs">
+        <div id="tab-drop" aria-hidden="true"></div>
         <button id="newtab" title="New tab (Ctrl+T)" aria-label="New tab">
           <svg viewBox="0 0 24 24" class="ic"><path d="M12 5v14M5 12h14"/></svg>
         </button>
@@ -783,6 +887,9 @@ html, body { height: 86px; overflow: hidden; user-select: none; background: tran
         <input id="addr" type="text" spellcheck="false" autocomplete="off"
                placeholder="Search or enter address — try localhost:3000 or a file path"
                aria-label="Address">
+        <button id="bookmark-star" title="Bookmark this page (Ctrl+D)" aria-label="Bookmark this page" aria-pressed="false">
+          <svg viewBox="0 0 24 24" class="ic"><path d="M12 3.6l2.5 5.2 5.7.7-4.2 3.9 1.1 5.6L12 16.2 6.9 19l1.1-5.6-4.2-3.9 5.7-.7z"/></svg>
+        </button>
       </div>
       <span class="vsep" aria-hidden="true"></span>
       <div class="cluster" role="group" aria-label="Filtering">
@@ -817,6 +924,10 @@ html, body { height: 86px; overflow: hidden; user-select: none; background: tran
           <span id="dl-fail-badge" class="dl-fail-badge"></span>
         </div>
       </div>
+    </div>
+
+    <div id="suggest" role="listbox" aria-label="Address suggestions">
+      <div id="suggest-list"></div>
     </div>
 
     <div id="pp-backdrop"></div>
@@ -864,6 +975,8 @@ html, body { height: 86px; overflow: hidden; user-select: none; background: tran
     </div>
 
     <div id="ctxmenu" role="menu" aria-label="Context menu"></div>
+
+    <div id="tabmenu" role="menu" aria-label="Tab menu"></div>
 
     <div id="tp-backdrop"></div>
     <div id="tpanel" role="dialog" aria-label="Send to phone">
@@ -926,6 +1039,102 @@ function syncTabEl(el, tab) {
   if (tt) tt.textContent = tab.title || "Tab";
 }
 
+/* --- Movable tabs (0.41.0) ------------------------------------------
+   The tab vocabulary (core::tabcmd) rides the chrome
+   transport like the nav/dl vocabularies: sendTab wraps
+   payloads into the canonical body {"kind":"tab",
+   "action":"<verb>", ...args} and send adds the
+   v/boot/req framing (chrome-surface tab bodies dedupe
+   exactly like nav/dl bodies do). ORDER IS APP STATE:
+   this page never reorders its own strip — a drag only
+   tracks the tab immediately RIGHT of the painted drop
+   indicator (its id, or null at the end of the strip)
+   and posts it as the drop's `before`; the app resolves
+   the landing from that neighbour (core's
+   final_from_neighbor), so a tab opening or closing
+   between the last pointermove and the drop cannot
+   shift the landing the way the bare gap index this
+   page used to post could (0.41.3, Front B B-3). The
+   next snapshot re-renders the strip in the new order. */
+function sendTab(payload) {
+  var obj = { kind: "tab" };
+  for (var k in payload) obj[k] = payload[k];
+  send(obj);
+}
+
+var tabDropEl = document.getElementById("tab-drop");
+/* The one in-flight tab drag: {id, el, startX, active,
+   insert, before}. `active` flips only past the movement
+   threshold — below it a press is a plain click and the
+   tab's own click handler activates the tab as always.
+   `insert` is the gap the indicator paints at; `before`
+   is the id of the tab element immediately right of that
+   gap (null at the end of the strip) — the drop body
+   names it. Both are recomputed together on every drag
+   pointermove, so `before` is always the neighbour of
+   the indicator the user actually sees. */
+var dragTab = null;
+/* The tab id whose next click is the tail of a finished
+   drag: the drop must NOT also activate the tab (a plain
+   click activates; a drag only moves). */
+var suppressTabClickId = null;
+
+function stripTabEls() {
+  return Array.prototype.slice.call(tabstrip.querySelectorAll(".tab"));
+}
+
+/* The gap index for a pointer x: the first tab whose
+   midpoint is past the pointer, else the end gap. The
+   new-tab button is NOT a drop target — the strip past
+   the last tab's midpoint is simply the end gap, button
+   or no button. */
+function dragGapFor(clientX) {
+  var tabs = stripTabEls();
+  for (var i = 0; i < tabs.length; i++) {
+    var r = tabs[i].getBoundingClientRect();
+    if (clientX < r.left + r.width / 2) return i;
+  }
+  return tabs.length;
+}
+
+/* The tab id immediately right of gap `insert` — the
+   neighbour the drop body names — or null when the gap
+   is the end of the strip (or names no tab). */
+function dragBeforeFor(insert) {
+  var tabs = stripTabEls();
+  if (insert < 0 || insert >= tabs.length) return null;
+  var id = Number(tabs[insert].dataset.tabId);
+  return isFinite(id) ? id : null;
+}
+
+function paintDropIndicator(insert) {
+  var tabs = stripTabEls();
+  if (!tabs.length) { tabDropEl.classList.remove("on"); return; }
+  var stripRect = tabstrip.getBoundingClientRect();
+  var x;
+  if (insert <= 0) {
+    x = tabs[0].getBoundingClientRect().left;
+  } else if (insert >= tabs.length) {
+    var last = tabs[tabs.length - 1].getBoundingClientRect();
+    x = last.left + last.width;
+  } else {
+    x = tabs[insert].getBoundingClientRect().left;
+  }
+  tabDropEl.style.left = (x - stripRect.left + tabstrip.scrollLeft - 1) + "px";
+  tabDropEl.classList.add("on");
+}
+
+function endDrag() {
+  if (dragTab && dragTab.el) dragTab.el.classList.remove("dragging");
+  dragTab = null;
+  tabDropEl.classList.remove("on");
+}
+
+/* The tab menu's target tab, remembered from the
+   right-click that opened it (its picks name this tab;
+   the snapshot's menu card carries no tab id). */
+var tabMenuTabId = null;
+
 function makeTab(tab) {
   var el = document.createElement("button");
   el.dataset.tabId = tab.id;
@@ -942,9 +1151,81 @@ function makeTab(tab) {
   });
   el.appendChild(fav); el.appendChild(spin); el.appendChild(tt); el.appendChild(x);
   syncTabEl(el, tab);
-  el.addEventListener("click", function () { send({ t: "switch_tab", tab: tab.id }); });
+  el.addEventListener("click", function () {
+    /* The tail click of a finished drag is not an
+       activation (see suppressTabClickId above). */
+    if (suppressTabClickId === tab.id) { suppressTabClickId = null; return; }
+    send({ t: "switch_tab", tab: tab.id });
+  });
   el.addEventListener("auxclick", function (ev) {
     if (ev.button === 1) send({ t: "close_tab", tab: tab.id });
+  });
+  /* Drag to reorder (0.41.0): pointer-based, thresholded.
+     A press on the close × never starts a drag. Past the
+     threshold the tab dims, the gap indicator paints,
+     and pointer capture keeps the move/up on this element
+     wherever the pointer roams in the strip. pointerup
+     commits (one `move` body naming the indicator's
+     right-hand neighbour); pointercancel
+     — the pointer leaving the window, the OS taking the
+     gesture — restores without a word to the app, as do
+     Escape and a window blur (both handled globally). */
+  el.addEventListener("pointerdown", function (ev) {
+    if (ev.button !== 0) return;
+    /* AUDIT 0.41.2 (Front C F4): a second pointer (a
+       touch contact while the mouse holds a press) must
+       neither hijack nor strand the first drag: only
+       the primary pointer arms one, and arming retires
+       any live drag cleanly first. */
+    if (ev.isPrimary === false) return;
+    if (dragTab) endDrag();
+    if (ev.target && ev.target.closest && ev.target.closest(".x")) return;
+    dragTab = { id: tab.id, el: el, startX: ev.clientX, active: false, insert: -1, before: null };
+  });
+  el.addEventListener("pointermove", function (ev) {
+    /* AUDIT 0.41.2 (Front C F5): capture is taken only
+       past the threshold, so a press released OUTSIDE
+       the window before it never delivers a pointerup
+       here — without this guard the armed dragTab
+       survived and the next button-free hover across
+       the strip started a ghost drag. No buttons down
+       means the press is over: retire the drag. */
+    if (dragTab && !ev.buttons) { endDrag(); return; }
+    if (!dragTab || dragTab.id !== tab.id) return;
+    if (!dragTab.active) {
+      if (Math.abs(ev.clientX - dragTab.startX) < 6) return;
+      dragTab.active = true;
+      el.classList.add("dragging");
+      if (el.setPointerCapture && ev.pointerId !== undefined) {
+        try { el.setPointerCapture(ev.pointerId); } catch (e) {}
+      }
+    }
+    dragTab.insert = dragGapFor(ev.clientX);
+    dragTab.before = dragBeforeFor(dragTab.insert);
+    paintDropIndicator(dragTab.insert);
+  });
+  function finishPointerDrag(commit) {
+    if (!dragTab || dragTab.id !== tab.id) return;
+    var was = dragTab.active;
+    var insert = dragTab.insert;
+    var before = dragTab.before;
+    var id = dragTab.id;
+    endDrag();
+    if (was) {
+      suppressTabClickId = id;
+      if (commit && insert >= 0) sendTab({ action: "move", tab: id, before: before });
+    }
+  }
+  el.addEventListener("pointerup", function () { finishPointerDrag(true); });
+  el.addEventListener("pointercancel", function () { finishPointerDrag(false); });
+  /* The tab's context menu (0.41.0): the app owns it —
+     this handler only reports the right-click (tab +
+     point); the menu card arrives in the snapshot's
+     tabContextMenu and its picks return as tab bodies. */
+  el.addEventListener("contextmenu", function (ev) {
+    ev.preventDefault();
+    tabMenuTabId = tab.id;
+    send({ t: "tab_menu_open", tab: tab.id, x: Math.round(ev.clientX), y: Math.round(ev.clientY) });
   });
   /* Keyboard support on the tab itself: arrows move between
      tabs, Delete closes. */
@@ -1030,7 +1311,7 @@ function picoApply(s) {
   /* Badge shows the display version (0.32: the name the
      user gives the release) — the static badge and the
      snapshot-driven badge must agree. */
-  document.getElementById("ver").textContent = String(s.version || "0.40.2");
+  document.getElementById("ver").textContent = String(s.version || "0.41.3");
   /* Tabs: KEYED reconciliation (AUDIT V28 A1-L6) — an existing
      tab's element is updated in place and only moved (via
      insertBefore) when its position actually changes (A1-S1);
@@ -1070,12 +1351,20 @@ function picoApply(s) {
        button anchor. */
     var tabInPlace = tabEl.parentNode === tabstrip &&
       (prevTabEl ? tabEl.previousElementSibling === prevTabEl
-                 : tabEl.previousElementSibling === null);
+                 : (tabEl.previousElementSibling === null ||
+                    tabEl.previousElementSibling === tabDropEl));
     if (!tabInPlace) tabstrip.insertBefore(tabEl, newtabBtn);
     prevTabEl = tabEl;
   }
   for (var goneId in existingTabs) {
-    if (!seenTabs[goneId]) existingTabs[goneId].remove();
+    if (!seenTabs[goneId]) {
+      /* 0.41.3 (Front B S-1): the departed tab was the
+         one being dragged — retire the drag with it, so
+         no drop indicator strands and no drag state
+         lingers over a tab that no longer exists. */
+      if (dragTab && String(dragTab.id) === goneId) endDrag();
+      existingTabs[goneId].remove();
+    }
   }
   /* A1-F6: the focused tab was closed by this reconciliation —
      move focus to the tab now at the same strip index (clamped
@@ -1231,6 +1520,24 @@ function picoApply(s) {
      mirrors it (a Rust-side close is never echoed back). */
   guardSection("dl-render", function () { syncDownloads(s); });
   guardSection("context-menu", function () { syncContextMenu(s); });
+  guardSection("tab-menu", function () { syncTabMenu(s); });
+  /* Bookmark star (0.41.0): filled iff the snapshot says
+     the ACTIVE tab's URL is bookmarked — a pure mirror,
+     like the Shield/Lite latches. */
+  guardSection("bookmark", function () {
+    starEl.setAttribute("aria-pressed", s.bookmarked ? "true" : "false");
+    starEl.title = s.bookmarked
+      ? "Bookmarked — click to remove (Ctrl+D)"
+      : "Bookmark this page (Ctrl+D)";
+  });
+  /* The suggestions dropdown belongs to one tab's draft:
+     a snapshot for a different active tab retires it
+     (silently — the app already dropped its extension
+     claim on the switch). */
+  if (suggestOpen && suggestTabId !== null && suggestTabId !== undefined &&
+      s.active !== suggestTabId) {
+    closeSuggest(false);
+  }
   var err = document.getElementById("errbar");
   if (s.activeError) {
     err.classList.add("on");
@@ -1473,6 +1780,182 @@ function sendDl(payload) {
   send(obj);
 }
 
+/* --- Bookmarks + suggestions (0.41.0) ------------------------------
+   The nav vocabulary (core::navcmd) rides the same chrome
+   transport as downloads: sendNav wraps payloads into the
+   canonical body {"kind":"nav","action":"<verb>", ...args}
+   and send adds the v/boot/req framing (chrome-surface nav
+   bodies dedupe exactly like dl bodies do). The star is a
+   pure mirror: its filled state comes from the snapshot's
+   `bookmarked` field; clicking it (or Ctrl+D) posts
+   bookmark-toggle and the NEXT snapshot confirms. The
+   suggestions dropdown is painted from the app's answer
+   push (window.__picoNavSuggestions): bookmark matches
+   first, then history by frecency — the ORDER is core's
+   (core::navstore), this page only appends the final "go"
+   row for the raw typed input and paints. */
+function sendNav(payload) {
+  var obj = { kind: "nav" };
+  for (var k in payload) obj[k] = payload[k];
+  send(obj);
+}
+
+var starEl = document.getElementById("bookmark-star");
+starEl.addEventListener("click", function () {
+  sendNav({ action: "bookmark-toggle" });
+});
+
+var suggestEl = document.getElementById("suggest");
+var suggestListEl = document.getElementById("suggest-list");
+var suggestOpen = false;
+var suggestRows = [];      /* [{url,title,kind,icon} | {go:true,text}] */
+var suggestSel = -1;       /* keyboard selection; -1 = none */
+var suggestQuery = "";     /* the query the painted rows answer */
+var suggestDraft = "";     /* the input text when the dropdown opened (Esc restores it) */
+var suggestTabId = null;   /* the tab the open dropdown belongs to */
+var suggestTimer = null;
+var suggestGen = 0;        /* bumped on every input event (0.41.2) */
+var suggestPaintGen = -1;  /* the generation the painted rows answer */
+
+function closeSuggest(notify) {
+  /* AUDIT 0.41.2 (Front B F6): a pending debounce timer
+     dies with the close — through 0.41.0 Escape closed
+     the dropdown and the timer fired anyway 60ms later,
+     its answer passing both staleness guards (same
+     query, still focused) and reopening what the user
+     had just dismissed. */
+  if (suggestTimer !== null) { clearTimeout(suggestTimer); suggestTimer = null; }
+  if (!suggestOpen) return;
+  suggestOpen = false;
+  suggestRows = [];
+  suggestSel = -1;
+  suggestEl.classList.remove("on");
+  suggestListEl.textContent = "";
+  /* The app owns the chrome-rect extension for this
+     overlay; tell it the dropdown closed so the rect is
+     restored (opening is implied by the query itself). */
+  if (notify) send({ t: "suggest_close" });
+}
+
+/* Favicon (0.41.2): a row's `icon` field is the host's
+   cached icon as a data URI, or null. Anything else —
+   missing, not a string, not a PNG data URI — degrades
+   to the kind glyph, never a broken row. */
+function sugIconUri(v) {
+  return typeof v === "string" && v.indexOf("data:image/png;base64,") === 0 ? v : null;
+}
+
+function paintSuggest() {
+  suggestListEl.textContent = "";
+  suggestRows.forEach(function (row, i) {
+    var el = document.createElement("div");
+    el.className = "sug-row" + (row.go ? " go" : "") + (i === suggestSel ? " sel" : "");
+    el.setAttribute("role", "option");
+    el.dataset.idx = String(i);
+    var kind = document.createElement("span");
+    kind.className = "sug-kind";
+    if (row.go) {
+      kind.innerHTML = '<svg viewBox="0 0 24 24" class="ic"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>';
+      el.dataset.kind = "go";
+    } else if (row.kind === "bookmark") {
+      kind.innerHTML = '<svg viewBox="0 0 24 24" class="ic"><path d="M12 3.6l2.5 5.2 5.7.7-4.2 3.9 1.1 5.6L12 16.2 6.9 19l1.1-5.6-4.2-3.9 5.7-.7z"/></svg>';
+      el.dataset.kind = "bookmark";
+    } else {
+      kind.innerHTML = '<svg viewBox="0 0 24 24" class="ic"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>';
+      el.dataset.kind = "history";
+    }
+    if (!row.go) {
+      var iconUri = sugIconUri(row.icon);
+      if (iconUri) {
+        var img = document.createElement("img");
+        img.className = "sug-img";
+        img.alt = "";
+        img.src = iconUri;
+        img.addEventListener("error", function () { img.remove(); });
+        kind.appendChild(img);
+      }
+    }
+    el.appendChild(kind);
+    var title = document.createElement("span");
+    title.className = "sug-title";
+    title.textContent = row.go ? ("Go to " + row.text) : (row.title || row.url || "");
+    el.appendChild(title);
+    if (!row.go) {
+      var url = document.createElement("span");
+      url.className = "sug-url";
+      url.textContent = row.url || "";
+      el.appendChild(url);
+    }
+    suggestListEl.appendChild(el);
+  });
+}
+
+/* The app's answer push: {query, items:[{url,title,kind}]}.
+   A stale answer (the box has moved on, or the tab
+   changed) is dropped — the newer query's answer paints. */
+window.__picoNavSuggestions = function (payload) {
+  try {
+    if (!payload || typeof payload.query !== "string" || !Array.isArray(payload.items)) return;
+    if (payload.query !== addr.value.trim()) return;
+    if (document.activeElement !== addr) return;
+    suggestQuery = payload.query;
+    suggestPaintGen = suggestGen;
+    suggestRows = payload.items.map(function (it) {
+      return { url: String(it.url || ""), title: String(it.title || ""), kind: it.kind === "bookmark" ? "bookmark" : "history", icon: typeof it.icon === "string" ? it.icon : null };
+    }).filter(function (r) { return r.url !== ""; });
+    suggestRows.push({ go: true, text: payload.query });
+    suggestSel = -1;
+    if (!suggestOpen) {
+      suggestDraft = addr.value;
+      suggestTabId = state ? state.active : null;
+    }
+    suggestOpen = true;
+    suggestEl.classList.add("on");
+    paintSuggest();
+  } catch (e) { /* a bad push never breaks the bar */ }
+};
+
+/* Row acceptance by mouse: mousedown (not click) so the
+   pick lands BEFORE the input's blur can revert the
+   draft; preventDefault keeps focus until we navigate. */
+suggestListEl.addEventListener("mousedown", function (ev) {
+  var rowEl = ev.target && ev.target.closest ? ev.target.closest(".sug-row") : null;
+  if (!rowEl) return;
+  ev.preventDefault();
+  var idx = parseInt(rowEl.dataset.idx || "-1", 10);
+  if (idx >= 0 && idx < suggestRows.length) acceptSuggest(idx);
+});
+
+function acceptSuggest(idx) {
+  /* AUDIT 0.41.2 (Front B F7): rows painted for an
+     older query are not acceptable — during the 60ms
+     debounce window the box already holds a newer
+     query, and accepting a stale row navigates
+     somewhere the user is no longer asking about. */
+  if (suggestGen !== suggestPaintGen) return;
+  var row = suggestRows[idx];
+  if (!row) return;
+  var text = row.go ? addr.value.trim() : row.url;
+  closeSuggest(false);
+  addrDirty = false;
+  addrDirtyTabId = null;
+  if (text) send({ t: "navigate", text: text });
+  addr.blur();
+}
+
+/* Move the keyboard selection (wraps at both ends; from
+   no selection, Down lands on the first row, Up on the
+   last). */
+function moveSuggest(dir) {
+  if (!suggestRows.length) return;
+  if (suggestSel < 0) {
+    suggestSel = dir > 0 ? 0 : suggestRows.length - 1;
+  } else {
+    suggestSel = (suggestSel + dir + suggestRows.length) % suggestRows.length;
+  }
+  paintSuggest();
+}
+
 function dlSnapshotOf(s) {
   if (s.downloads && !Array.isArray(s.downloads) && Array.isArray(s.downloads.tasks)) {
     var snap = s.downloads;
@@ -1684,6 +2167,10 @@ document.addEventListener("pointerdown", function (ev) {
     var ctxT = ev.target;
     if (!(ctxT && ctxT.closest && ctxT.closest("#ctxmenu"))) closeCtxMenu();
   }
+  if (tabCtxOpen) {
+    var tmT = ev.target;
+    if (!(tmT && tmT.closest && tmT.closest("#tabmenu"))) closeTabMenu();
+  }
   if (!dpOpen) return;
   var t = ev.target;
   if (t && t.closest && (t.closest("#dpanel") || t.closest("#downloads"))) return;
@@ -1778,6 +2265,80 @@ function syncContextMenu(s) {
   ctxOpen = true;
 }
 
+/* --- Tab context menu (0.41.0) --------------------------------------
+   A pure renderer over the snapshot's `tabContextMenu`
+   field, the content menu's twin: null hides the menu;
+   otherwise {x, y, items} anchors it and lists its rows
+   (built by core::tabcmd from the tab's strip position
+   and its new-Pico plan — this page never hardcodes an
+   item or a label). Rows reuse the .ctx-row anatomy.
+   A pick is a TAB body naming the right-clicked tab
+   (tabMenuTabId): move_left/move_right ride the
+   `move-step` verb, open_new_pico the `open-in-new-pico`
+   verb. The pick hides the menu locally; the app retires
+   its own state when the pick executes and the next
+   snapshot confirms. A dismissal (Escape, outside
+   pointerdown) tells Rust with {t:"tab_menu_close"} — a
+   Rust-side close arriving as tabContextMenu:null is
+   mirrored silently, never echoed. */
+var tabCtxOpen = false;
+var tabCtxSig = "";
+
+function closeTabMenu() {
+  if (!tabCtxOpen) return;
+  tabCtxOpen = false;
+  document.getElementById("tabmenu").classList.remove("on");
+  send({ t: "tab_menu_close" });
+}
+
+function syncTabMenu(s) {
+  var el = document.getElementById("tabmenu");
+  var cm = s.tabContextMenu;
+  if (!cm) {
+    el.classList.remove("on");
+    tabCtxOpen = false;
+    tabCtxSig = "";
+    return;
+  }
+  var sig = JSON.stringify([cm.x, cm.y, cm.items]);
+  el.style.left = cm.x + "px";
+  el.style.top = cm.y + "px";
+  if (sig !== tabCtxSig) {
+    tabCtxSig = sig;
+    while (el.firstChild) el.removeChild(el.firstChild);
+    (cm.items || []).forEach(function (item) {
+      if (item.sep) {
+        var sep = document.createElement("div");
+        sep.className = "ctx-sep";
+        sep.setAttribute("role", "separator");
+        el.appendChild(sep);
+        return;
+      }
+      var row = document.createElement("div");
+      row.className = "ctx-row" + (item.enabled ? "" : " off");
+      row.setAttribute("role", "menuitem");
+      if (!item.enabled) row.setAttribute("aria-disabled", "true");
+      var label = document.createElement("span");
+      label.className = "ctx-label";
+      label.textContent = item.label || "";
+      row.appendChild(label);
+      if (item.enabled) {
+        row.addEventListener("click", function () {
+          var id = tabMenuTabId;
+          el.classList.remove("on");
+          tabCtxOpen = false;
+          if (item.id === "move_left") sendTab({ action: "move-step", tab: id, dir: -1 });
+          else if (item.id === "move_right") sendTab({ action: "move-step", tab: id, dir: 1 });
+          else if (item.id === "open_new_pico") sendTab({ action: "open-in-new-pico", tab: id });
+        });
+      }
+      el.appendChild(row);
+    });
+  }
+  el.classList.add("on");
+  tabCtxOpen = true;
+}
+
 /* --- commands ------------------------------------------------------- */
 newtabBtn.addEventListener("click", function () { send({ t: "new_tab" }); });
 document.getElementById("back").addEventListener("click", function () { send({ t: "back" }); });
@@ -1815,15 +2376,59 @@ topbar.addEventListener("dblclick", function (ev) {
 
 addr.addEventListener("input", function () {
   addrDirty = true;
+  /* AUDIT 0.41.2 (Front B F7): a new keystroke retires
+     the painted rows' authority (see acceptSuggest)
+     and any keyboard selection into them. */
+  suggestGen++;
+  suggestSel = -1;
   /* A6-F9: record WHICH tab this draft belongs to. */
   addrDirtyTabId = state ? state.active : null;
+  /* 0.41.0 suggestions: ask core for matches (debounced —
+     the answer paints through __picoNavSuggestions and
+     drops itself if the box has moved on). An emptied
+     box closes the dropdown instead of querying. */
+  if (suggestTimer !== null) clearTimeout(suggestTimer);
+  var q = addr.value.trim();
+  if (!q) {
+    closeSuggest(true);
+  } else {
+    suggestTimer = setTimeout(function () {
+      suggestTimer = null;
+      sendNav({ action: "suggestions-query", query: addr.value.trim() });
+    }, 60);
+  }
 });
 addr.addEventListener("blur", function () {
   addrDirty = false;
   addrDirtyTabId = null;
+  closeSuggest(true);
   if (state) addr.value = state.address || "";
 });
 addr.addEventListener("keydown", function (ev) {
+  /* 0.41.0: while the suggestions dropdown is open it
+     owns the navigation keys. Enter with no selection
+     falls through to the plain submit below (the "go"
+     row's meaning); Escape closes and restores the
+     draft the user had when the dropdown opened, and
+     does NOT blur (that is the closed-dropdown Escape
+     behavior below). */
+  if (suggestOpen) {
+    if (ev.key === "ArrowDown") { ev.preventDefault(); moveSuggest(1); return; }
+    if (ev.key === "ArrowUp") { ev.preventDefault(); moveSuggest(-1); return; }
+    if (ev.key === "Enter" && suggestSel >= 0) {
+      ev.preventDefault();
+      acceptSuggest(suggestSel);
+      return;
+    }
+    if (ev.key === "Escape") {
+      ev.preventDefault();
+      ev.stopPropagation();
+      var draft = suggestDraft;
+      closeSuggest(true);
+      addr.value = draft;
+      return;
+    }
+  }
   if (ev.key === "Enter") {
     var text = addr.value.trim();
     addrDirty = false;
@@ -1842,15 +2447,47 @@ addr.addEventListener("keydown", function (ev) {
     addr.blur();
   }
 });
-addr.addEventListener("focus", function () { addr.select(); });
+addr.addEventListener("focus", function () {
+  addr.select();
+  /* 0.41.0: focusing the bar re-asks the star's state —
+     the answer rides the next snapshot's `bookmarked`
+     field (bookmark-query changes nothing itself). */
+  sendNav({ action: "bookmark-query" });
+});
+
+/* A drag dies with the window's focus (0.41.0): the
+   pointer is gone, the drop must not land later. */
+window.addEventListener("blur", function () { if (dragTab) endDrag(); });
 
 document.addEventListener("keydown", function (ev) {
+  /* Escape cancels an in-flight tab drag first (0.41.0):
+     the drag restores, no body is sent. */
+  /* AUDIT 0.41.2 (Front C S2): Escape cancels an ARMED
+     press too, not only an active drag — through
+     0.41.0 a sub-threshold press survived Escape and a
+     later 6px move started the drag the user had just
+     cancelled. */
+  if (ev.key === "Escape" && dragTab) { endDrag(); return; }
+  if (ev.key === "Escape" && suggestOpen) { closeSuggest(true); return; }
   if (ev.key === "Escape" && ctxOpen) { closeCtxMenu(); return; }
+  if (ev.key === "Escape" && tabCtxOpen) { closeTabMenu(); return; }
   if (ev.key === "Escape" && dpOpen) { closeDownloads(); return; }
   if (ev.key === "Escape" && ppOpen) { closePalette(); return; }
   if (ev.key === "Escape" && (tpOpen || tpAwaiting)) { closeTeleport(); return; }
   var mod = ev.ctrlKey || ev.metaKey;
-  if (mod && (ev.key === "t" || ev.key === "T")) { ev.preventDefault(); send({ t: "new_tab" }); }
+  /* 0.41.0: Ctrl+Shift+PageUp / PageDown moves the ACTIVE
+     tab one position (clamped at the ends by core). No
+     collision: no other binding in this document names
+     PageUp/PageDown, and Ctrl+Shift+Tab (below) is the
+     cycling chord, a different key. When a CONTENT view
+     holds focus these keys never reach this document:
+     the app's accelerator registration forwards them as
+     a shell event instead (the Ctrl+J choke point). */
+  if (mod && ev.shiftKey && (ev.key === "PageUp" || ev.key === "PageDown")) {
+    ev.preventDefault();
+    if (state) sendTab({ action: "move-step", tab: state.active, dir: ev.key === "PageUp" ? -1 : 1 });
+  }
+  else if (mod && (ev.key === "t" || ev.key === "T")) { ev.preventDefault(); send({ t: "new_tab" }); }
   else if (mod && (ev.key === "w" || ev.key === "W")) {
     ev.preventDefault();
     if (state) send({ t: "close_tab", tab: state.active });
@@ -1859,6 +2496,14 @@ document.addEventListener("keydown", function (ev) {
   else if (mod && (ev.key === "l" || ev.key === "L")) { ev.preventDefault(); addr.focus(); addr.select(); }
   else if (mod && (ev.key === "r" || ev.key === "R")) { ev.preventDefault(); send({ t: "reload" }); }
   else if (mod && (ev.key === "j" || ev.key === "J")) { ev.preventDefault(); sendDl({ action: "open-page" }); }
+  /* 0.41.0: Ctrl+D toggles the active tab's bookmark (the
+     star's keyboard twin — same nav verb, same dedupe);
+     Ctrl+H opens the managed history page. When a CONTENT
+     view holds focus these keys never reach this document:
+     the app's accelerator registration (the Ctrl+J choke
+     point) forwards them as shell events instead. */
+  else if (mod && (ev.key === "d" || ev.key === "D")) { ev.preventDefault(); sendNav({ action: "bookmark-toggle" }); }
+  else if (mod && (ev.key === "h" || ev.key === "H")) { ev.preventDefault(); send({ t: "history_page" }); }
   else if (ev.key === "F5") { ev.preventDefault(); send({ t: "reload" }); }
   else if (ev.altKey && ev.key === "ArrowLeft") { ev.preventDefault(); send({ t: "back" }); }
   else if (ev.altKey && ev.key === "ArrowRight") { ev.preventDefault(); send({ t: "forward" }); }

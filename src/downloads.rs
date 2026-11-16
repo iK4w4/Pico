@@ -63,12 +63,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use pico_core::core::download::{
     classify_failure, cookie_header, dedupe_file_name, delete_task_file, eta_seconds, eta_text,
-    failure_hint, file_name_from_url, is_downloadable_url, load_tasks, percent, plan_segments,
-    refresh_decision, resume_decision, retry_policy, sanitize_cookies, sanitize_file_name,
-    save_task, speed_text, strip_url_userinfo, url_host, Claim, CookiePair, FailureClass,
-    GenerationGate, Planner, RefreshDecision, ResumeDecision, RetryPolicy, Segment, SpeedMeter,
-    TaskState, TaskStatus, TokenBucket, AUTO_RETRY_BACKOFF_MS, AUTO_RETRY_MAX, DEFAULT_CONNECTIONS,
-    MAX_ACTIVE_TASKS, MAX_CONNECTIONS, MIN_CONNECTIONS, TASK_FILE_VERSION,
+    failure_hint, file_name_from_url, is_downloadable_url, load_tasks, name_taken_in_dirs, percent,
+    plan_segments, refresh_decision, resolve_task_file, resolve_task_part_file, resume_decision,
+    retry_policy, sanitize_cookies, sanitize_file_name, save_task, speed_text, strip_url_userinfo,
+    url_host, Claim, CookiePair, FailureClass, GenerationGate, Planner, RefreshDecision,
+    ResumeDecision, RetryPolicy, Segment, SpeedMeter, TaskState, TaskStatus, TokenBucket,
+    AUTO_RETRY_BACKOFF_MS, AUTO_RETRY_MAX, DEFAULT_CONNECTIONS, MAX_ACTIVE_TASKS, MAX_CONNECTIONS,
+    MIN_CONNECTIONS, TASK_FILE_VERSION,
 };
 use pico_core::core::sha256::Sha256;
 use pico_core::core::stats::humanize_bytes;
@@ -262,6 +263,13 @@ struct Inner {
     default_connections: u32,
     version: u64,
     downloads_dir: PathBuf,
+    /// The legacy beside-exe downloads folder (0.41.0
+    /// WS-D, F-A1), persisted in the app state and handed
+    /// in via `set_legacy_downloads_dir` after
+    /// construction: task files that are not in
+    /// `downloads_dir` are looked for here (read-only
+    /// fallback — new downloads never land here).
+    legacy_downloads_dir: Option<PathBuf>,
     state_dir: PathBuf,
     /// How many tasks may Download at once (0.33): the
     /// app-configured replacement for the core's
@@ -419,6 +427,7 @@ impl DownloadManager {
                     },
                     version: 0,
                     downloads_dir,
+                    legacy_downloads_dir: None,
                     state_dir,
                     max_concurrent,
                     speed_limit_kbps: if speed_limit_kbps == 0 {
@@ -518,16 +527,15 @@ impl DownloadManager {
             return None;
         }
         let downloads_dir = inner.downloads_dir.clone();
+        let legacy_dir = inner.legacy_downloads_dir.clone();
         let name = dedupe_file_name(&raw_name, |candidate| {
-            downloads_dir.join(candidate).exists()
-                || downloads_dir.join(format!("{candidate}.part")).exists()
+            name_taken_in_dirs(&downloads_dir, legacy_dir.as_deref(), candidate)
                 || inner.tasks.values().any(|t| t.state.file_name == candidate)
         });
         // AUDIT 0.40.1: dedupe exhaustion (~100k collisions)
         // returns a name that is still taken; refuse honestly
         // instead of minting a task that shares a file name.
-        if downloads_dir.join(&name).exists()
-            || downloads_dir.join(format!("{name}.part")).exists()
+        if name_taken_in_dirs(&downloads_dir, legacy_dir.as_deref(), &name)
             || inner.tasks.values().any(|t| t.state.file_name == name)
         {
             crate::log::info("download refused: too many files with this name");
@@ -621,14 +629,13 @@ impl DownloadManager {
             return None;
         }
         let downloads_dir = inner.downloads_dir.clone();
+        let legacy_dir = inner.legacy_downloads_dir.clone();
         let name = dedupe_file_name(&raw_name, |candidate| {
-            downloads_dir.join(candidate).exists()
-                || downloads_dir.join(format!("{candidate}.part")).exists()
+            name_taken_in_dirs(&downloads_dir, legacy_dir.as_deref(), candidate)
                 || inner.tasks.values().any(|t| t.state.file_name == candidate)
         });
         // AUDIT 0.40.1: same exhaustion guard as `add`.
-        if downloads_dir.join(&name).exists()
-            || downloads_dir.join(format!("{name}.part")).exists()
+        if name_taken_in_dirs(&downloads_dir, legacy_dir.as_deref(), &name)
             || inner.tasks.values().any(|t| t.state.file_name == name)
         {
             crate::log::info("download rejected record refused: too many files with this name");
@@ -792,12 +799,17 @@ impl DownloadManager {
         {
             let mut inner = lock(&self.shared.inner);
             let downloads_dir = inner.downloads_dir.clone();
+            let legacy_dir = inner.legacy_downloads_dir.clone();
             if let Some(rt) = inner.tasks.get_mut(&id) {
                 if matches!(
                     rt.state.status,
                     TaskStatus::Queued | TaskStatus::Paused | TaskStatus::Failed
                 ) {
-                    let part = part_path(&downloads_dir, &rt.state.file_name);
+                    let part = part_path_resolved(
+                        &downloads_dir,
+                        legacy_dir.as_deref(),
+                        &rt.state.file_name,
+                    );
                     rt.state.segments.clear();
                     rt.state.total = None;
                     rt.state.etag = None;
@@ -880,6 +892,7 @@ impl DownloadManager {
         let after = {
             let mut inner = lock(&self.shared.inner);
             let downloads_dir = inner.downloads_dir.clone();
+            let legacy_dir = inner.legacy_downloads_dir.clone();
             match inner.tasks.get(&id) {
                 Some(rt) => {
                     if matches!(rt.state.status, TaskStatus::Downloading) {
@@ -888,9 +901,17 @@ impl DownloadManager {
                         let host =
                             url_host(&rt.state.url).unwrap_or_else(|| "unknown host".to_string());
                         let file = if matches!(rt.state.status, TaskStatus::Complete) {
-                            downloads_dir.join(&rt.state.file_name)
+                            resolve_task_file(
+                                &downloads_dir,
+                                legacy_dir.as_deref(),
+                                &rt.state.file_name,
+                            )
                         } else {
-                            part_path(&downloads_dir, &rt.state.file_name)
+                            part_path_resolved(
+                                &downloads_dir,
+                                legacy_dir.as_deref(),
+                                &rt.state.file_name,
+                            )
                         };
                         inner.tasks.remove(&id);
                         inner.order.retain(|t| *t != id);
@@ -946,6 +967,7 @@ impl DownloadManager {
         let (ids, parts): (Vec<u64>, Vec<PathBuf>) = {
             let mut inner = lock(&self.shared.inner);
             let downloads_dir = inner.downloads_dir.clone();
+            let legacy_dir = inner.legacy_downloads_dir.clone();
             let mut ids: Vec<u64> = Vec::new();
             let mut parts: Vec<PathBuf> = Vec::new();
             for rt in inner.tasks.values() {
@@ -954,7 +976,11 @@ impl DownloadManager {
                     TaskStatus::Complete => ids.push(rt.state.id),
                     TaskStatus::Failed | TaskStatus::Paused | TaskStatus::Queued => {
                         ids.push(rt.state.id);
-                        parts.push(part_path(&downloads_dir, &rt.state.file_name));
+                        parts.push(part_path_resolved(
+                            &downloads_dir,
+                            legacy_dir.as_deref(),
+                            &rt.state.file_name,
+                        ));
                     }
                 }
             }
@@ -984,7 +1010,15 @@ impl DownloadManager {
         let inner = lock(&self.shared.inner);
         let rt = inner.tasks.get(&id)?;
         if matches!(rt.state.status, TaskStatus::Complete) {
-            Some(inner.downloads_dir.join(&rt.state.file_name))
+            // F-A1: a file finished under <=0.40.3 lives in
+            // the legacy folder; resolve current-then-legacy
+            // (this also serves Open-folder, whose dir is
+            // this path's parent in the coordinator).
+            Some(resolve_task_file(
+                &inner.downloads_dir,
+                inner.legacy_downloads_dir.as_deref(),
+                &rt.state.file_name,
+            ))
         } else {
             None
         }
@@ -1055,6 +1089,7 @@ impl DownloadManager {
         let after = {
             let mut inner = lock(&self.shared.inner);
             let downloads_dir = inner.downloads_dir.clone();
+            let legacy_dir = inner.legacy_downloads_dir.clone();
             match inner.tasks.get_mut(&id) {
                 Some(rt) => {
                     // AUDIT 0.32.2 (Fix 2): a running task is
@@ -1079,7 +1114,11 @@ impl DownloadManager {
                     let part = if matches!(rt.state.status, TaskStatus::Complete) {
                         None
                     } else {
-                        Some(part_path(&downloads_dir, &rt.state.file_name))
+                        Some(part_path_resolved(
+                            &downloads_dir,
+                            legacy_dir.as_deref(),
+                            &rt.state.file_name,
+                        ))
                     };
                     inner.tasks.remove(&id);
                     inner.order.retain(|t| *t != id);
@@ -1294,6 +1333,24 @@ impl DownloadManager {
         lock(&self.shared.inner).downloads_dir.clone()
     }
 
+    /// Set the legacy beside-exe downloads folder (0.41.0
+    /// WS-D, F-A1): the read-only fallback for task-file
+    /// resolution, persisted in the app state by the
+    /// startup migration. An empty path, or one equal to
+    /// the current downloads folder, is stored as `None`
+    /// (no fallback needed). New downloads never land
+    /// there; only lookups for EXISTING task files use it.
+    pub fn set_legacy_downloads_dir(&self, dir: Option<PathBuf>) {
+        let mut inner = lock(&self.shared.inner);
+        inner.legacy_downloads_dir =
+            dir.filter(|p| !p.as_os_str().is_empty() && *p != inner.downloads_dir);
+    }
+
+    /// The legacy downloads fallback folder, when set.
+    pub fn legacy_downloads_dir(&self) -> Option<PathBuf> {
+        lock(&self.shared.inner).legacy_downloads_dir.clone()
+    }
+
     /// Shutdown path (the app's WinClose arm calls this before
     /// teardown): set every running task's control to Pause and
     /// SYNCHRONOUSLY persist every task's state, snapshotting
@@ -1343,8 +1400,23 @@ impl DownloadManager {
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-fn part_path(downloads_dir: &std::path::Path, file_name: &str) -> PathBuf {
-    downloads_dir.join(format!("{file_name}.part"))
+/// The current + legacy downloads folders from the shared
+/// state (0.41.0 WS-D, F-A1), for the free functions that
+/// resolve task files outside a manager method.
+fn downloads_dirs(shared: &Arc<Shared>) -> (PathBuf, Option<PathBuf>) {
+    let inner = lock(&shared.inner);
+    (
+        inner.downloads_dir.clone(),
+        inner.legacy_downloads_dir.clone(),
+    )
+}
+
+/// A task's `.part` path with the F-A1 legacy fallback:
+/// the current folder's `.part` when it exists there,
+/// else the legacy folder's when it exists there, else
+/// the current folder's (the create/report default).
+fn part_path_resolved(downloads_dir: &Path, legacy_dir: Option<&Path>, file_name: &str) -> PathBuf {
+    resolve_task_part_file(downloads_dir, legacy_dir, file_name)
 }
 
 fn bump_and_notify(shared: &Arc<Shared>) {
@@ -1743,13 +1815,18 @@ fn promote_retry(shared: &Arc<Shared>, id: u64, expected: u32) {
     {
         let mut inner = lock(&shared.inner);
         let downloads_dir = inner.downloads_dir.clone();
+        let legacy_dir = inner.legacy_downloads_dir.clone();
         if let Some(rt) = inner.tasks.get_mut(&id) {
             if matches!(rt.state.status, TaskStatus::Failed)
                 && rt.retry_not_before != 0
                 && rt.state.auto_retries == expected
             {
                 let part = if rt.retry_restart {
-                    let part = part_path(&downloads_dir, &rt.state.file_name);
+                    let part = part_path_resolved(
+                        &downloads_dir,
+                        legacy_dir.as_deref(),
+                        &rt.state.file_name,
+                    );
                     rt.state.segments.clear();
                     rt.state.total = None;
                     rt.state.etag = None;
@@ -1829,6 +1906,7 @@ fn refresh_link_thread(
     {
         let mut inner = lock(&shared.inner);
         let downloads_dir = inner.downloads_dir.clone();
+        let legacy_dir = inner.legacy_downloads_dir.clone();
         if let Some(rt) = inner.tasks.get_mut(&id) {
             // AUDIT 0.40.1: revalidate before applying. Through
             // 0.35.1 the probe's outcome was written over
@@ -1850,7 +1928,11 @@ fn refresh_link_thread(
                 rt.state.last_modified = probe.facts.last_modified.clone();
                 let part = if matches!(decision, RefreshDecision::RebindRestart) {
                     rt.state.segments.clear();
-                    Some(part_path(&downloads_dir, &rt.state.file_name))
+                    Some(part_path_resolved(
+                        &downloads_dir,
+                        legacy_dir.as_deref(),
+                        &rt.state.file_name,
+                    ))
                 } else {
                     None
                 };
@@ -1973,8 +2055,14 @@ fn run_task(shared: Arc<Shared>, id: u64, tok: u64) {
 
     // ---- Filename: the disposition name replaces the locked
     // name ONLY when the task has never started. ----
-    let downloads_dir = lock(&shared.inner).downloads_dir.clone();
-    let part = part_path(&downloads_dir, &state.file_name);
+    let (downloads_dir, legacy_dir) = downloads_dirs(&shared);
+    // F-A1: the .part may live in the legacy folder (an
+    // unfinished <=0.40.3 task) — every existence/size
+    // check below, the spot check, and the workers all
+    // work on this resolved path, so a legacy resume
+    // continues the legacy file instead of starting a
+    // phantom second .part in the current folder.
+    let part = part_path_resolved(&downloads_dir, legacy_dir.as_deref(), &state.file_name);
     if state.downloaded() == 0 && !part.exists() {
         if let Some(raw) = &probe.disposition_name {
             let candidate = sanitize_file_name(raw);
@@ -1990,8 +2078,7 @@ fn run_task(shared: Arc<Shared>, id: u64, tok: u64) {
                 // into ONE shared .part file.
                 let mut inner = lock(&shared.inner);
                 let renamed = dedupe_file_name(&candidate, |cand| {
-                    downloads_dir.join(cand).exists()
-                        || downloads_dir.join(format!("{cand}.part")).exists()
+                    name_taken_in_dirs(&downloads_dir, inner.legacy_downloads_dir.as_deref(), cand)
                         || inner
                             .tasks
                             .values()
@@ -2000,12 +2087,14 @@ fn run_task(shared: Arc<Shared>, id: u64, tok: u64) {
                 // AUDIT 0.40.1: dedupe exhaustion returns a
                 // still-taken name — keep the current name
                 // rather than claim a colliding one.
-                let renamed = if downloads_dir.join(&renamed).exists()
-                    || downloads_dir.join(format!("{renamed}.part")).exists()
-                    || inner
-                        .tasks
-                        .values()
-                        .any(|t| t.state.id != id && t.state.file_name == renamed)
+                let renamed = if name_taken_in_dirs(
+                    &downloads_dir,
+                    inner.legacy_downloads_dir.as_deref(),
+                    &renamed,
+                ) || inner
+                    .tasks
+                    .values()
+                    .any(|t| t.state.id != id && t.state.file_name == renamed)
                 {
                     state.file_name.clone()
                 } else {
@@ -2019,7 +2108,7 @@ fn run_task(shared: Arc<Shared>, id: u64, tok: u64) {
             }
         }
     }
-    let part = part_path(&downloads_dir, &state.file_name);
+    let part = part_path_resolved(&downloads_dir, legacy_dir.as_deref(), &state.file_name);
 
     // ---- Resume decision + plan. ----
     let mut decision = resume_decision(&state, &probe.facts);
@@ -2119,7 +2208,12 @@ fn run_task(shared: Arc<Shared>, id: u64, tok: u64) {
         // free space is knowable and the file's growth past
         // its current on-disk size exceeds it, fail BEFORE
         // set_len with an honest error.
-        if let Some(free) = free_disk_bytes(&downloads_dir) {
+        // AUDIT 0.41.1 (Front D D-7): measure the volume
+        // the `.part` actually lives on — a resumed legacy
+        // task's part sits in the LEGACY folder, which may
+        // be a different volume than the current downloads
+        // folder this gate used to measure.
+        if let Some(free) = free_disk_bytes(part.parent().unwrap_or(&downloads_dir)) {
             let on_disk = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
             if total.saturating_sub(on_disk) > free {
                 fail_or_wind_down(
@@ -2501,7 +2595,7 @@ fn wind_down_stopped(
         return;
     }
     let control = control_of(shared, id);
-    let downloads_dir = lock(&shared.inner).downloads_dir.clone();
+    let (downloads_dir, legacy_dir) = downloads_dirs(shared);
     let mut state = state.clone();
     if let Some(planner) = planner {
         lock(planner).sync_into(&mut state);
@@ -2514,7 +2608,11 @@ fn wind_down_stopped(
                 inner.tasks.remove(&id);
                 inner.order.retain(|t| *t != id);
             }
-            let _ = std::fs::remove_file(part_path(&downloads_dir, &state.file_name));
+            let _ = std::fs::remove_file(part_path_resolved(
+                &downloads_dir,
+                legacy_dir.as_deref(),
+                &state.file_name,
+            ));
             let state_dir = lock(&shared.inner).state_dir.clone();
             delete_task_file(&state_dir, id);
             let host = url_host(&state.url).unwrap_or_else(|| "unknown host".to_string());
@@ -2586,6 +2684,16 @@ fn finalize_complete(shared: &Arc<Shared>, id: u64, mut state: TaskState, part: 
         }
     }
     let downloads_dir = lock(&shared.inner).downloads_dir.clone();
+    // F-A1: a resumed legacy .part finalizes BESIDE
+    // itself (the rename stays in one folder, and the
+    // finished file is then found by the same
+    // current-then-legacy resolution). For every
+    // ordinary task the .part is in the downloads
+    // folder, so this directory IS `downloads_dir`.
+    let final_dir = part
+        .parent()
+        .map(|parent| parent.to_path_buf())
+        .unwrap_or_else(|| downloads_dir.clone());
     // Re-dedupe at rename time against the folder: the locked
     // name was free at ADD time, but a same-named file may have
     // landed since (another task's completion is already
@@ -2593,8 +2701,8 @@ fn finalize_complete(shared: &Arc<Shared>, id: u64, mut state: TaskState, part: 
     // files that arrived from outside the manager). Our own
     // final file does not exist yet — only its `.part` does —
     // so a plain existence check is honest.
-    let final_name = dedupe_file_name(&state.file_name, |cand| downloads_dir.join(cand).exists());
-    let final_path = downloads_dir.join(&final_name);
+    let final_name = dedupe_file_name(&state.file_name, |cand| final_dir.join(cand).exists());
+    let final_path = final_dir.join(&final_name);
     // AUDIT 0.40.1: `dedupe_file_name` returns its last tried
     // name when every candidate is taken (the ~100k-collision
     // exhaustion path) — renaming onto it would REPLACE a
@@ -3310,6 +3418,60 @@ mod tests {
             status_of(&mgr, id),
             TaskStatus::Paused,
             "positive control: wind-down with control=Pause parks the task"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// F-A1 (0.41.0 WS-D): with a legacy downloads folder
+    /// set, a Complete task's path resolves to the legacy
+    /// folder when the file is only there, the current
+    /// folder wins when the file is in both, no legacy
+    /// set keeps the old current-only answer, and a
+    /// restart removes the LEGACY `.part` (the resume
+    /// family's deletion path resolves the same way).
+    /// (Bin-crate test: Windows-target compile-checked in
+    /// the battery's iteration 10, like T2–T4 — the host
+    /// harness builds `--no-default-features`, which
+    /// excludes this bin.)
+    #[test]
+    fn fa1_completed_path_and_restart_use_the_legacy_fallback() {
+        let (root, downloads_dir, state_dir) = test_dirs("fa1");
+        let legacy_dir = root.join("legacy_downloads");
+        std::fs::create_dir_all(&legacy_dir).expect("legacy dir");
+        let done = bare_state(7, "done.bin", TaskStatus::Complete);
+        save_task(&state_dir, &done).expect("save complete task");
+        std::fs::write(legacy_dir.join("done.bin"), b"finished").expect("legacy file");
+        let paused = bare_state(8, "half.bin", TaskStatus::Paused);
+        save_task(&state_dir, &paused).expect("save paused task");
+        std::fs::write(legacy_dir.join("half.bin.part"), b"half").expect("legacy part");
+
+        let mgr = test_manager(downloads_dir.clone(), state_dir, 3);
+        // No legacy set: the pre-F-A1 answer, current only.
+        assert_eq!(
+            mgr.completed_path(7),
+            Some(downloads_dir.join("done.bin")),
+            "no legacy set: current folder only"
+        );
+        mgr.set_legacy_downloads_dir(Some(legacy_dir.clone()));
+        assert_eq!(mgr.legacy_downloads_dir(), Some(legacy_dir.clone()));
+        assert_eq!(
+            mgr.completed_path(7),
+            Some(legacy_dir.join("done.bin")),
+            "file only in legacy: the legacy path"
+        );
+        // The current folder wins when the file is in both.
+        std::fs::write(downloads_dir.join("done.bin"), b"finished").expect("current file");
+        assert_eq!(
+            mgr.completed_path(7),
+            Some(downloads_dir.join("done.bin")),
+            "file in both: current wins"
+        );
+        std::fs::remove_file(downloads_dir.join("done.bin")).expect("remove current file");
+        // Restart deletes the resolved (legacy) `.part`.
+        mgr.restart(8);
+        assert!(
+            !legacy_dir.join("half.bin.part").exists(),
+            "restart must remove the legacy .part it resolved"
         );
         let _ = std::fs::remove_dir_all(&root);
     }

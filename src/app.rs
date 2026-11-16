@@ -88,7 +88,8 @@
 //! - Background work (localhost detector, file watcher, Shield
 //!   compile) reaches the UI thread only through `EventLoopProxy`
 //!   user events.
-//! - Diagnostics go to `<data dir>\pico.log` (v27: `data\` beside the exe); URLs are logged
+//! - Diagnostics go to `<data dir>\pico.log` (0.41.0: the data dir is
+//!   `%LOCALAPPDATA%\Pico` — nothing is written beside the exe); URLs are logged
 //!   through `redact_url` (AUDIT M5) — queries/fragments never land
 //!   in the log.
 
@@ -122,6 +123,7 @@ use pico_core::core::dlcmd::DOWNLOADS_URL;
 use pico_core::core::dlcoord::{Coordinator, DlSettings};
 use pico_core::core::fileopen::{resolve_open_target, OpenResolveError};
 use pico_core::core::history::TabHistory;
+use pico_core::core::icons::{self, IconCache};
 use pico_core::core::ipc::{
     looks_like_lite_chosen, looks_like_shield_prune, looks_like_shield_pruned, parse_command,
     parse_lite_chosen, parse_nav_note, parse_shield_prune, parse_shield_pruned, url_has_userinfo,
@@ -131,11 +133,15 @@ use pico_core::core::ipc::{
 use pico_core::core::layout;
 use pico_core::core::lite::LiteRuntime;
 use pico_core::core::media::MediaProbeBudget;
+use pico_core::core::navcmd;
+use pico_core::core::navstore::{self, NavStore};
 use pico_core::core::redact::redact_url;
 use pico_core::core::server::FileServer;
 use pico_core::core::shield::ShieldRuntime;
 use pico_core::core::state::{self as pstore, LoadOutcome, PersistState, WindowRect};
+use pico_core::core::tabcmd;
 use pico_core::core::urlstate::{HistEffect, UrlEvent, UrlState};
+use pico_core::core::visibility::{self, PaintState, TabViewFact, VisStep};
 
 use crate::log;
 
@@ -190,6 +196,47 @@ fn log_save_failure(e: &std::io::Error) {
     }
 }
 
+/// The nav store's save-failure log (0.41.0): the same
+/// once-per-session discipline as the state writer's.
+static NAV_SAVE_FAIL_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn log_nav_save_failure(e: &std::io::Error) {
+    if !NAV_SAVE_FAIL_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        log::error(&format!(
+            "nav save failed: {e} (further failures this session are not logged)"
+        ));
+    }
+}
+
+/// The favicon store's refusal/failure log (0.41.2): the
+/// same once-per-session discipline as the save writers'
+/// — a site with an oversized or non-PNG icon must not
+/// fill the log, and the degradation (letter tile) is
+/// already user-visible.
+static FAVICON_STORE_FAIL_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn log_favicon_store_failure(verdict: icons::StoreVerdict) {
+    if !FAVICON_STORE_FAIL_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        log::error(&format!(
+            "favicon store refused an icon ({verdict:?}); letter tile remains \
+             (further refusals this session are not logged)"
+        ));
+    }
+}
+
+/// Wall-clock milliseconds since the Unix epoch (0.41.0):
+/// the timestamp source for the bookmarks/history store.
+/// (`stats_now_ms` is a monotonic process clock — right
+/// for durations, wrong for persisted visit times.)
+fn wall_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 // ---------------------------------------------------------------------------
 // Embedded pages (pico:// protocol)
 // ---------------------------------------------------------------------------
@@ -227,6 +274,26 @@ struct SharedData {
     /// Live updates ride `__picoSetDownloadsCard` pushes
     /// from `push_state`.
     downloads_card: pico_core::core::dlcoord::DlCardView,
+    /// 0.41.0: the start page's Bookmarks section data,
+    /// mirrored for start renders (live updates ride
+    /// `__picoSetBookmarks`).
+    nav_bookmarks: Vec<navstore::Bookmark>,
+    /// 0.41.0: the start page's Recent section data (the
+    /// newest few history entries), mirrored for start
+    /// renders (live updates ride `__picoSetRecentHistory`).
+    nav_recent: Vec<navstore::HistoryEntry>,
+    /// 0.41.0: the History page's init JSON (`{entries}`),
+    /// mirrored for history renders; `push_history_page`
+    /// refreshes it whenever it rebuilds the JSON, like
+    /// `downloads_init`. Carries NO theme —
+    /// `render_history` bakes it in at serve time.
+    history_init: String,
+    /// 0.41.2: the favicon cache's positive entries (host
+    /// key → `data:` URI), mirrored for serve-time
+    /// renders (`render_start` reads it the way it reads
+    /// `nav_bookmarks`); the app refreshes it whenever it
+    /// rebuilds the nav payloads.
+    icon_uris: std::collections::HashMap<String, String>,
 }
 type Shared = Arc<Mutex<SharedData>>;
 
@@ -249,6 +316,8 @@ fn render_start(shared: &Shared) -> String {
         "palette": data.palette,
         "stats": data.stats,
         "downloads": data.downloads_card.clone(),
+        "bookmarks": bookmarks_json(&data.nav_bookmarks, &data.icon_uris),
+        "recentHistory": history_entries_json(&data.nav_recent, &data.icon_uris),
     });
     let init_json = serde_json::to_string(&init).unwrap_or_else(|_| "null".to_string());
     assets::assemble_start_html(&init_json)
@@ -265,6 +334,97 @@ fn render_start(shared: &Shared) -> String {
 /// inputs an internal page has; the stored init JSON and
 /// every data push carry no theme at all. A stored init
 /// that fails to parse is served raw (never a panic).
+/// One entry's favicon field (0.41.2): the cached
+/// icon's `data:` URI for the entry URL's host, or
+/// JSON null — the pages render the letter tile for
+/// null (and for a missing field: the strict-parser
+/// discipline is that an absent icon degrades, never
+/// breaks the row). `icons` is a host-key → URI map
+/// (`IconCache::uri_map` / the shared mirror of it).
+fn icon_json(icons: &std::collections::HashMap<String, String>, url: &str) -> serde_json::Value {
+    match icons::icon_host_key(url).and_then(|key| icons.get(&key)) {
+        Some(uri) => serde_json::Value::String(uri.clone()),
+        None => serde_json::Value::Null,
+    }
+}
+
+/// One history entry as the internal pages consume it
+/// (0.41.0): the store's snake_case fields under the
+/// pages' camelCase names (`lastVisited`). 0.41.2: the
+/// `icon` field rides along (see [`icon_json`]).
+fn history_entry_json(
+    e: &navstore::HistoryEntry,
+    icons: &std::collections::HashMap<String, String>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "url": e.url,
+        "title": e.title,
+        "lastVisited": e.last_visited,
+        "visits": e.visits,
+        "icon": icon_json(icons, &e.url),
+    })
+}
+
+fn history_entries_json(
+    entries: &[navstore::HistoryEntry],
+    icons: &std::collections::HashMap<String, String>,
+) -> serde_json::Value {
+    serde_json::Value::Array(
+        entries
+            .iter()
+            .map(|e| history_entry_json(e, icons))
+            .collect(),
+    )
+}
+
+fn bookmarks_json(
+    bookmarks: &[navstore::Bookmark],
+    icons: &std::collections::HashMap<String, String>,
+) -> serde_json::Value {
+    serde_json::Value::Array(
+        bookmarks
+            .iter()
+            .map(|b| {
+                serde_json::json!({
+                    "url": b.url,
+                    "title": b.title,
+                    "addedAt": b.added_at,
+                    "icon": icon_json(icons, &b.url),
+                })
+            })
+            .collect(),
+    )
+}
+
+/// The History page's initial render (0.41.0): mirrors
+/// `render_downloads` exactly — the shared init JSON is
+/// assembled into the page document, with the CURRENT
+/// theme/palette merged in at assembly time from the
+/// shared mirror (the page's two theme inputs are this
+/// bake and the live `__picoTheme` push, nothing else).
+fn render_history(shared: &Shared) -> String {
+    let data = shared
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let init_json = match serde_json::from_str::<serde_json::Value>(&data.history_init) {
+        Ok(mut v) => {
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert(
+                    "theme".to_string(),
+                    serde_json::Value::String(data.theme.clone()),
+                );
+                obj.insert(
+                    "palette".to_string(),
+                    serde_json::Value::String(data.palette.clone()),
+                );
+            }
+            serde_json::to_string(&v).unwrap_or_else(|_| data.history_init.clone())
+        }
+        Err(_) => data.history_init.clone(),
+    };
+    assets::assemble_history_html(&init_json)
+}
+
 fn render_downloads(shared: &Shared) -> String {
     let data = shared
         .lock()
@@ -289,8 +449,8 @@ fn render_downloads(shared: &Shared) -> String {
 }
 
 /// Handler for the `pico://` custom protocol, registered on every
-/// webview. Serves only three documents: the chrome, the start
-/// page and (0.33) the Downloads page.
+/// webview. Serves only four documents: the chrome, the start
+/// page, (0.33) the Downloads page and (0.41.0) the History page.
 /// (AUDIT L11: it intentionally does not distinguish webviews — the
 /// documents carry no secrets, and content navigation to them is
 /// denied by the navigation handler.)
@@ -307,6 +467,8 @@ fn pico_protocol_handler(
             (200, render_start(&shared))
         } else if route == DOWNLOADS_URL {
             (200, render_downloads(&shared))
+        } else if route == navcmd::HISTORY_URL {
+            (200, render_history(&shared))
         } else {
             (404, "Pico: unknown internal page".to_string())
         };
@@ -340,6 +502,16 @@ fn is_action_url(u: &str) -> bool {
 
 fn is_web_url(u: &str) -> bool {
     web_origin(u).is_some()
+}
+
+/// Is this URL the start page (0.41.0)? The action
+/// dispatch's comparison, shared with the nav gate:
+/// normalize, strip query/fragment, trim trailing
+/// slashes, compare exactly against the start URL.
+fn on_start_page(u: &str) -> bool {
+    let n = normalize_pico_url(u);
+    let base = n.split(['?', '#']).next().unwrap_or("");
+    base.trim_end_matches('/') == START_URL
 }
 
 fn truncate_chars(s: &str, max: usize) -> String {
@@ -447,19 +619,30 @@ fn attach_panel_focus_close(view: &WebView, tab: u64, proxy: EventLoopProxy<User
 #[cfg(not(windows))]
 fn attach_panel_focus_close(_view: &WebView, _tab: u64, _proxy: EventLoopProxy<UserEvent>) {}
 
-/// Register the Ctrl+J downloads accelerator on one content
-/// view (0.35, WS5): the controller's AcceleratorKeyPressed
-/// event is the one signal that sees a key chord while the
-/// PAGE holds focus — through 0.34 Ctrl+J lived only in the
-/// chrome document's own key handler, so the chord did
-/// nothing from content focus. The handler matches exactly
-/// one chord (a KEY_DOWN with virtual key 0x4A — VK_J —
-/// while Ctrl is held), marks it handled so the page never
-/// sees it, and forwards [`UserEvent::DownloadsPageShortcut`];
-/// key-up and system-key kinds are ignored, and every other
-/// key passes through untouched. Registered ONLY on content
-/// views (build_content_view) — the chrome keeps its own
-/// handler, so the chord cannot double-fire. Failures are
+/// Register the page accelerators on one content view
+/// (0.35, WS5; chords 0.41.0): the controller's
+/// AcceleratorKeyPressed event is the one signal that sees
+/// a key chord while the PAGE holds focus — through 0.34
+/// Ctrl+J lived only in the chrome document's own key
+/// handler, so the chord did nothing from content focus.
+/// The handler matches exactly five chords (a KEY_DOWN
+/// with virtual key 0x4A — VK_J —, 0x48 — VK_H —, or 0x44
+/// — VK_D — while Ctrl is held and Shift/Alt are not; or
+/// 0x21 — VK_PRIOR, PageUp — or 0x22 — VK_NEXT, PageDown —
+/// while Ctrl AND Shift are held and Alt is not),
+/// marks each handled so the page never sees it, and
+/// forwards the matching event ([`UserEvent::DownloadsPageShortcut`],
+/// [`UserEvent::HistoryPageShortcut`],
+/// [`UserEvent::BookmarkShortcut`],
+/// [`UserEvent::MoveTabShortcut`]); key-up and system-key
+/// kinds are ignored, and every other key passes through
+/// untouched. The PageUp/PageDown pair is free: no
+/// existing binding in the tree names either key (the
+/// chrome's Ctrl+Shift+Tab cycle is a different chord,
+/// and plain/Ctrl PageUp stay the page's own scrolling).
+/// Registered ONLY on content views
+/// (build_content_view) — the chrome keeps its own
+/// handler, so no chord can double-fire. Failures are
 /// logged, never fatal (the focus-close attach's outcome
 /// style): an older runtime may lack the event, and the
 /// browser must not die for a shortcut.
@@ -499,26 +682,41 @@ fn attach_downloads_shortcut(view: &WebView, proxy: EventLoopProxy<UserEvent>) {
                         let mut vk: u32 = 0;
                         args.VirtualKey(&mut vk)
                             .map_err(|e| format!("VirtualKey(): {e}"))?;
-                        if vk != 0x4A {
-                            return Ok(()); // not VK_J
-                        }
+                        let event = match vk {
+                            0x4A => UserEvent::DownloadsPageShortcut,       // VK_J
+                            0x48 => UserEvent::HistoryPageShortcut,         // VK_H
+                            0x44 => UserEvent::BookmarkShortcut,            // VK_D
+                            0x21 => UserEvent::MoveTabShortcut { dir: -1 }, // VK_PRIOR (PageUp)
+                            0x22 => UserEvent::MoveTabShortcut { dir: 1 },  // VK_NEXT (PageDown)
+                            _ => return Ok(()), // not one of the five chords
+                        };
                         // Ctrl held reads as a negative i16 (the
                         // high bit is the "down" bit).
                         if GetKeyState(i32::from(VK_CONTROL)) >= 0 {
                             return Ok(());
                         }
-                        // AUDIT 0.40.1: the chord is Ctrl+J
-                        // exactly — with Shift or Alt also down
-                        // it is a different chord (a page or
+                        // AUDIT 0.40.1: the chord is exact
+                        // — with Shift or Alt also down it is
+                        // a different chord (a page or
                         // DevTools shortcut) and stays the page's.
-                        if GetKeyState(i32::from(VK_SHIFT)) < 0
-                            || GetKeyState(i32::from(VK_MENU)) < 0
-                        {
+                        // 0.41.0: the tab-move pair INVERTS the
+                        // Shift half of that rule — its chord IS
+                        // Ctrl+Shift+PageUp/PageDown — while Alt
+                        // still vetoes every chord.
+                        let shift_down = GetKeyState(i32::from(VK_SHIFT)) < 0;
+                        if GetKeyState(i32::from(VK_MENU)) < 0 {
+                            return Ok(());
+                        }
+                        if matches!(vk, 0x21 | 0x22) {
+                            if !shift_down {
+                                return Ok(()); // plain Ctrl+PageUp stays the page's
+                            }
+                        } else if shift_down {
                             return Ok(());
                         }
                         args.SetHandled(true)
                             .map_err(|e| format!("SetHandled(): {e}"))?;
-                        let _ = proxy.send_event(UserEvent::DownloadsPageShortcut);
+                        let _ = proxy.send_event(event);
                         Ok(())
                     })();
                 }
@@ -536,12 +734,467 @@ fn attach_downloads_shortcut(view: &WebView, proxy: EventLoopProxy<UserEvent>) {
         Ok(())
     })();
     if let Err(why) = outcome {
-        log::info(&format!("downloads shortcut unavailable: {why}"));
+        log::info(&format!("page shortcuts unavailable: {why}"));
     }
 }
 
 #[cfg(not(windows))]
 fn attach_downloads_shortcut(_view: &WebView, _proxy: EventLoopProxy<UserEvent>) {}
+
+/// Register the raw NavigationCompleted observer on one
+/// content view (0.41.1, Front B F1; verdict form
+/// 0.41.2; id pairing AUDIT 0.41.3, Front A F2): wry's
+/// page-load Finished event discards the completion
+/// args, so this is the only place a navigation's
+/// verdict survives. The handler reads the verdict from
+/// THIS navigation's own args — IsSuccess plus
+/// HttpStatusCode via
+/// `ICoreWebView2NavigationCompletedEventArgs2` (0 when
+/// no response was received, and 0 when the Args2 cast
+/// is unavailable: successes still record on IsSuccess
+/// alone) — plus the navigation's own `NavigationId`
+/// from the base args (0 when that read fails), and
+/// forwards all of it as
+/// [`UserEvent::NavigationSettled`]; the event arm pairs
+/// the verdict with its pending history candidate BY
+/// THAT ID (`core::navstore::PendingVisit`), never by
+/// whatever URL a live Source read would name at
+/// dispatch time. (0.41.1 also read the core's LIVE
+/// Source here and keyed a per-tab failed-source mark by
+/// it; Source names whatever page is current at dispatch
+/// time, so an aborted navigation's verdict landed on
+/// the NEXT page's URL and refused its record — the
+/// 0.41.2 history witness. The 0.41.2 form still read
+/// its candidate URL from the Finished event, whose URL
+/// wry likewise derives from live Source, so the
+/// supersede interleave could pair a verdict with the
+/// next navigation's URL; id pairing is the 0.41.3 fix.
+/// See BUILD_NOTES.)
+/// Registration failure is logged, never fatal (the
+/// shortcut attach's outcome style): without it, no
+/// verdicts arrive and pending visits flush as records
+/// at the next navigation/tab close — the 0.41.0
+/// record-everything behavior, never silence.
+#[cfg(windows)]
+fn attach_nav_settled(view: &WebView, tab: u64, proxy: EventLoopProxy<UserEvent>) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2NavigationCompletedEventArgs2;
+    use webview2_com::NavigationCompletedEventHandler;
+    use windows_core::Interface;
+    use wry::WebViewExtWindows;
+
+    // AUDIT 0.41.3 (A-F6): an Args2 cast / HttpStatusCode
+    // read failure silently defaulting the status to 0
+    // would make every HTTP error page look like a
+    // transport failure — log it ONCE per session (the
+    // favicon-runtime warning's AtomicBool pattern).
+    static ARGS2_STATUS_WARNED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    let outcome = (|| -> Result<(), String> {
+        let controller = view.controller();
+        // SAFETY: the controller outlives this call; the
+        // core it returns is the view's own WebView2.
+        let core =
+            unsafe { controller.CoreWebView2() }.map_err(|e| format!("CoreWebView2(): {e}"))?;
+        let handler = NavigationCompletedEventHandler::create(Box::new(move |_sender, args| {
+            let Some(args) = args else {
+                return Ok(());
+            };
+            // SAFETY: the args are valid for this
+            // synchronous callback; the getters are
+            // documented, and a failed read simply
+            // forwards nothing — the pending visit then
+            // flushes as a record later (see the doc
+            // above), never a silent loss.
+            unsafe {
+                let _ = (|| -> Result<(), String> {
+                    let mut success = windows_core::BOOL::default();
+                    args.IsSuccess(&mut success)
+                        .map_err(|e| format!("IsSuccess(): {e}"))?;
+                    // AUDIT 0.41.3 (A-F2): the verdict's
+                    // identity — the base args expose the
+                    // navigation's own id; 0 when the read
+                    // fails (a 0 verdict matches no
+                    // candidate and decides nothing).
+                    let mut nav_id: u64 = 0;
+                    let _ = args.NavigationId(&mut nav_id);
+                    let http_status = match args
+                        .cast::<ICoreWebView2NavigationCompletedEventArgs2>()
+                    {
+                        Ok(args2) => {
+                            let mut status: i32 = 0;
+                            match args2.HttpStatusCode(&mut status) {
+                                Ok(()) => status,
+                                Err(_) => {
+                                    // AUDIT 0.41.3 (A-F6).
+                                    if !ARGS2_STATUS_WARNED
+                                        .swap(true, std::sync::atomic::Ordering::Relaxed)
+                                    {
+                                        log::info(
+                                            "nav-settled: HttpStatusCode read failed; \
+                                             http status defaults to 0 \
+                                             (logged once per session)",
+                                        );
+                                    }
+                                    0
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            // AUDIT 0.41.3 (A-F6).
+                            if !ARGS2_STATUS_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed)
+                            {
+                                log::info(
+                                    "nav-settled: cast to \
+                                     ICoreWebView2NavigationCompletedEventArgs2 failed; \
+                                     http status defaults to 0 \
+                                     (logged once per session)",
+                                );
+                            }
+                            0
+                        }
+                    };
+                    let _ = proxy.send_event(UserEvent::NavigationSettled {
+                        tab,
+                        nav_id,
+                        success: success.as_bool(),
+                        http_status,
+                    });
+                    Ok(())
+                })();
+            }
+            Ok(())
+        }));
+        let mut token: i64 = 0;
+        // SAFETY: the handler is a webview2-com callback
+        // object kept alive by the core's event table
+        // once registered; the token cell is a plain local.
+        unsafe {
+            core.add_NavigationCompleted(&handler, &mut token)
+                .map_err(|e| format!("NavigationCompleted registration: {e}"))?;
+        }
+        Ok(())
+    })();
+    if let Err(why) = outcome {
+        log::info(&format!("nav-settled observer unavailable: {why}"));
+    }
+}
+
+#[cfg(not(windows))]
+fn attach_nav_settled(_view: &WebView, _tab: u64, _proxy: EventLoopProxy<UserEvent>) {}
+
+/// Register the raw ContentLoading observer on one
+/// content view (AUDIT 0.41.3, Front A F2): the candidate
+/// half of the id-paired history recording whose verdict
+/// half is `attach_nav_settled`. ContentLoading fires
+/// when a navigation has committed and its document is
+/// about to load — at THAT dispatch the core's `Source`
+/// is the loading document's final URL, so the handler
+/// reads it synchronously inside the callback (wry's
+/// `url_from_webview` pattern: `Source` + `take_pwstr`),
+/// before any later navigation can advance it, and pairs
+/// it with the navigation's own `NavigationId` from the
+/// event args (0 when that read fails). The pair rides
+/// [`UserEvent::NavCandidate`] to the event loop, which
+/// queues it in the tab's `PendingVisit` BY ID. Empty and
+/// `about:blank` Sources name no page and are skipped
+/// here. Attached at the same place and with the same
+/// lifetime as `attach_nav_settled` (in
+/// `build_content_view`, which the retry path also runs),
+/// synchronously after the view is built and before the
+/// event loop pumps — the same argument every `attach_*`
+/// handler relies on for a fresh tab's initial navigation:
+/// registration lands before any event for that view can
+/// be dispatched to the loop.
+/// Registration failure is logged, never fatal (the
+/// nav-settled attach's outcome style): without it, no
+/// candidates arrive and no visits record from verdicts;
+/// pending candidates still flush as records at tab/app
+/// close.
+#[cfg(windows)]
+fn attach_nav_candidate(view: &WebView, tab: u64, proxy: EventLoopProxy<UserEvent>) {
+    use webview2_com::ContentLoadingEventHandler;
+    use wry::WebViewExtWindows;
+
+    let outcome = (|| -> Result<(), String> {
+        let controller = view.controller();
+        // SAFETY: the controller outlives this call; the
+        // core it returns is the view's own WebView2.
+        let core =
+            unsafe { controller.CoreWebView2() }.map_err(|e| format!("CoreWebView2(): {e}"))?;
+        let handler = ContentLoadingEventHandler::create(Box::new(move |sender, args| {
+            let Some(sender) = sender else {
+                return Ok(());
+            };
+            let Some(args) = args else {
+                return Ok(());
+            };
+            // SAFETY: the sender and args are valid for
+            // this synchronous callback; the Source getter
+            // follows wry's `url_from_webview` pattern
+            // (`take_pwstr` takes ownership of the
+            // CoTaskMem string), read HERE, inside the
+            // dispatch, while Source still names THIS
+            // loading document. A failed read forwards
+            // nothing — no candidate, no record from this
+            // navigation's verdict.
+            unsafe {
+                let _ = (|| -> Result<(), String> {
+                    let mut nav_id: u64 = 0;
+                    let _ = args.NavigationId(&mut nav_id);
+                    let mut ptr = windows_core::PWSTR::null();
+                    let url = if sender.Source(&mut ptr).is_ok() && !ptr.is_null() {
+                        webview2_com::take_pwstr(ptr)
+                    } else {
+                        String::new()
+                    };
+                    if url.is_empty() || url == "about:blank" {
+                        return Ok(());
+                    }
+                    let _ = proxy.send_event(UserEvent::NavCandidate { tab, nav_id, url });
+                    Ok(())
+                })();
+            }
+            Ok(())
+        }));
+        let mut token: i64 = 0;
+        // SAFETY: the handler is a webview2-com callback
+        // object kept alive by the core's event table
+        // once registered; the token cell is a plain local.
+        unsafe {
+            core.add_ContentLoading(&handler, &mut token)
+                .map_err(|e| format!("ContentLoading registration: {e}"))?;
+        }
+        Ok(())
+    })();
+    if let Err(why) = outcome {
+        log::info(&format!("nav-candidate observer unavailable: {why}"));
+    }
+}
+
+#[cfg(not(windows))]
+fn attach_nav_candidate(_view: &WebView, _tab: u64, _proxy: EventLoopProxy<UserEvent>) {}
+
+/// Register the favicon pipeline on one content view
+/// (0.41.2): a `FaviconChanged` registration on the
+/// view's `ICoreWebView2_15`. When the page's icon
+/// changes, the handler reads the core's current Source,
+/// derives the icon host key in core (`core::icons` —
+/// a non-recordable/internal source ends the pipeline
+/// silently), and asks the SAME core for the icon bytes
+/// with `GetFavicon` in PNG form: the browser fetched
+/// the page's declared icon from the page's own origin,
+/// so no extra fetch and no third-party service exists
+/// anywhere in this path. The completed handler drains
+/// the returned `IStream` in bounded chunks (an icon
+/// over the core cap is dropped here, before it can
+/// ferry across) and forwards the bytes as
+/// [`UserEvent::FaviconReceived`]; the event loop owns
+/// the cache write and the payload re-pushes.
+/// AUDIT 0.41.3: the completion re-derives the host key
+/// from the webview's CURRENT Source and drops the icon
+/// when it no longer matches the key captured at
+/// FaviconChanged time (A-F5 — the fetch is async and
+/// the page may have navigated), and an `IStream::Read`
+/// error fails the fetch whole instead of forwarding
+/// partial bytes (A-F9).
+///
+/// Degradation: the `ICoreWebView2_15` cast is the one
+/// hard requirement — an older WebView2 runtime does
+/// not have the interface. That failure is logged ONCE
+/// per session and the browser simply keeps the letter
+/// tiles it has always had; every other failure is
+/// logged per attach and is likewise never fatal (the
+/// nav-settled attach's outcome style).
+#[cfg(windows)]
+fn attach_favicon(view: &WebView, tab: u64, proxy: EventLoopProxy<UserEvent>) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2_15, COREWEBVIEW2_FAVICON_IMAGE_FORMAT_PNG,
+    };
+    use webview2_com::{FaviconChangedEventHandler, GetFaviconCompletedHandler};
+    use windows_core::Interface;
+    use wry::WebViewExtWindows;
+
+    static FAVICON_UNAVAILABLE_WARNED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    let core = match view.webview().cast::<ICoreWebView2_15>() {
+        Ok(core) => core,
+        Err(e) => {
+            if !FAVICON_UNAVAILABLE_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                log::info(&format!(
+                    "favicon unavailable (cast to ICoreWebView2_15: {e}); \
+                     letter tiles remain (logged once per session)"
+                ));
+            }
+            return;
+        }
+    };
+    let outcome = (|| -> Result<(), String> {
+        let handler = FaviconChangedEventHandler::create(Box::new(move |sender, _args| {
+            let Some(sender) = sender else {
+                return Ok(());
+            };
+            // SAFETY: sender is valid for the duration of
+            // this synchronous callback; the Source getter
+            // follows the established PWSTR pattern
+            // (`take_pwstr` takes ownership of the
+            // CoTaskMem string), and a failed read simply
+            // forwards nothing — the tab keeps its letter
+            // tile until the next change.
+            unsafe {
+                let _ = (|| -> Result<(), String> {
+                    let mut ptr = windows_core::PWSTR::null();
+                    let source = if sender.Source(&mut ptr).is_ok() {
+                        webview2_com::take_pwstr(ptr)
+                    } else {
+                        String::new()
+                    };
+                    // The key derivation is core's gate:
+                    // credentialed, internal and non-web
+                    // sources have no key and end here.
+                    let Some(host_key) = icons::icon_host_key(&source) else {
+                        return Ok(());
+                    };
+                    let core15 = sender
+                        .cast::<ICoreWebView2_15>()
+                        .map_err(|e| format!("cast sender to ICoreWebView2_15: {e}"))?;
+                    let completed_proxy = proxy.clone();
+                    // AUDIT 0.41.3 (A-F5): the completion
+                    // runs asynchronously, after the page
+                    // may have navigated — it re-reads the
+                    // webview's CURRENT Source from this
+                    // clone of the sender and re-derives
+                    // the host key before storing anything.
+                    let completed_sender = sender.clone();
+                    let completed =
+                        GetFaviconCompletedHandler::create(Box::new(move |error_code, stream| {
+                            if error_code.is_ok() {
+                                if let Some(stream) = stream {
+                                    // SAFETY: the stream is
+                                    // valid for this
+                                    // synchronous completion;
+                                    // reads are bounded
+                                    // chunk-by-chunk and the
+                                    // running total is capped
+                                    // at the core icon cap —
+                                    // an oversize icon is
+                                    // dropped whole, never
+                                    // forwarded truncated.
+                                    // The sender clone is
+                                    // likewise valid for this
+                                    // synchronous completion;
+                                    // its Source read follows
+                                    // the same PWSTR pattern
+                                    // as the capture-time read.
+                                    let bytes = {
+                                        let mut out: Vec<u8> = Vec::new();
+                                        let mut buf = [0u8; 8192];
+                                        loop {
+                                            let mut read: u32 = 0;
+                                            let hr = stream.Read(
+                                                buf.as_mut_ptr() as *mut core::ffi::c_void,
+                                                buf.len() as u32,
+                                                Some(&mut read),
+                                            );
+                                            if hr.is_err() {
+                                                // AUDIT 0.41.3
+                                                // (A-F9): a read
+                                                // error is a
+                                                // FAILED fetch —
+                                                // forward nothing,
+                                                // never the
+                                                // partial bytes,
+                                                // mirroring the
+                                                // oversize arm.
+                                                out.clear();
+                                                break;
+                                            }
+                                            if read == 0 {
+                                                break;
+                                            }
+                                            out.extend_from_slice(&buf[..read as usize]);
+                                            if out.len() > icons::MAX_ICON_BYTES {
+                                                out.clear();
+                                                break;
+                                            }
+                                        }
+                                        out
+                                    };
+                                    if !bytes.is_empty() {
+                                        // AUDIT 0.41.3 (A-F5):
+                                        // the bytes were
+                                        // fetched for the host
+                                        // key captured at
+                                        // FaviconChanged time;
+                                        // if the webview's
+                                        // CURRENT source now
+                                        // derives a different
+                                        // key (or none), the
+                                        // icon belongs to a
+                                        // page the tab has
+                                        // left — drop it, do
+                                        // not store it under
+                                        // either key.
+                                        let current_key = {
+                                            let mut ptr = windows_core::PWSTR::null();
+                                            let current_source =
+                                                if completed_sender.Source(&mut ptr).is_ok()
+                                                    && !ptr.is_null()
+                                                {
+                                                    webview2_com::take_pwstr(ptr)
+                                                } else {
+                                                    String::new()
+                                                };
+                                            icons::icon_host_key(&current_source)
+                                        };
+                                        if current_key.as_deref() != Some(host_key.as_str()) {
+                                            log::info(&format!(
+                                                "favicon dropped for tab {tab}: host key \
+                                                 changed between FaviconChanged and \
+                                                 GetFavicon completion (captured {host_key})"
+                                            ));
+                                            return Ok(());
+                                        }
+                                        let _ = completed_proxy.send_event(
+                                            UserEvent::FaviconReceived {
+                                                tab,
+                                                host_key: host_key.clone(),
+                                                bytes,
+                                            },
+                                        );
+                                    }
+                                }
+                            }
+                            Ok(())
+                        }));
+                    core15
+                        .GetFavicon(COREWEBVIEW2_FAVICON_IMAGE_FORMAT_PNG, &completed)
+                        .map_err(|e| format!("GetFavicon: {e}"))?;
+                    Ok(())
+                })();
+            }
+            Ok(())
+        }));
+        let mut token: i64 = 0;
+        // SAFETY: the handler is a webview2-com callback
+        // object kept alive by the core's event table
+        // once registered; the token cell is a plain local.
+        unsafe {
+            core.add_FaviconChanged(&handler, &mut token)
+                .map_err(|e| format!("FaviconChanged registration: {e}"))?;
+        }
+        Ok(())
+    })();
+    if let Err(why) = outcome {
+        log::info(&format!(
+            "favicon observer unavailable for tab {tab}: {why}"
+        ));
+    }
+}
+
+#[cfg(not(windows))]
+fn attach_favicon(_view: &WebView, _tab: u64, _proxy: EventLoopProxy<UserEvent>) {}
 
 /// Register Pico's own context menu on one content view
 /// (0.34.1): WebView2's `ContextMenuRequested` is intercepted
@@ -1017,6 +1670,16 @@ fn fetch_download_cookies(
 /// A body that is not a JSON object passes through
 /// unchanged — the strict parser denies it there.
 fn normalize_dl_body(raw: &str) -> String {
+    // AUDIT 0.41.1 (Front E F3): the Value round-trip
+    // below collapses duplicate keys last-wins, which
+    // would launder a body the strict parsers' own
+    // duplicate rejection never saw (an action could be
+    // switched after the first spelling). A duplicated
+    // top-level key is refused here — the empty object
+    // denies cleanly at every strict parser.
+    if pico_core::core::ipc::json_object_has_duplicate_keys(raw) {
+        return "{}".to_string();
+    }
     let Ok(mut v) = serde_json::from_str::<serde_json::Value>(raw) else {
         return raw.to_string();
     };
@@ -1036,10 +1699,14 @@ fn normalize_dl_body(raw: &str) -> String {
 /// exactly as for `Command` envelopes (see
 /// `App::on_chrome_dl_body`).
 fn dl_envelope_id(raw: &str) -> Option<(String, u64)> {
+    // AUDIT 0.41.1 (Front E F2): the envelope identity
+    // now goes through core's strict check — protocol
+    // version and boot bounds included. Through 0.41.0
+    // this read `boot`/`req` with no validation, so the
+    // dl/nav/tab paths accepted envelopes (a future `v`,
+    // an over-long boot) that the Command path refused.
     let v: serde_json::Value = serde_json::from_str(raw).ok()?;
-    let boot = v.get("boot")?.as_str()?.to_string();
-    let req = v.get("req")?.as_u64()?;
-    Some((boot, req))
+    pico_core::core::ipc::strict_envelope_id(&v)
 }
 
 /// Open the downloads FOLDER in Explorer (0.32): ShellExecuteW
@@ -1116,26 +1783,6 @@ fn open_file_in_explorer(file: &Path) {
 
 #[cfg(not(windows))]
 fn open_file_in_explorer(_file: &Path) {}
-
-/// Probe: can Pico's downloads live beside the exe? Mirrors
-/// `core::state::probe_exe_dir`'s idea for the `Downloads`
-/// subfolder (0.32): create it, then round-trip a temp file
-/// including a RENAME (state saves and `.part` completion are
-/// rename-shaped work). Any failure is simply "not writable" —
-/// `core::download::resolve_downloads_dir` then falls back to
-/// the user's Downloads folder.
-fn probe_downloads_dir(exe_dir: &Path) -> bool {
-    let dir = exe_dir.join("Downloads");
-    if std::fs::create_dir_all(&dir).is_err() {
-        return false;
-    }
-    let probe = dir.join(format!(".pico-probe-{}", std::process::id()));
-    let probe2 = dir.join(format!(".pico-probe-{}-renamed", std::process::id()));
-    let ok = std::fs::write(&probe, b"pico").is_ok() && std::fs::rename(&probe, &probe2).is_ok();
-    let _ = std::fs::remove_file(&probe);
-    let _ = std::fs::remove_file(&probe2);
-    ok
-}
 
 /// The installed WebView2 runtime version (e.g. "141.0.3485.0"),
 /// queried from the OS before any environment exists — wry wraps
@@ -1448,7 +2095,7 @@ fn split_https_url(url: &str) -> Option<(String, u16, String)> {
 /// third-party HTTP code enters the tree. The transport is
 /// deliberately narrow: it exists only for the four canonical
 /// list URLs in `core::lists`, sends no cookies and no custom
-/// headers (the session's plain `Pico/0.40.2` User-Agent only),
+/// headers (the session's plain `Pico/0.41.2` User-Agent only),
 /// follows at most 5 redirects MANUALLY (automatic following
 /// is switched off, so the https→https-only policy is enforced
 /// here, hop by hop), and enforces the caller's size cap
@@ -1478,7 +2125,7 @@ fn winhttp_get(url: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
             split_https_url(&current).ok_or_else(|| format!("not an https URL: {current}"))?;
         let host_w = wide(&host);
         let path_w = wide(&path);
-        let ua_w = wide("Pico/0.40.2");
+        let ua_w = wide("Pico/0.41.2");
         // SAFETY: every handle below is created by WinHTTP and
         // immediately owned by a WinHttpHandle (closed on drop);
         // all string pointers reference the NUL-terminated wide
@@ -2201,6 +2848,93 @@ enum UserEvent {
         tab: u64,
         body: String,
     },
+    /// A nav-command body (0.41.0) from a CONTENT view —
+    /// the start page or the history page: the raw
+    /// canonical `{"kind":"nav", ...}` body, forwarded
+    /// undecided. Decided centrally by
+    /// `core::navcmd::parse_nav_body` + the conjunctive
+    /// surface gates in `on_nav_page_body`. (Chrome-surface
+    /// nav bodies never arrive here: they ride the chrome
+    /// transport as `ChromeCmd` and are routed inside
+    /// `on_chrome_cmd`, like dl bodies.)
+    NavAction {
+        tab: u64,
+        body: String,
+    },
+    /// Ctrl+H was pressed while a CONTENT webview held
+    /// focus (0.41.0), or a page-link navigation named the
+    /// history page (the start page's History link, a
+    /// downloads link's sibling funnel): sent by the
+    /// AcceleratorKeyPressed registration (the Ctrl+J
+    /// choke point) or the navigation handler. The arm
+    /// opens the managed history page through
+    /// `App::open_history_page`.
+    HistoryPageShortcut,
+    /// Ctrl+D was pressed while a CONTENT webview held
+    /// focus (0.41.0): the accelerator registration
+    /// forwards it; the arm toggles the ACTIVE tab's
+    /// bookmark, exactly like the chrome's star.
+    BookmarkShortcut,
+    /// A content webview's navigation COMPLETED: sent by
+    /// the raw NavigationCompleted registration in
+    /// `attach_nav_settled` — the one place the
+    /// navigation's verdict survives, since wry's
+    /// page-load events discard it. The verdict is THIS
+    /// navigation's own (IsSuccess + HttpStatusCode read
+    /// from its own args; 0.41.2 — the 0.41.1 form also
+    /// carried the core's live Source, which names
+    /// whatever page is current at dispatch time, not
+    /// the navigation that completed). AUDIT 0.41.3: the
+    /// event also carries that navigation's own id
+    /// (`nav_id`, 0 when the read failed); the arm pairs
+    /// the verdict with its pending history candidate BY
+    /// ID, never by URL.
+    NavigationSettled {
+        tab: u64,
+        nav_id: u64,
+        success: bool,
+        http_status: i32,
+    },
+    /// A content webview's navigation started loading
+    /// its committed document (AUDIT 0.41.3, Front A
+    /// F2): sent by the raw ContentLoading registration
+    /// in `attach_nav_candidate`, carrying the
+    /// navigation's own id and the URL read from the
+    /// core's Source INSIDE that dispatch (the loading
+    /// document's final URL, before any later navigation
+    /// can advance Source). The arm queues the pair as a
+    /// pending history candidate in the tab's
+    /// `PendingVisit`; the matching
+    /// [`UserEvent::NavigationSettled`] verdict decides
+    /// it by id.
+    NavCandidate {
+        tab: u64,
+        nav_id: u64,
+        url: String,
+    },
+    /// A tab's page icon arrived (0.41.2): sent by the
+    /// `GetFavicon` completion in `attach_favicon`,
+    /// carrying the icon host key the handler derived
+    /// from the page's Source (core's gate — the event
+    /// only exists for recordable web hosts) and the PNG
+    /// bytes as served. The arm stores them in the
+    /// favicon cache (`core::icons`) and re-pushes the
+    /// affected nav payloads; the bytes never touch the
+    /// log.
+    FaviconReceived {
+        tab: u64,
+        host_key: String,
+        bytes: Vec<u8>,
+    },
+    /// Ctrl+Shift+PageUp / Ctrl+Shift+PageDown was pressed
+    /// while a CONTENT webview held focus (0.41.0,
+    /// Workstream C): the accelerator registration
+    /// forwards it; the arm moves the ACTIVE tab one
+    /// position in `dir` (−1 left, +1 right), clamped at
+    /// the ends — the keyboard twin of dragging the tab.
+    MoveTabShortcut {
+        dir: i32,
+    },
     /// A download was requested by the CHROME webview and denied
     /// (0.32: content tabs route to the download manager via
     /// [`UserEvent::DownloadStarting`] instead; the chrome serves
@@ -2238,6 +2972,9 @@ enum UserEvent {
     /// did nothing. The arm opens the downloads page
     /// through the same `App::open_downloads_page` the
     /// coordinator's OpenDownloadsPage effect uses.
+    /// 0.41.0: the navigation handler's managed-page
+    /// funnel sends this same event for a page-link
+    /// navigation naming the Downloads page.
     DownloadsPageShortcut,
     /// A content page raised WebView2's context-menu request
     /// (0.34.1): the registration handler already suppressed
@@ -2290,6 +3027,20 @@ enum UserEvent {
     },
     DroppedPaths(Vec<PathBuf>),
     ServicesUpdated(ScanOutcome),
+    /// Deferred view retirement (0.41.3): posted by
+    /// `activate` / the reveal path AFTER the target view has
+    /// been shown, so the hide of every other view runs on a
+    /// LATER event-loop turn — by then the target's
+    /// compositor has had its beat to present its retained
+    /// frame, and no empty (window-background) frame can
+    /// appear between the two. Carries the tab that was
+    /// activated; the arm re-checks it against the CURRENT
+    /// active tab and does nothing when a newer activation
+    /// has superseded it (that activation posted its own
+    /// retire). See `core::visibility`.
+    RetireViews {
+        except: u64,
+    },
     /// Chrome handshake watchdog (AUDIT V14-3): fired ~2.5 s after a
     /// chrome WebView of generation `gen` was created. If that
     /// generation never sent its `ready` command, the chrome is
@@ -2364,6 +3115,11 @@ struct Tab {
     /// `live_downloads_tabs` like `is_start` is through its
     /// set.
     is_downloads: bool,
+    /// True when this tab is the History page (0.41.0):
+    /// `pico://history`, classified live through
+    /// `live_history_tabs` like `is_downloads` is through
+    /// its set.
+    is_history: bool,
     /// The tab's navigation epoch (0.34): the count of real
     /// page commits this tab has applied, bumped ONLY at
     /// the single commit point in `apply_url_event`
@@ -2421,6 +3177,18 @@ struct Tab {
     /// the tab commits a real page of its own — from then
     /// on it is a normal tab.
     adopted: bool,
+    /// The tab's pending global-history visits (0.41.2;
+    /// id-keyed queue AUDIT 0.41.3, Front A F2):
+    /// navigations that have committed (their
+    /// ContentLoading candidate arrived) but whose
+    /// completion verdicts have not been processed yet.
+    /// Candidates and verdicts pair BY NAVIGATION ID —
+    /// the ContentLoading registration queues
+    /// `(nav_id, url)` here and the NavigationSettled arm
+    /// decides the candidate carrying ITS nav_id (see
+    /// `core::navstore::PendingVisit`). Runtime-only,
+    /// like the rest of the tab's navigation state.
+    pending_visit: navstore::PendingVisit,
     /// The current unsettled navigation's URL chain
     /// (0.35, WS2): every URL the in-flight navigation
     /// has occupied — its initial target (the
@@ -2457,6 +3225,19 @@ struct Tab {
     /// just-late capture belongs to. The next
     /// navigation's start overwrites it.
     pending_adopted: bool,
+    /// True while this tab's view is FRESH (0.41.3): built
+    /// (by `add_tab` or `retry_tab_view`) but its first load
+    /// has not started, so its controller has never composed
+    /// a frame and showing it would flash the themed
+    /// background while it catches up. While the flag is set
+    /// on the ACTIVE tab, the previously visible view stays
+    /// on screen; the tab's first page-load event reveals it
+    /// (`App::reveal_pending_tab`). The flag clears at that
+    /// reveal, when the tab's load starts in the background,
+    /// and when another tab is activated (the pending tab is
+    /// then an ordinary background tab). A tab with no view
+    /// never carries it. See `core::visibility`.
+    reveal_pending: bool,
 }
 
 impl Tab {
@@ -2591,6 +3372,13 @@ struct App {
     /// them: opening it closes every panel through the one
     /// funnel, and opening any panel clears it.
     context_menu: Option<CtxMenuState>,
+    /// The tab strip's context menu (0.41.0): the one open
+    /// tab menu's stored state, or None. An overlay like
+    /// the content menu's — while it is open the chrome
+    /// rect grows to contain the card (see chrome_phys) —
+    /// and mutually exclusive with the panels and the
+    /// content menu through the one funnel.
+    tab_menu: Option<TabMenuState>,
     /// One-shot address-focus hint (AUDIT V26, defect D4): set
     /// when a fresh tab is created via the new-tab paths (the +
     /// button, Ctrl+T, the startup tab, a chrome (re)creation
@@ -2612,6 +3400,59 @@ struct App {
     /// their downloads classification is live, not the
     /// build-time flag.
     live_downloads_tabs: std::sync::Arc<Mutex<std::collections::HashSet<u64>>>,
+    /// The bookmarks+history store (0.41.0): the user's
+    /// navigation record, owned by `core::navstore`,
+    /// loaded at startup from `nav.json` in the Pico home
+    /// and saved through `save_nav` on every mutation.
+    nav: NavStore,
+    /// The favicon cache (0.41.2): one icon per web host
+    /// under `<Pico home>/icons/`, owned by `core::icons`;
+    /// the payload builders read its URI map and the
+    /// `FaviconReceived` arm stores through it.
+    icons: IconCache,
+    /// The live set of History-page tab ids (0.41.0): the
+    /// mirror of `live_downloads_tabs` for `pico://history`.
+    live_history_tabs: std::sync::Arc<Mutex<std::collections::HashSet<u64>>>,
+    /// Whether the address-bar suggestions dropdown is
+    /// open (0.41.0): app-owned like the panels' state —
+    /// the chrome paints the dropdown from the answer push,
+    /// and while this is set the chrome rect grows by
+    /// `layout::suggestions_h()` to contain it. Set when a
+    /// `suggestions-query` is answered; cleared by the
+    /// chrome's `suggest_close`, by navigation, and by tab
+    /// switches.
+    suggest_open: bool,
+    /// Signature of the last nav push to the start tabs:
+    /// the (nav_rev, icon_rev) pair packed by
+    /// `nav_push_sig` (0.41.2; through 0.41.1 a hash of
+    /// the serialized payloads, which cost a full JSON
+    /// build on every call just to usually discard it).
+    last_nav_sig: u64,
+    /// Signature of the last History-page push (0.41.0):
+    /// the same packed pair as `last_nav_sig`.
+    last_hist_page_sig: u64,
+    /// Nav-store revision (0.41.2): bumped at EVERY
+    /// shell mutation of the nav store. The census is
+    /// small and complete — the store's only mutators
+    /// are record_visit, note_title, toggle_bookmark,
+    /// remove_bookmark, remove_history and
+    /// clear_history; every shell call site observes
+    /// the change (five branch on the returned bool;
+    /// toggle_bookmark's one no-mutation path — an
+    /// unrecordable URL — is unreachable from its sole
+    /// caller, which refuses those first; clear runs
+    /// only on a non-empty store); the shell never
+    /// writes the store's fields directly and never
+    /// replaces the store after startup. A missed bump
+    /// would freeze the start/history live pushes, so
+    /// a new mutation path MUST bump this (see
+    /// BUILD_NOTES 0.41.2).
+    nav_rev: u64,
+    /// Icon-cache revision (0.41.2): bumped when a
+    /// favicon is freshly stored, so the nav payloads
+    /// (which inline icon data URIs) re-push. Packed
+    /// with `nav_rev` by `nav_push_sig`.
+    icon_rev: u64,
     /// Last layout signature logged (AUDIT V26, defect D2): the
     /// layout witness line is written when the computed geometry
     /// changes, so pico.log can answer "what rects did the shell
@@ -2720,6 +3561,23 @@ struct CtxMenuState {
     items: Vec<pico_core::core::ctxmenu::CtxItem>,
 }
 
+/// The tab strip's context menu state (0.41.0, Workstream
+/// C): the ONE open tab menu — the tab it was raised on,
+/// its window-DIP top-left as resolved by
+/// `core::layout::ctx_menu_pos` (the content menu's
+/// geometry, shared), and the item rows
+/// `core::tabcmd::tab_menu_items` decided. App-owned UI
+/// state like the content menu's: it lives in exactly one
+/// place, closes through the one panel funnel, and its
+/// picks cross back as `core::tabcmd` bodies, never as
+/// `ctx_pick` (that whitelist is the content menu's).
+struct TabMenuState {
+    tab: u64,
+    x: f64,
+    y: f64,
+    items: Vec<pico_core::core::ctxmenu::CtxItem>,
+}
+
 /// The context menu as the chrome consumes it (0.34.1): the
 /// card's window-DIP position plus the item rows — the
 /// chrome draws exactly this and reports picks back by id.
@@ -2786,10 +3644,19 @@ struct Snap {
     /// app-owned like the other panels'.
     downloads: pico_core::core::dlcoord::DlSnapshot,
     downloads_open: bool,
+    /// Whether the ACTIVE tab's URL is bookmarked
+    /// (0.41.0): the star's filled state, recomputed from
+    /// the store on every snapshot.
+    bookmarked: bool,
     /// Pico's own context menu (0.34.1), when one is open:
     /// the chrome draws the card from this and reports picks
     /// back as ctx_pick / ctx_close commands.
     context_menu: Option<CtxMenuSnap>,
+    /// The tab strip's context menu (0.41.0), when one is
+    /// open: the same card shape as the content menu's —
+    /// the chrome draws it into its own element and
+    /// reports picks back as `core::tabcmd` bodies.
+    tab_context_menu: Option<CtxMenuSnap>,
     active_error: String,
     /// Shield state (AUDIT V21): on/off, requests blocked this
     /// session, and the active tab's own count.
@@ -2903,10 +3770,20 @@ impl App {
             self.downloads_panel_open = false;
             changed = true;
         }
+        // The suggestions dropdown (0.41.0) rides the same
+        // funnel: focus leaving the chrome retires it.
+        if self.suggest_open {
+            self.suggest_open = false;
+            changed = true;
+        }
         // Pico's own context menu (0.34.1) rides the same
         // funnel: a click into the page or a window focus
         // loss dismisses it with the panels.
         if self.context_menu.take().is_some() {
+            changed = true;
+        }
+        // The tab strip's menu (0.41.0) rides it too.
+        if self.tab_menu.take().is_some() {
             changed = true;
         }
         let notice_open = self.dl_notice_open();
@@ -3135,8 +4012,26 @@ impl App {
                 scale,
                 layout::ctx_menu_extra(state.y, menu_h),
             )
+        } else if let Some(state) = &self.tab_menu {
+            // The tab strip's context menu (0.41.0): the
+            // second claim, priced exactly like the content
+            // menu's — the two menus are mutually exclusive
+            // through the panel funnel, so their claims can
+            // never stack.
+            let menu_h = ctx_menu_h_for(&state.items);
+            layout::chrome_rect_with_extra(
+                size.width,
+                size.height,
+                scale,
+                layout::ctx_menu_extra(state.y, menu_h),
+            )
         } else if self.downloads_panel_open {
             layout::chrome_rect_with_extra(size.width, size.height, scale, self.dl_popover_h())
+        } else if self.suggest_open {
+            // The suggestions dropdown (0.41.0): a fixed
+            // claim under the address bar, priced in
+            // core::layout like the popover's.
+            layout::chrome_rect_with_extra(size.width, size.height, scale, layout::suggestions_h())
         } else if self.any_panel_open() {
             layout::chrome_rect_with_panel(size.width, size.height, scale, self.any_panel_open())
         } else if self.dl_notice_open() {
@@ -3209,12 +4104,16 @@ impl App {
                 xr.h,
                 if self.context_menu.is_some() {
                     "contextmenu"
+                } else if self.tab_menu.is_some() {
+                    "tabmenu"
                 } else if self.teleport_panel_open {
                     "teleport"
                 } else if self.palette_panel_open {
                     "palette"
                 } else if self.downloads_panel_open {
                     "downloads"
+                } else if self.suggest_open {
+                    "suggest"
                 } else if self.dl_notice_open() {
                     "toast"
                 } else {
@@ -3267,6 +4166,9 @@ impl App {
         // 0.33: the same live classification for the
         // Downloads page (see `live_downloads_tabs` on App).
         let live_downloads = self.live_downloads_tabs.clone();
+        // 0.41.0: the same live classification for the
+        // History page (see `live_history_tabs` on App).
+        let live_history = self.live_history_tabs.clone();
         // AUDIT 0.31 (A6-F2): the one-shot credentialed-nav
         // expectation, consumed by this handler (see the
         // `expected_nav` field on App).
@@ -3327,6 +4229,23 @@ impl App {
                     });
                     return;
                 }
+                // Nav-command bodies (0.41.0) share this
+                // channel too: disjoint by `kind` ("nav")
+                // PLUS the `action` key — the navigation
+                // OBSERVER notes below share the kind but
+                // carry `how`/`href` and must fall through
+                // to `parse_nav_note` untouched, which is
+                // why `looks_like_nav_body` requires both.
+                // Forwarded undecided — the conjunctive
+                // gates are applied centrally in
+                // `on_nav_page_body`.
+                if navcmd::looks_like_nav_body(body) {
+                    let _ = action_proxy.send_event(UserEvent::NavAction {
+                        tab: id,
+                        body: body.clone(),
+                    });
+                    return;
+                }
                 // Shield prune reports (AUDIT V23) share the
                 // channel too: disjoint by `kind`, parsed under
                 // strict caps in core, and worth only log lines.
@@ -3379,6 +4298,10 @@ impl App {
                     .lock()
                     .map(|set| set.contains(&id))
                     .unwrap_or(false);
+                let is_history = live_history
+                    .lock()
+                    .map(|set| set.contains(&id))
+                    .unwrap_or(false);
                 // Shield page-state (AUDIT V21): WebView2 raises
                 // NavigationStarting for the MAIN frame only, so
                 // every URL seen here is a main-frame target —
@@ -3422,6 +4345,60 @@ impl App {
                         || url == "pico://downloads/"
                         || url == "https://pico.downloads"
                         || url == "https://pico.downloads/";
+                }
+                if is_history {
+                    // The History tab may (re)load only the
+                    // History page itself (0.41.0) — the
+                    // mirror of the downloads arm above.
+                    return url == navcmd::HISTORY_URL
+                        || url == "pico://history/"
+                        || url == "https://pico.history"
+                        || url == "https://pico.history/";
+                }
+                // Managed-page links (0.41.0): a navigation
+                // naming the Downloads or History page from
+                // any OTHER tab (the start page's Downloads
+                // card and History link are the real cases)
+                // never loads the document into that tab —
+                // its command verbs are gated on the managed
+                // tab kind, so a bare load would strand the
+                // user on a dead page. The navigation is
+                // refused and the managed opener runs
+                // instead, through the same events the
+                // Ctrl+J / Ctrl+H accelerators send.
+                //
+                // AUDIT 0.41.1 (Front E F1): the funnel is
+                // gated to MANAGED tabs. The downloads and
+                // history tabs returned above, so the start
+                // tab is the only managed tab that can reach
+                // here — and the only one whose links this
+                // funnel exists for. Through 0.41.0 an
+                // ordinary WEB tab reached it too: any web
+                // page could force-open the Downloads or
+                // History page (focus-stealing, exposing
+                // download filenames and the browsing
+                // history on screen) with a same-tab
+                // navigation to a pico:// spelling — the
+                // exact move the 0.40.1 new-window router
+                // denies ("a page must not mint a tab
+                // showing the downloads page"). A web tab's
+                // navigation naming a managed page is now
+                // refused outright, like every other
+                // pico:// navigation from a web page.
+                if pico_core::core::dlcmd::is_downloads_url(&url) || navcmd::is_history_url(&url) {
+                    if is_start {
+                        if pico_core::core::dlcmd::is_downloads_url(&url) {
+                            let _ = nav_proxy.send_event(UserEvent::DownloadsPageShortcut);
+                        } else {
+                            let _ = nav_proxy.send_event(UserEvent::HistoryPageShortcut);
+                        }
+                    } else {
+                        crate::log::info(&format!(
+                            "navigation denied (web page named a managed page): tab={id} {}",
+                            redact_url(&url)
+                        ));
+                    }
+                    return false;
                 }
                 if is_start {
                     if is_web_url(&url) {
@@ -3588,6 +4565,9 @@ impl App {
         harden_webview_profile(&view, "content");
         attach_panel_focus_close(&view, id, self.proxy.clone());
         attach_downloads_shortcut(&view, self.proxy.clone());
+        attach_nav_settled(&view, id, self.proxy.clone());
+        attach_nav_candidate(&view, id, self.proxy.clone());
+        attach_favicon(&view, id, self.proxy.clone());
         attach_context_menu(&view, id, self.proxy.clone());
         attach_media_probe(&view, id, self.probe_budget.clone(), self.stats.clone());
         attach_shield(
@@ -3671,6 +4651,7 @@ impl App {
             failed,
             is_start,
             is_downloads: false,
+            is_history: false,
             nav_epoch: 0,
             url: url.to_string(),
             urlstate: UrlState::with_url(url),
@@ -3683,8 +4664,10 @@ impl App {
             doc_start_script,
             commit_started: false,
             adopted: false,
+            pending_visit: navstore::PendingVisit::new(),
             pending_chain: Vec::new(),
             pending_adopted: false,
+            reveal_pending: !failed_flag,
         });
         // Seed the Shield's page-state for this tab: the initial
         // URL is both the pending main-frame target and (until the
@@ -3713,6 +4696,12 @@ impl App {
                 let tab = &mut self.tabs[idx];
                 tab.view = Some(v);
                 tab.failed = None;
+                // 0.41.3: a retry-built view is FRESH like a
+                // new tab's — it has never composed a frame.
+                // It reveals on its first page-load event
+                // under the same rules (see reveal_pending_tab);
+                // it is NOT shown synchronously below.
+                tab.reveal_pending = true;
                 tab.loading = true;
                 tab.last_load_start = Some(Instant::now());
                 tab.doc_start_script = self.shield.on.load(std::sync::atomic::Ordering::Relaxed)
@@ -3726,12 +4715,14 @@ impl App {
         }
         let is_active = self.active == id;
         if is_active {
+            // 0.41.3: bounds correct before presentation, and
+            // nothing else — the fresh view stays hidden (the
+            // content region keeps the themed window
+            // background, which is the failed tab's surface
+            // already) until its first load event reveals it.
+            // Through 0.41.2 this arm showed the view at once,
+            // presenting an unpainted controller.
             self.layout();
-            if let Some(tab) = self.active_tab() {
-                if let Some(v) = tab.view() {
-                    let _ = v.set_visible(true);
-                }
-            }
         }
         self.push_state(false);
     }
@@ -3765,6 +4756,131 @@ impl App {
         }
     }
 
+    /// The tabs' view facts for the pure visibility plan
+    /// (0.41.3, `core::visibility`): the shell's only
+    /// translation of its live tab records into plan inputs.
+    fn view_facts(&self) -> Vec<TabViewFact> {
+        self.tabs
+            .iter()
+            .map(|t| TabViewFact {
+                id: t.id,
+                paint: if t.view.is_none() {
+                    PaintState::NoView
+                } else if t.reveal_pending {
+                    PaintState::Fresh
+                } else {
+                    PaintState::Painted
+                },
+            })
+            .collect()
+    }
+
+    /// Hide every tab's view except `except`'s, right now.
+    /// The immediate-retire step of the visibility plan
+    /// (failed targets) and the body of the deferred retire
+    /// event arm share this one loop — note it is keyed by
+    /// tab id at EXECUTION time, never a single pass that
+    /// also shows (that was the 0.41.2 flash shape).
+    fn hide_views_except(&mut self, except: u64) {
+        for t in &self.tabs {
+            if t.id != except {
+                if let Some(v) = t.view() {
+                    let _ = v.set_visible(false);
+                }
+            }
+        }
+    }
+
+    /// Execute one visibility plan's steps in order
+    /// (0.41.3). `target` is the tab the plan was made for:
+    /// the deferred retire posts it as the exception, and
+    /// the retire arm re-validates it against the then-
+    /// current active tab.
+    fn exec_vis_plan(&mut self, plan: &[VisStep], target: u64) {
+        for step in plan {
+            match step {
+                VisStep::ShowNow(id) => {
+                    if let Some(v) = self
+                        .tabs
+                        .iter()
+                        .find(|t| t.id == *id)
+                        .and_then(|t| t.view())
+                    {
+                        let _ = v.set_visible(true);
+                    }
+                }
+                VisStep::RevealOnFirstLoad(id) => {
+                    if let Some(t) = self.tab_mut(*id) {
+                        t.reveal_pending = true;
+                    }
+                }
+                VisStep::RetireOthersDeferred => {
+                    let _ = self
+                        .proxy
+                        .send_event(UserEvent::RetireViews { except: target });
+                }
+                VisStep::RetireOthersImmediate => {
+                    self.hide_views_except(target);
+                }
+            }
+        }
+    }
+
+    /// The deferred retire event arm (0.41.3): hide every
+    /// view that is not the CURRENT active tab's. A retire
+    /// posted by an activation that a newer activation has
+    /// since superseded does nothing — the newer activation
+    /// posted its own retire, and hiding everything except
+    /// the STALE target would hide the tab the user is now
+    /// looking at. Tabs that vanished since the post (the
+    /// closed tab of an active-tab close, above all) are
+    /// simply not in the vec anymore: tolerated by
+    /// construction.
+    fn retire_views(&mut self, except: u64) {
+        if self.active != except {
+            return;
+        }
+        self.hide_views_except(except);
+    }
+
+    /// Reveal a reveal-pending tab (0.41.3): called from
+    /// `on_page_load` (Started AND Finished — whichever
+    /// arrives first for the tab) and from the
+    /// NavigationSettled arm (the failure resolution: a
+    /// navigation refused at NavigationStarting produces no
+    /// page-load event, but its completion verdict still
+    /// arrives, and the pending tab must not strand the
+    /// previous view forever). The flag clears in every
+    /// case; the show happens only when the tab is the
+    /// active one, under `core::visibility::reveal_plan`.
+    /// A pending tab whose load starts in the background
+    /// becomes an ordinary background tab — its later
+    /// activation shows it under the painted arm, and no
+    /// future load event is needed (or waited for) to make
+    /// that activation work.
+    fn reveal_pending_tab(&mut self, id: u64) {
+        let Some(idx) = self.tab_index(id) else {
+            return;
+        };
+        if !self.tabs[idx].reveal_pending {
+            return;
+        }
+        let is_active = self.active == id;
+        let plan = visibility::reveal_plan(&self.view_facts(), id, is_active);
+        self.tabs[idx].reveal_pending = false;
+        if !plan.is_empty() {
+            // Bounds correct before presentation, as in
+            // activate: the layout pass targets the ACTIVE
+            // tab, which this tab is (the plan is empty
+            // otherwise).
+            self.layout();
+            self.exec_vis_plan(&plan, id);
+            log::info(&format!(
+                "tab visibility: fresh tab {id} revealed on first load"
+            ));
+        }
+    }
+
     fn activate(&mut self, id: u64, focus_content: bool) {
         if !self.tabs.iter().any(|t| t.id == id) {
             return;
@@ -3776,20 +4892,49 @@ impl App {
             self.teleport = None;
             self.teleport_version += 1;
             self.teleport_panel_open = false;
+            // The suggestions dropdown belongs to the tab
+            // it was typed in (0.41.0): a switch retires
+            // the app's rect claim (the chrome retires its
+            // own painting on the same snapshot).
+            self.suggest_open = false;
             // The picker closes on tab switches too (v27): its
             // local UI dismisses on the active change, and the
             // app state must agree or the chrome rect would stay
             // extended under a closed panel.
             self.palette_panel_open = false;
+            // A tab menu names ONE tab (0.41.0): a switch
+            // retires it, like the panels above.
+            self.tab_menu = None;
         }
-        self.active = id;
-        for t in &self.tabs {
-            if let Some(v) = t.view() {
-                let _ = v.set_visible(t.id == id);
+        // 0.41.3: activating a DIFFERENT tab retires every
+        // other tab's reveal-pending flag — a pending tab
+        // the user switched away from is an ordinary
+        // background tab from here (its view stays hidden;
+        // its load, whenever it starts, finds the flag
+        // already clear and changes nothing visible).
+        for t in &mut self.tabs {
+            if t.id != id {
+                t.reveal_pending = false;
             }
         }
+        self.active = id;
+        // Layout FIRST (0.41.3): the active view's bounds are
+        // correct before anything is shown, so the frame the
+        // compositor presents is already at its final rect.
         self.layout();
-        if focus_content {
+        // The visibility sequencing itself is core's pure
+        // plan (core::visibility): a painted target shows
+        // now and the others retire on a later event-loop
+        // turn; a fresh target stays hidden (and the current
+        // view stays up) until its first load reveals it; a
+        // failed target retires the others at once. Through
+        // 0.41.2 a single pass in vec order hid the current
+        // view before showing a later-vec target — the
+        // hide-before-show black frame.
+        let plan = visibility::activation_plan(&self.view_facts(), id);
+        let shown_now = plan.contains(&VisStep::ShowNow(id));
+        self.exec_vis_plan(&plan, id);
+        if focus_content && shown_now {
             if let Some(tab) = self.active_tab() {
                 if let Some(v) = tab.view() {
                     let _ = v.focus();
@@ -3813,10 +4958,29 @@ impl App {
         let Some(idx) = self.tabs.iter().position(|t| t.id == id) else {
             return;
         };
+        // A tab menu open on the dying tab dies with it
+        // (0.41.0) — its picks name this tab and nothing else.
+        if self.tab_menu.as_ref().map(|m| m.tab) == Some(id) {
+            self.tab_menu = None;
+        }
         let was_active = self.active == id;
+        // Per-tab cleanup that does NOT involve the view
+        // (0.41.3: unchanged semantics, unchanged position —
+        // all of it runs before the record goes, as the
+        // pending-visit flush in particular must).
         self.shield.forget_tab(id);
         self.lite.clear_chosen(id);
         self.stats.forget_tab(id);
+        // 0.41.2: a visit still pending its verdict
+        // records before the tab goes — the page
+        // committed and displayed, and its verdict can
+        // no longer arrive once the view is gone.
+        // AUDIT 0.41.3: the pending set is the id-keyed
+        // candidate queue — flush ALL of it, each record
+        // carrying the tab's settled title (A-F4).
+        for url in self.tabs[idx].pending_visit.flush_all() {
+            self.record_visit_and_title(idx, &url);
+        }
         // AUDIT 0.32.1 (P3-5): the media probe budget's per-tab
         // entry was the one per-tab map never forgotten here —
         // closed tab ids accumulated for the app's lifetime.
@@ -3842,6 +5006,50 @@ impl App {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(&id);
+        self.live_history_tabs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&id);
+        if was_active && self.tabs.len() > 1 {
+            // 0.41.3: activate the successor FIRST, while the
+            // closing tab (and its view) still exists — the
+            // successor is shown under the new visibility
+            // rules and the closing view is dropped only
+            // after. Through 0.41.2 the record was removed
+            // and the view dropped BEFORE this activation,
+            // guaranteeing an empty content region for at
+            // least one frame on every active-tab close.
+            // The successor is core's pure arithmetic over
+            // the CURRENT vec (core::visibility), the same
+            // neighbour the old post-removal index picked.
+            let ids: Vec<u64> = self.tabs.iter().map(|t| t.id).collect();
+            if let Some(next) = visibility::successor_after_close(&ids, id) {
+                self.activate(next, true);
+            }
+        } else if was_active {
+            // Closing the LAST tab (0.41.3): create the
+            // replacement start tab FIRST — not activated
+            // the old way (add_tab with activate would have
+            // run while the dying tab was already gone in
+            // the old shape; here it is created beside it) —
+            // then activate it under the fresh-tab rules:
+            // the dying view stays on screen until the new
+            // start page's first load reveals its tab. Only
+            // then is the old record removed, below.
+            let new_id = self.add_tab(START_URL, true, false);
+            if new_id > 0 {
+                self.activate(new_id, false);
+            }
+        }
+        // Re-find the record: the activations above never
+        // remove tabs, but the downloads page-visited
+        // effects an activation can run are not this
+        // function's business to predict — the id is the
+        // identity, the index is recomputed.
+        let Some(idx) = self.tabs.iter().position(|t| t.id == id) else {
+            self.push_state(false);
+            return;
+        };
         let removed = self.tabs.remove(idx); // dropping the WebView closes it
         if removed.root_held {
             if let Some(r) = removed.root_id {
@@ -3851,12 +5059,13 @@ impl App {
         }
         drop(removed);
         if self.tabs.is_empty() {
+            // Defensive only: the active paths above both
+            // guarantee a successor or a replacement exists,
+            // and a background close cannot empty the vec
+            // while an active tab remains. Kept so no future
+            // caller shape can strand a tab-less window.
             self.add_tab(START_URL, true, true);
             return;
-        }
-        if was_active {
-            let next = self.tabs[idx.min(self.tabs.len() - 1)].id;
-            self.activate(next, true);
         }
         self.push_state(false);
     }
@@ -3872,6 +5081,282 @@ impl App {
         let next = ((idx as i32 + dir).rem_euclid(n)) as usize;
         let id = self.tabs[next].id;
         self.activate(id, true);
+    }
+
+    // -- Movable tabs (0.41.0, Workstream C) -----------------------------
+
+    /// Apply ONE reorder of tab `id` to its final index
+    /// (the shared tail of the drag and step paths): the
+    /// Tab record — WebView, history, root, everything —
+    /// moves as a unit, so the view follows its tab by
+    /// construction. `self.active` is an ID, not an index,
+    /// so the active tab stays active whichever way the
+    /// vec turns, and no view's visibility changes (only
+    /// the active view is visible, and it still is). Tab
+    /// order lives ONLY in this vec: nothing persists it
+    /// (sessions do not restore tabs — startup opens argv
+    /// or a start tab), so there is no second store to
+    /// keep in sync.
+    fn apply_tab_move(&mut self, id: u64, from: usize, fin: usize) {
+        if fin == from {
+            log::info(&format!("tab move: tab={id} at {from} (no-op)"));
+            return;
+        }
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(fin, tab);
+        log::info(&format!("tab move: tab={id} from={from} to={fin}"));
+        self.push_state(true);
+    }
+
+    /// Drag-to-reorder (0.41.0; named-neighbour form
+    /// AUDIT 0.41.3, Front B B-3): the strip names the
+    /// NEIGHBOUR tab the dragged tab should land
+    /// immediately before (`before`; `None` = the end of
+    /// the strip) — never a bare gap index, which named a
+    /// position in the order the SENDER rendered and
+    /// landed elsewhere if the shell's order had moved
+    /// since. The pure math (`final_from_neighbor`)
+    /// converts (current ids, dragged id, neighbour id)
+    /// to the final index against the CURRENT vec — the
+    /// strip's own order is never trusted as state, and
+    /// an id that names nothing in it denies the move.
+    fn move_tab_before(&mut self, id: u64, before: Option<u64>) {
+        let Some(from) = self.tab_index(id) else {
+            log::error(&format!("tab move: tab={id} decision=deny reason=tab-gone"));
+            return;
+        };
+        let ids: Vec<u64> = self.tabs.iter().map(|t| t.id).collect();
+        let Some(fin) = tabcmd::final_from_neighbor(&ids, id, before) else {
+            log::error(&format!(
+                "tab move: tab={id} before={before:?} decision=deny reason=neighbour-not-found"
+            ));
+            return;
+        };
+        self.apply_tab_move(id, from, fin);
+    }
+
+    /// One-step move (0.41.0): Ctrl+Shift+PageUp/PageDown
+    /// (the active tab) and the tab menu's Move Left/Right
+    /// rows. Clamped at the ends by `core::tabcmd::step_final`
+    /// — a step at an edge is a logged no-op, never a wrap.
+    fn move_tab_step(&mut self, id: u64, dir: i32) {
+        let Some(from) = self.tab_index(id) else {
+            log::error(&format!("tab move: tab={id} decision=deny reason=tab-gone"));
+            return;
+        };
+        let Some(fin) = tabcmd::step_final(self.tabs.len(), from, dir) else {
+            log::error(&format!(
+                "tab move: tab={id} dir={dir} decision=deny reason=bad-step"
+            ));
+            return;
+        };
+        self.apply_tab_move(id, from, fin);
+    }
+
+    /// The new-Pico facts for one tab (0.41.0), assembled
+    /// from the shell's own records — the requesting body
+    /// named only the tab id. The assembly itself is
+    /// core's pure `new_pico_facts_for` since 0.41.1
+    /// (Front C F1/F3): the shell only gathers the raw
+    /// observations, including this server's port, so the
+    /// parsed alias-aware served check
+    /// (`server::is_served_url` — the one the Teleport
+    /// path uses) classifies localhost-spelled
+    /// local-server tabs too.
+    fn new_pico_facts(&self, tab: &Tab) -> tabcmd::NewPicoFacts {
+        tabcmd::new_pico_facts_for(
+            &tab.url,
+            tab.is_start || tab.is_downloads || tab.is_history,
+            tab.root_id.is_some(),
+            self.server.root_id_for_url(&tab.url).is_some(),
+            Some(self.server.port()),
+            self.dl.has_pending_capture(tab.id),
+            tab.view.is_none(),
+        )
+    }
+
+    /// Open the tab strip's context menu (0.41.0): a
+    /// right-click on a tab. Mirrors `on_context_menu`'s
+    /// discipline — every open panel (and any existing
+    /// menu of either kind) closes first through the one
+    /// funnel, the item model and the card position are
+    /// core's pure functions, the app supplies only the
+    /// live facts (the tab's strip position and its
+    /// new-Pico plan), and the chrome is focused so the
+    /// menu's keyboard dismissal engages deterministically.
+    fn open_tab_menu(&mut self, tab_id: u64, x: f64, y: f64) {
+        let Some(idx) = self.tab_index(tab_id) else {
+            return; // the tab closed while the command was queued
+        };
+        self.close_all_panels();
+        let plan = tabcmd::new_pico_plan(&self.new_pico_facts(&self.tabs[idx]));
+        let items = tabcmd::tab_menu_items(idx, self.tabs.len(), plan);
+        let menu_h = ctx_menu_h_for(&items);
+        let scale = self.window.scale_factor();
+        let inner = self.window.inner_size();
+        let (mx, my) = layout::ctx_menu_pos(
+            inner.width as f64 / scale,
+            inner.height as f64 / scale,
+            (x, y),
+            menu_h,
+        );
+        log::info(&format!(
+            "tab menu: tab={tab_id} items={} plan={plan:?}",
+            items.len()
+        ));
+        self.tab_menu = Some(TabMenuState {
+            tab: tab_id,
+            x: mx,
+            y: my,
+            items,
+        });
+        self.layout();
+        self.push_state(true);
+        let _ = self.chrome.focus();
+    }
+
+    /// The tab menu's new-window action (0.41.0): launch a
+    /// NEW Pico process for this tab. THE ROUTE DECISION,
+    /// from the code: Pico is single-window by
+    /// construction — `App` owns exactly one
+    /// `Rc<Window>`, one chrome WebView and one
+    /// `WebContext`; the event loop matches
+    /// `Event::WindowEvent { event, .. }` WITHOUT a window
+    /// id, every content view is built as a child of the
+    /// one window, and the downloads coordinator, the
+    /// theme pushes and the panel funnel all assume that
+    /// one window. A second in-process window would need
+    /// window-id routing through all of it — a redesign,
+    /// not a tab action. The safe route is a new PROCESS:
+    /// argv handling already opens every openable argument
+    /// (`parse_input` per arg in `run`), and two Pico
+    /// processes are an accepted, documented posture
+    /// (0.40.1's accepted-risk note: state saves are
+    /// per-pid-temp atomic renames; 0.41.0 added the
+    /// downloads save lock). The plan (`core::tabcmd`)
+    /// decides the argument and whether the original
+    /// closes; the spawn's SUCCESS is the handoff point —
+    /// a failed spawn keeps the original, always.
+    fn open_tab_in_new_pico(&mut self, tab_id: u64) {
+        let Some(idx) = self.tab_index(tab_id) else {
+            log::error(&format!(
+                "tab new-pico: tab={tab_id} decision=deny reason=tab-gone"
+            ));
+            return;
+        };
+        let plan = tabcmd::new_pico_plan(&self.new_pico_facts(&self.tabs[idx]));
+        let url = self.tabs[idx].url.clone();
+        let arg = match plan {
+            tabcmd::NewPicoPlan::MoveAndClose | tabcmd::NewPicoPlan::OpenWithUrl => {
+                Some(url.as_str())
+            }
+            tabcmd::NewPicoPlan::OpenBare => None,
+            tabcmd::NewPicoPlan::NotOffered => {
+                log::error(&format!(
+                    "tab new-pico: tab={tab_id} decision=deny reason=not-offered url={}",
+                    redact_url(&url)
+                ));
+                return;
+            }
+        };
+        let exe = match std::env::current_exe() {
+            Ok(p) => p,
+            Err(e) => {
+                log::error(&format!("tab new-pico: current_exe failed: {e}"));
+                return;
+            }
+        };
+        let mut cmd = std::process::Command::new(&exe);
+        if let Some(u) = arg {
+            cmd.arg(u);
+        }
+        match cmd.spawn() {
+            Ok(_child) => {
+                log::info(&format!(
+                    "tab new-pico: tab={tab_id} plan={plan:?} spawned {}",
+                    exe.display()
+                ));
+                if plan == tabcmd::NewPicoPlan::MoveAndClose {
+                    // The handoff landed: the original
+                    // closes (close_tab picks the neighbour
+                    // activation, and never leaves the
+                    // window tab-less — it opens a start tab
+                    // if this was the only one, which is the
+                    // honest end state of "moved away").
+                    self.close_tab(tab_id);
+                }
+            }
+            Err(e) => {
+                log::error(&format!(
+                    "tab new-pico: tab={tab_id} plan={plan:?} spawn failed: {e} (tab kept)"
+                ));
+            }
+        }
+        self.push_state(false);
+    }
+
+    /// Execute one parsed tab command whose surface gate
+    /// has ALREADY passed (the handler owns parsing,
+    /// gating and the one-log-line law). A menu pick is a
+    /// tab command too: any executed verb retires the open
+    /// tab menu first (its rows are spent), exactly like a
+    /// content-menu pick closes its menu.
+    fn exec_tab(&mut self, cmd: &tabcmd::TabCommand) {
+        if self.tab_menu.take().is_some() {
+            self.layout();
+        }
+        match cmd {
+            tabcmd::TabCommand::Move { tab, before } => self.move_tab_before(*tab, *before),
+            tabcmd::TabCommand::MoveStep { tab, dir } => self.move_tab_step(*tab, *dir),
+            tabcmd::TabCommand::OpenInNewPico { tab } => self.open_tab_in_new_pico(*tab),
+        }
+    }
+
+    /// One tab body from the CHROME (0.41.0): tab bodies
+    /// ride the chrome transport like dl/nav bodies, so
+    /// the (boot, req) envelope dedupe guards them exactly
+    /// the same way — the envelope is mandatory, a
+    /// duplicate or stale-boot body is dropped, and every
+    /// body writes exactly one log line.
+    fn on_chrome_tab_body(&mut self, raw: &str) {
+        let Some((boot, req)) = dl_envelope_id(raw) else {
+            log::info("tab command dropped (missing chrome envelope)");
+            return;
+        };
+        if !self.dedupe.check(&Envelope {
+            boot,
+            req,
+            cmd: Command::WinMin,
+        }) {
+            log::info(&format!(
+                "tab command dropped (duplicate or stale boot, req {req})"
+            ));
+            return;
+        }
+        let body = normalize_dl_body(raw);
+        match tabcmd::parse_tab_body(&body) {
+            Ok(cmd) => {
+                let name = cmd.name();
+                if !tabcmd::spec_for(name).is_some_and(|s| s.allows(tabcmd::TabSurface::Chrome)) {
+                    log::error(&format!(
+                        "tab command: surface=chrome action={name} decision=deny reason=surface"
+                    ));
+                    return;
+                }
+                log::info(&format!(
+                    "tab command: surface=chrome action={name} tab={} decision=ok",
+                    cmd.tab()
+                ));
+                self.exec_tab(&cmd);
+            }
+            Err(deny) => {
+                log::error(&format!(
+                    "tab command: surface=chrome action={} decision=deny reason={}",
+                    tabcmd::action_label(&body),
+                    deny.as_str()
+                ));
+            }
+        }
     }
 
     /// Push the UI state snapshot to the chrome page. Signature-gated:
@@ -3908,6 +5393,12 @@ impl App {
             .lite
             .session_blocked
             .load(std::sync::atomic::Ordering::Relaxed);
+        // The star's filled state (0.41.0): the ACTIVE
+        // tab's URL against the bookmark store.
+        let bookmarked = self
+            .active_tab()
+            .map(|t| self.nav.is_bookmarked(&t.url))
+            .unwrap_or(false);
         // The cheap signature: every field the snapshot carries,
         // hashed from primitives. The themes catalogue is a
         // process constant (excluded); the Teleport payload is
@@ -3949,6 +5440,15 @@ impl App {
             m.tab.hash(&mut hasher);
             m.items.len().hash(&mut hasher);
         }
+        // Tab menu (0.41.0): same treatment — presence, its
+        // tab and its item count. (Tab ORDER itself needs
+        // no extra hash: the per-tab loop above hashes ids
+        // in vec order, so a reorder moves the signature.)
+        self.tab_menu.is_some().hash(&mut hasher);
+        if let Some(m) = &self.tab_menu {
+            m.tab.hash(&mut hasher);
+            m.items.len().hash(&mut hasher);
+        }
         self.dl.backend().0.version().hash(&mut hasher);
         self.persist.download_connections.hash(&mut hasher);
         self.persist.downloads_max_concurrent.hash(&mut hasher);
@@ -3959,6 +5459,8 @@ impl App {
         blocked_tab.hash(&mut hasher);
         lite_on.hash(&mut hasher);
         lite_blocked.hash(&mut hasher);
+        bookmarked.hash(&mut hasher);
+        self.suggest_open.hash(&mut hasher);
         let sig = hasher.finish();
         // The hint is one-shot (AUDIT V26 D4): it rides exactly
         // one snapshot, and a gated-out push would strand it — so
@@ -4010,7 +5512,23 @@ impl App {
             services: self.services_count,
             downloads: dl_snapshot,
             downloads_open: self.downloads_panel_open,
+            bookmarked,
             context_menu: self.context_menu.as_ref().map(|m| CtxMenuSnap {
+                x: m.x,
+                y: m.y,
+                items: m
+                    .items
+                    .iter()
+                    .map(|i| CtxItemSnap {
+                        id: i.id.to_string(),
+                        label: i.label.to_string(),
+                        shortcut: i.shortcut.map(|s| s.to_string()),
+                        enabled: i.enabled,
+                        sep: i.sep,
+                    })
+                    .collect(),
+            }),
+            tab_context_menu: self.tab_menu.as_ref().map(|m| CtxMenuSnap {
                 x: m.x,
                 y: m.y,
                 items: m
@@ -4073,6 +5591,10 @@ impl App {
                 }
             }
         }
+        // The start page's Bookmarks + Recent sections
+        // (0.41.0): pushed live to every start tab, gated
+        // on the payloads' own signature inside.
+        self.push_nav_to_start_tabs(false);
     }
 
     /// What the address bar shows for a tab: the file path for locally
@@ -4245,7 +5767,7 @@ impl App {
         });
         let json = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
         for t in &self.tabs {
-            if t.is_start || t.is_downloads {
+            if t.is_start || t.is_downloads || t.is_history {
                 if let Some(v) = t.view() {
                     let _ = v.evaluate_script(&format!(
                         "window.__picoTheme&&window.__picoTheme({json})"
@@ -4264,9 +5786,16 @@ impl App {
     /// the INIT bake at serve time (`render_downloads`
     /// merges the current theme/palette in) and the live
     /// `__picoTheme` push.
-    fn downloads_snapshot_json(&self) -> String {
-        let snap = self.dl.snapshot();
-        serde_json::to_string(&snap).unwrap_or_else(|_| "{}".to_string())
+    /// Serialize an ALREADY-TAKEN downloads snapshot
+    /// (0.41.2): `push_downloads_page` used to snapshot
+    /// twice per push — once for its signature, once
+    /// again for the payload — cloning every task view
+    /// both times (measured ~25 µs at 100 tasks,
+    /// ~255 µs at 1000). One snapshot is also more
+    /// correct: the signature and the payload now
+    /// describe the same instant.
+    fn downloads_snapshot_json_of(snap: &pico_core::core::dlcoord::DlSnapshot) -> String {
+        serde_json::to_string(snap).unwrap_or_else(|_| "{}".to_string())
     }
 
     /// Push the Downloads page's data to every live downloads
@@ -4291,7 +5820,7 @@ impl App {
             return;
         }
         self.last_dl_page_sig = sig;
-        let json = self.downloads_snapshot_json();
+        let json = Self::downloads_snapshot_json_of(&snap);
         {
             let mut data = self
                 .shared
@@ -4343,6 +5872,486 @@ impl App {
             }
         }
         self.push_downloads_page(true);
+    }
+
+    // -- Bookmarks + history (0.41.0, Workstream B) ----------------
+
+    /// Persist the nav store (0.41.0): called at every
+    /// mutation point, mirroring `save_state`'s discipline
+    /// (failures logged once per session; the store simply
+    /// does not persist past a failed save).
+    fn save_nav(&mut self) {
+        // AUDIT 0.41.1 (Front B F9): merge-on-save — a
+        // second running Pico (Move to New Window spawns
+        // one) must not have its records silently erased
+        // by this process's whole-store write, nor erase
+        // ours.
+        if let Err(e) = navstore::save_merged(&navstore::nav_path(), &self.nav, wall_now_ms()) {
+            log_nav_save_failure(&e);
+        }
+    }
+
+    /// The favicon URI map for the nav payloads
+    /// (0.41.2): preload the cache for every bookmarked /
+    /// visited host (one disk pass, then memory), and
+    /// return the positive host-key → `data:` URI map
+    /// the payload builders stamp `icon` fields from.
+    fn nav_icon_map(&mut self) -> std::collections::HashMap<String, String> {
+        let urls: Vec<&str> = self
+            .nav
+            .bookmarks
+            .iter()
+            .map(|b| b.url.as_str())
+            .chain(self.nav.history.iter().map(|e| e.url.as_str()))
+            .collect();
+        self.icons.preload(urls);
+        self.icons.uri_map()
+    }
+
+    /// The History page's one data shape (0.41.0): the full
+    /// entry list as `{entries: [...]}` — the page's stored
+    /// init data and every full `__picoSetHistory` push.
+    /// (Search answers are a second, query-tagged shape,
+    /// built in `exec_nav`.) Carries NO theme, like the
+    /// downloads shape. 0.41.2: entries carry `icon`.
+    fn history_init_json(&mut self) -> String {
+        let icon_map = self.nav_icon_map();
+        serde_json::json!({ "entries": history_entries_json(&self.nav.history, &icon_map) })
+            .to_string()
+    }
+
+    /// Push the History page's data to every live history
+    /// tab (0.41.0). Signature-gated on the serialized
+    /// payload unless forced, like the downloads page's
+    /// push; whenever the JSON is rebuilt the shared init
+    /// data is refreshed with it, so a fresh page load
+    /// renders current data.
+    /// The nav push signature (0.41.2): the nav-store
+    /// and icon-cache revisions packed into one word —
+    /// injective for any plausible session (both
+    /// counters only increase), so equal signatures
+    /// mean the payloads are byte-identical and
+    /// different ones mean something the pages show has
+    /// changed. O(1): the pre-0.41.2 gates serialized
+    /// the full payloads and hashed them on EVERY call
+    /// (push_state calls the start-tabs push on every
+    /// state push) — measured at up to ~4 ms per call
+    /// with a full history, spent even when nothing had
+    /// changed.
+    fn nav_push_sig(&self) -> u64 {
+        (self.nav_rev << 32) | self.icon_rev
+    }
+
+    fn push_history_page(&mut self, force: bool) {
+        let sig = self.nav_push_sig();
+        if !force && sig == self.last_hist_page_sig {
+            return;
+        }
+        self.last_hist_page_sig = sig;
+        let json = self.history_init_json();
+        let icon_map = self.nav_icon_map();
+        {
+            let mut data = self
+                .shared
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            data.history_init = json.clone();
+            data.icon_uris = icon_map;
+        }
+        let safe = json.replace("</", "<\\/");
+        for t in &self.tabs {
+            if t.is_history {
+                if let Some(v) = t.view() {
+                    let _ = v.evaluate_script(&format!(
+                        "window.__picoSetHistory&&window.__picoSetHistory({safe})"
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Open the History page (0.41.0): focus its tab when
+    /// one exists, otherwise create it — the mirror of
+    /// `open_downloads_page`, minus the coordinator's
+    /// page-visited bookkeeping (history has none).
+    fn open_history_page(&mut self) {
+        let existing = self.tabs.iter().find(|t| t.is_history).map(|t| t.id);
+        match existing {
+            Some(id) => {
+                self.activate(id, true);
+                self.push_state(true);
+            }
+            None => {
+                let id = self.add_tab(navcmd::HISTORY_URL, false, true);
+                if id > 0 {
+                    if let Some(t) = self.tab_mut(id) {
+                        t.is_history = true;
+                        t.title = "History".to_string();
+                    }
+                    self.live_history_tabs
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .insert(id);
+                }
+            }
+        }
+        self.push_history_page(true);
+    }
+
+    /// Push the start page's Bookmarks + Recent data to
+    /// every live start tab (0.41.0), and refresh the
+    /// shared mirrors `render_start` bakes into INIT.
+    /// Signature-gated on the serialized payloads unless
+    /// forced, like the Downloads-card push in
+    /// `push_state`.
+    fn push_nav_to_start_tabs(&mut self, force: bool) {
+        let sig = self.nav_push_sig();
+        if !force && sig == self.last_nav_sig {
+            return;
+        }
+        self.last_nav_sig = sig;
+        let icon_map = self.nav_icon_map();
+        let bookmarks = bookmarks_json(&self.nav.bookmarks, &icon_map).to_string();
+        let recent =
+            history_entries_json(self.nav.recent(navcmd::RECENT_TILES), &icon_map).to_string();
+        {
+            let mut data = self
+                .shared
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            data.nav_bookmarks = self.nav.bookmarks.clone();
+            data.nav_recent = self.nav.recent(navcmd::RECENT_TILES).to_vec();
+            data.icon_uris = icon_map;
+        }
+        let safe_b = bookmarks.replace("</", "<\\/");
+        let safe_r = recent.replace("</", "<\\/");
+        for t in &self.tabs {
+            if t.is_start {
+                if let Some(v) = t.view() {
+                    let _ = v.evaluate_script(&format!(
+                        "window.__picoSetBookmarks&&window.__picoSetBookmarks({safe_b})"
+                    ));
+                    let _ = v.evaluate_script(&format!(
+                        "window.__picoSetRecentHistory&&window.__picoSetRecentHistory({safe_r})"
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Record one committed navigation in the history
+    /// store (0.41.0). Called through
+    /// `record_visit_and_title` (AUDIT 0.41.3, A-F4) from
+    /// the NavigationSettled arm when a pending
+    /// candidate's verdict confirms it, and from the
+    /// pending-candidate flush points (CommitStart, tab
+    /// close, app close) when no verdict arrived. The
+    /// title is deliberately NOT taken here: the entry
+    /// starts from the host fallback and the helper's
+    /// `nav_follow_title` call (or a later title channel
+    /// report) corrects it. Internal pages and every
+    /// other unrecordable URL are refused inside the
+    /// store (the recording rules live in
+    /// `core::navstore`, nowhere else).
+    fn record_nav_visit(&mut self, url: &str) {
+        // AUDIT 0.41.1 (Front B F12): visits to Pico's
+        // own file-server pages (per-session port + root
+        // token URLs) are not history — the entry would
+        // be a dead link next session, and the start
+        // page's Recent list must not fill with them.
+        if self.server.root_id_for_url(url).is_some()
+            || pico_core::core::server::is_served_url(url, self.server.port())
+        {
+            return;
+        }
+        if self.nav.record_visit(url, "", wall_now_ms()) {
+            self.nav_rev += 1;
+            self.save_nav();
+            self.push_nav_to_start_tabs(false);
+            self.push_history_page(false);
+        }
+    }
+
+    /// Record one visit AND follow the recording tab's
+    /// already-settled title into the new entry
+    /// (AUDIT 0.41.3, A-F4): every `PendingVisit` record
+    /// site (verdict, flush, eviction) goes through here
+    /// instead of calling `record_nav_visit` bare. The
+    /// title follow is what the bare call missed: at
+    /// flush time the tab's title is still the outgoing
+    /// page's — exactly the title the flushed entry
+    /// should carry — and at verdict time it may already
+    /// be the new page's final title; either way a
+    /// settled title (non-empty, not the "Loading…"
+    /// placeholder) belongs on the entry now, not only
+    /// if a later title event happens to fire for it.
+    fn record_visit_and_title(&mut self, idx: usize, url: &str) {
+        self.record_nav_visit(url);
+        let title = self.tabs[idx].title.clone();
+        if !title.is_empty() && title != "Loading…" {
+            self.nav_follow_title(url, &title);
+        }
+    }
+
+    /// Follow a page's reported title into its history
+    /// entry (0.41.0): called from the title channels
+    /// (DocumentTitleChanged, observer notes) once the
+    /// tab's title settles.
+    fn nav_follow_title(&mut self, url: &str, title: &str) {
+        if self.nav.note_title(url, title) {
+            self.nav_rev += 1;
+            self.save_nav();
+            self.push_nav_to_start_tabs(false);
+            self.push_history_page(false);
+        }
+    }
+
+    /// Toggle the ACTIVE tab's bookmark (0.41.0): the
+    /// star button, Ctrl+D (both focus worlds), one path.
+    /// An unrecordable active URL (an internal page, a
+    /// failed tab) is a logged no-op — the star is a
+    /// mirror, and there is nothing to mirror.
+    fn toggle_active_bookmark(&mut self) {
+        let Some(tab) = self.active_tab() else {
+            return;
+        };
+        let url = tab.url.clone();
+        let title = if tab.title == "Loading…" {
+            String::new()
+        } else {
+            tab.title.clone()
+        };
+        if !navstore::is_recordable_url(&url) {
+            log::info(&format!(
+                "nav command: action=bookmark-toggle decision=skip reason=unrecordable url={}",
+                redact_url(&url)
+            ));
+            return;
+        }
+        // AUDIT 0.41.1 (Front B F8): the doc above always
+        // promised a failed tab is a logged no-op, but
+        // only the recordability check ran — a failed tab
+        // (no view) bookmarked its dead URL, and a tab
+        // still loading bookmarked the PREVIOUS page's
+        // URL wearing the previous page's title, which
+        // then stuck (titles only update history entries,
+        // never bookmarks).
+        if tab.view.is_none() || tab.loading {
+            log::info(&format!(
+                "nav command: action=bookmark-toggle decision=skip reason=not-settled url={}",
+                redact_url(&url)
+            ));
+            return;
+        }
+        // AUDIT 0.41.1 (Front B F12): Pico's own file-
+        // server pages carry a per-session port + root
+        // token — a bookmark of one is a dead link next
+        // session. (The local FILE stays reachable from
+        // the start page's services/recents, as before.)
+        if self.server.root_id_for_url(&url).is_some()
+            || pico_core::core::server::is_served_url(&url, self.server.port())
+        {
+            log::info(&format!(
+                "nav command: action=bookmark-toggle decision=skip reason=server-root url={}",
+                redact_url(&url)
+            ));
+            return;
+        }
+        let on = self.nav.toggle_bookmark(&url, &title, wall_now_ms());
+        self.nav_rev += 1;
+        log::info(&format!(
+            "nav command: action=bookmark-toggle decision=ok bookmarked={on} url={}",
+            redact_url(&url)
+        ));
+        self.save_nav();
+        self.push_state(true);
+        self.push_nav_to_start_tabs(false);
+    }
+
+    /// Execute one parsed nav command whose surface gate
+    /// has ALREADY passed (the handlers own parsing,
+    /// gating and the one-log-line law). `tab_id` is the
+    /// sending content tab for page surfaces, `None` for
+    /// the chrome.
+    fn exec_nav(&mut self, cmd: &navcmd::NavCommand, tab_id: Option<u64>) {
+        use navcmd::NavCommand as C;
+        match cmd {
+            C::BookmarkToggle => self.toggle_active_bookmark(),
+            C::BookmarkQuery => self.push_state(true),
+            C::BookmarksList => self.push_nav_to_start_tabs(true),
+            C::BookmarkRemove { url } => {
+                if self.nav.remove_bookmark(url, wall_now_ms()) {
+                    self.nav_rev += 1;
+                    self.save_nav();
+                    self.push_nav_to_start_tabs(true);
+                    self.push_state(true);
+                }
+            }
+            C::HistoryList => self.push_history_page(true),
+            C::HistorySearch { query } => {
+                let entries = self.nav.search_history(query);
+                let icon_map = self.nav_icon_map();
+                let payload = serde_json::json!({
+                    "entries": history_entries_json(&entries, &icon_map),
+                    "query": query,
+                });
+                let safe = payload.to_string().replace("</", "<\\/");
+                if let Some(t) = tab_id.and_then(|id| self.tabs.iter().find(|t| t.id == id)) {
+                    if let Some(v) = t.view() {
+                        let _ = v.evaluate_script(&format!(
+                            "window.__picoSetHistory&&window.__picoSetHistory({safe})"
+                        ));
+                    }
+                }
+            }
+            C::HistoryRemove { url } => {
+                if self.nav.remove_history(url, wall_now_ms()) {
+                    self.nav_rev += 1;
+                    self.save_nav();
+                    self.push_history_page(true);
+                    self.push_nav_to_start_tabs(false);
+                }
+            }
+            C::HistoryClear => {
+                if !self.nav.history.is_empty() {
+                    self.nav.clear_history(wall_now_ms());
+                    self.nav_rev += 1;
+                    self.save_nav();
+                    self.push_history_page(true);
+                    self.push_nav_to_start_tabs(false);
+                }
+            }
+            C::SuggestionsQuery { query } => {
+                let items = self
+                    .nav
+                    .suggestions(query, wall_now_ms(), navcmd::SUGGESTION_LIMIT);
+                // 0.41.2: each row's favicon rides along as
+                // its host's cached `data:` URI (or null —
+                // the chrome keeps the kind glyph then).
+                self.icons.preload(items.iter().map(|s| s.url.as_str()));
+                let payload = serde_json::json!({
+                    "query": query,
+                    "items": items.iter().map(|s| serde_json::json!({
+                        "url": s.url,
+                        "title": s.title,
+                        "kind": match s.kind {
+                            navstore::SuggestionKind::Bookmark => "bookmark",
+                            navstore::SuggestionKind::History => "history",
+                        },
+                        "icon": self.icons.cached_uri_for_url(&s.url)
+                            .map(serde_json::Value::String)
+                            .unwrap_or(serde_json::Value::Null),
+                    })).collect::<Vec<_>>(),
+                });
+                let safe = payload.to_string().replace("</", "<\\/");
+                let _ = self.chrome.evaluate_script(&format!(
+                    "window.__picoNavSuggestions&&window.__picoNavSuggestions({safe})"
+                ));
+                if !self.suggest_open {
+                    self.suggest_open = true;
+                    self.layout();
+                }
+            }
+        }
+    }
+
+    /// One nav body from the CHROME (0.41.0): nav bodies
+    /// ride the chrome transport like dl bodies, so the
+    /// (boot, req) envelope dedupe guards them exactly
+    /// the same way — the envelope is mandatory, a
+    /// duplicate or stale-boot body is dropped, and every
+    /// body writes exactly one log line.
+    fn on_chrome_nav_body(&mut self, raw: &str) {
+        let Some((boot, req)) = dl_envelope_id(raw) else {
+            log::info("nav command dropped (missing chrome envelope)");
+            return;
+        };
+        if !self.dedupe.check(&Envelope {
+            boot,
+            req,
+            cmd: Command::WinMin,
+        }) {
+            log::info(&format!(
+                "nav command dropped (duplicate or stale boot, req {req})"
+            ));
+            return;
+        }
+        let body = normalize_dl_body(raw);
+        match navcmd::parse_nav_body(&body) {
+            Ok(cmd) => {
+                let name = cmd.name();
+                if !navcmd::spec_for(name).is_some_and(|s| s.allows(navcmd::NavSurface::Chrome)) {
+                    log::error(&format!(
+                        "nav command: surface=chrome action={name} decision=deny reason=surface"
+                    ));
+                    return;
+                }
+                log::info(&format!(
+                    "nav command: surface=chrome action={name} decision=ok"
+                ));
+                self.exec_nav(&cmd, None);
+            }
+            Err(deny) => {
+                log::error(&format!(
+                    "nav command: surface=chrome decision=deny reason={}",
+                    deny.as_str()
+                ));
+            }
+        }
+    }
+
+    /// One nav body from a CONTENT page (0.41.0) — the
+    /// start page or the history page. The surface is
+    /// decided by the SENDING tab's kind under the
+    /// conjunctive gates (history: history tab AND on the
+    /// history URL; start: start tab AND on the start
+    /// URL — the action dispatch's gate shape), BEFORE
+    /// parsing; then the frozen parser and the per-verb
+    /// surface table decide. Every body writes exactly
+    /// one log line.
+    fn on_nav_page_body(&mut self, tab_id: u64, raw: &str) {
+        let label = navcmd::action_label(raw);
+        let Some(tab) = self.tabs.iter().find(|t| t.id == tab_id) else {
+            log::error(&format!(
+                "nav action: kind={label} tab={tab_id} decision=deny reason=tab-gone"
+            ));
+            return;
+        };
+        let surface = if navcmd::history_page_gate(tab.is_history, navcmd::is_history_url(&tab.url))
+        {
+            Some(navcmd::NavSurface::History)
+        } else if tab.is_start && on_start_page(&tab.url) {
+            Some(navcmd::NavSurface::Start)
+        } else {
+            None
+        };
+        let Some(surface) = surface else {
+            log::error(&format!(
+                "nav action: kind={label} tab={tab_id} decision=deny reason=not-on-nav-page"
+            ));
+            return;
+        };
+        match navcmd::parse_nav_body(raw) {
+            Ok(cmd) => {
+                if !navcmd::spec_for(cmd.name()).is_some_and(|s| s.allows(surface)) {
+                    log::error(&format!(
+                        "nav action: kind={label} tab={tab_id} decision=deny reason=surface"
+                    ));
+                    return;
+                }
+                log::info(&format!(
+                    "nav action: kind={label} tab={tab_id} decision=ok cmd={}",
+                    cmd.name()
+                ));
+                self.exec_nav(&cmd, Some(tab_id));
+            }
+            Err(deny) => {
+                log::error(&format!(
+                    "nav action: kind={label} tab={tab_id} decision=deny reason={}",
+                    deny.as_str()
+                ));
+            }
+        }
     }
 
     /// The coordinator's landing facts for one tab RIGHT
@@ -4800,7 +6809,31 @@ impl App {
     /// are otherwise worthless by design: they move no counter
     /// and gate nothing (a page could forge them; the log is a
     /// diagnostic, not a ledger).
+    /// AUDIT 0.41.3 (C-F2): through 0.41.2 this handler had
+    /// NO sender checks at all — any page context (including
+    /// the start tab's privileged channel) could write these
+    /// lines naming arbitrary paths. It now carries the same
+    /// sender discipline as `on_lite_chosen` /
+    /// `on_shield_pruned`, verbatim in shape: the Shield
+    /// engine on, a live content tab (never the start tab),
+    /// currently on a PUBLIC origin. (The parse layer's
+    /// credential-shaped-head drop is core's half of C-F2;
+    /// this gate is the shell's half.)
     fn on_shield_prune(&mut self, tab: u64, items: &[PruneItem]) {
+        if !self.shield.on.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        let Some(t) = self.tabs.iter().find(|t| t.id == tab) else {
+            return; // stale event for a closed tab
+        };
+        if t.is_start || t.view().is_none() {
+            return;
+        }
+        if pico_core::core::filterpipe::classify_origin(&t.url)
+            != pico_core::core::filterpipe::OriginClass::Public
+        {
+            return;
+        }
         let (committed, pending) = self.shield.page_state(tab);
         let page = if committed.is_empty() {
             &pending
@@ -4950,6 +6983,21 @@ impl App {
                 // the file URL alone, so the page being read
                 // (its live URL) stays outside the chain and
                 // the fate gate refuses, as through 0.34.
+                // AUDIT 0.41.3 (B-1): the live URL joins the
+                // chain ONLY when a navigation is actually
+                // in flight (the pending record is
+                // non-empty). A NON-navigation capture — an
+                // `<a download>` click on a settled page —
+                // has an empty pending record, so its chain
+                // is the captured URI alone, exactly like
+                // the context-menu path: pushing the live
+                // URL unconditionally put the page being
+                // read IN the chain, which made the fate
+                // matrix choose Back (leaving that page) or
+                // close/convert on a first-entry page, and
+                // made the referer the previous page instead
+                // of the page being read (the referer branch
+                // below keys off committed ∉ chain).
                 let mut chain: Vec<String> = Vec::new();
                 let push_unique = |chain: &mut Vec<String>, u: &str| {
                     if !chain.iter().any(|c| c == u) {
@@ -4959,11 +7007,14 @@ impl App {
                 if from_context_menu {
                     push_unique(&mut chain, &uri);
                 } else {
+                    let nav_in_flight = !t.pending_chain.is_empty();
                     for hop in &t.pending_chain {
                         let hop = hop.clone();
                         push_unique(&mut chain, &hop);
                     }
-                    push_unique(&mut chain, &t.url.clone());
+                    if nav_in_flight {
+                        push_unique(&mut chain, &t.url.clone());
+                    }
                     push_unique(&mut chain, &uri);
                 }
                 let in_chain = |u: &str| chain.iter().any(|c| c == u);
@@ -5217,6 +7268,25 @@ impl App {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(&tab_id);
+        // 0.41.0 hygiene: same for a history tab.
+        self.live_history_tabs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&tab_id);
+        // AUDIT 0.41.3 (B-S3): the tab's one-shot
+        // navigation expectation and userinfo adoption
+        // marker die with the conversion too — the start
+        // page this tab becomes must not inherit a
+        // credentialed-navigation blessing minted for the
+        // page it was. Mirrors `close_tab`'s removals.
+        self.expected_nav
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&tab_id);
+        self.userinfo_adopt
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&tab_id);
         self.live_start_tabs
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -5235,6 +7305,7 @@ impl App {
             let tab = &mut self.tabs[idx];
             tab.is_start = true;
             tab.is_downloads = false;
+            tab.is_history = false;
             tab.hist = TabHistory::new();
             tab.urlstate = UrlState::with_url(START_URL);
             tab.url = START_URL.to_string();
@@ -5752,6 +7823,34 @@ impl App {
     /// in place and a file opens in a new tab (the v12-proven
     /// split for content tabs).
     fn navigate_active(&mut self, input: &str) {
+        // Any address-bar submission retires the
+        // suggestions dropdown (0.41.0): the chrome closes
+        // its painting on blur, the app drops the rect
+        // claim here so no route can strand it.
+        if self.suggest_open {
+            self.suggest_open = false;
+            self.layout();
+        }
+        // The routing fix (0.41.0): a typed managed page —
+        // pico://downloads, pico://history — opens the
+        // MANAGED page through its opener, never a bare
+        // load into a normal tab (whose command verbs
+        // would all be gate-denied). The classifier is
+        // core's exact-spelling rule: lookalikes
+        // (pico://downloads.evil, pico://historyx) do not
+        // classify and fall through to the wall below,
+        // which refuses the pico: scheme as it always has.
+        match pico_core::core::addr::typed_internal_page(input) {
+            Some(pico_core::core::addr::TypedInternalPage::Downloads) => {
+                self.open_downloads_page();
+                return;
+            }
+            Some(pico_core::core::addr::TypedInternalPage::History) => {
+                self.open_history_page();
+                return;
+            }
+            None => {}
+        }
         let active_is_start = self.active_tab().map(|t| t.is_start).unwrap_or(false);
         // AUDIT V29 (A6-M1): the start page's own URL typed
         // into the address bar means "home" — it must never
@@ -6080,6 +8179,27 @@ impl App {
             self.push_state(false);
             return;
         }
+        // Nav bodies (0.41.0) ride the chrome transport the
+        // same way — the canonical `{"kind":"nav", ...}`
+        // shape is not a chrome `Command` either. Route
+        // before the command parser; the nav handler
+        // applies the envelope dedupe itself.
+        if navcmd::looks_like_nav_body(raw) {
+            self.on_chrome_nav_body(raw);
+            self.push_state(false);
+            return;
+        }
+        // Tab bodies (0.41.0, Workstream C) ride the chrome
+        // transport the same way — the canonical
+        // `{"kind":"tab", ...}` shape is not a chrome
+        // `Command` either. Route before the command
+        // parser; the tab handler applies the envelope
+        // dedupe itself.
+        if tabcmd::looks_like_tab_body(raw) {
+            self.on_chrome_tab_body(raw);
+            self.push_state(false);
+            return;
+        }
         let env = match parse_command(raw) {
             Ok(e) => e,
             Err(why) => {
@@ -6202,6 +8322,26 @@ impl App {
                 }
             }
             Command::CtxPick { id } => self.on_ctx_pick(&id),
+            Command::SuggestClose => {
+                // The suggestions dropdown closed (0.41.0):
+                // drop the chrome-rect extension claim.
+                if self.suggest_open {
+                    self.suggest_open = false;
+                    self.layout();
+                }
+            }
+            Command::HistoryPage => self.open_history_page(),
+            Command::TabMenuOpen { tab, x, y } => self.open_tab_menu(tab, x as f64, y as f64),
+            Command::TabMenuClose => {
+                // Tab menu dismissed without a pick
+                // (0.41.0): drop the stored state and
+                // restore the plain chrome bounds; a close
+                // with no menu open is a no-op.
+                if self.tab_menu.take().is_some() {
+                    self.layout();
+                    self.push_state(false);
+                }
+            }
             Command::ThemeSet { id } => self.set_palette(&id),
             Command::OpenFile => self.open_file_dialog(),
             Command::Social { site } => self.open_social(site),
@@ -6216,7 +8356,20 @@ impl App {
                 // a close never loses downloaded bytes' record.
                 self.dl.backend().0.pause_all_and_persist();
                 self.capture_geometry();
+                // 0.41.2: visits still pending their verdict
+                // record before the final save — those pages
+                // committed and displayed, and no verdict can
+                // arrive after teardown.
+                // AUDIT 0.41.3: flush the whole id-keyed
+                // candidate queue per tab, titles included
+                // (A-F4).
+                for idx in 0..self.tabs.len() {
+                    for url in self.tabs[idx].pending_visit.flush_all() {
+                        self.record_visit_and_title(idx, &url);
+                    }
+                }
                 self.save_state();
+                self.save_nav();
                 *control_flow = ControlFlow::Exit;
             }
         }
@@ -6473,6 +8626,25 @@ impl App {
             UrlEvent::CommitStart(u) => Some(u.clone()),
             _ => None,
         };
+        // 0.41.2: a new navigation starting flushes the
+        // tab's pending history visit as a record — the
+        // page committed and displayed, so it records
+        // rather than being lost. AUDIT 0.41.3: candidates are
+        // queued by navigation id (the ContentLoading
+        // registration), so a verdict can legitimately
+        // still be outstanding for an earlier navigation
+        // when this Start runs; flushing records every
+        // drained candidate, and a verdict that arrives
+        // afterwards for a flushed id matches nothing and
+        // decides nothing (`VerdictOutcome::NoMatch`).
+        // Each record carries the tab's settled title —
+        // at this point still the outgoing page's, which
+        // is the point (A-F4).
+        if is_commit_start {
+            for url in self.tabs[idx].pending_visit.flush_all() {
+                self.record_visit_and_title(idx, &url);
+            }
+        }
         // The pending-navigation chain (0.35, WS2), maintained
         // event by event BEFORE the reducer consumes the event
         // (the chain describes the navigation the event belongs
@@ -6637,6 +8809,41 @@ impl App {
             // real page since the capture".
             self.tabs[idx].adopted = false;
             self.tabs[idx].nav_epoch += 1;
+            // 0.41.0: the same Commit was the history
+            // store's recording point — one real page
+            // landing, one visit. (Push/Replace outcomes
+            // are same-document moves and never record;
+            // the store itself refuses internal pages and
+            // every other unrecordable URL.) AUDIT
+            // 0.41.3: the recording point moved OUT of
+            // this Commit — see the A-F2 block below.
+            // 0.41.2: the commit did not record at once
+            // — it stashed the URL as the tab's pending
+            // visit for the completion verdict to decide.
+            // AUDIT 0.41.3 (A-F2): the stash is GONE. The
+            // candidate now arrives on its own channel —
+            // the ContentLoading registration queues
+            // `(nav_id, url)` in the tab's `PendingVisit`
+            // (see the `NavCandidate` event arm), with the
+            // URL read from Source inside that dispatch —
+            // and this navigation's verdict, carrying the
+            // SAME nav_id, decides exactly that candidate
+            // in the NavigationSettled arm: a transport
+            // failure (no response received) never enters
+            // the global history, while every page that was
+            // actually displayed does. This Commit point
+            // itself records nothing and stashes nothing;
+            // it only moves the epoch/adopted state above.
+            // (0.41.1 gated this point on the tab's
+            // last-failed-source mark instead; that mark
+            // was keyed by a live Source read and refused
+            // genuine visits — see BUILD_NOTES 0.41.2. The
+            // 0.41.2 stash read its URL from this Finished
+            // event, whose URL wry derives from live
+            // Source at dispatch, so a superseding
+            // navigation could swap the URL under the
+            // previous navigation's verdict — the F2
+            // interleave id pairing removes.)
         }
         if let Some(new_url) = outcome.adopted {
             let id = self.tabs[idx].id;
@@ -6749,6 +8956,11 @@ impl App {
         }
         if !note.title.is_empty() && self.tabs[idx].title != note.title {
             self.tabs[idx].title = note.title.clone();
+            // 0.41.0: the observer's title is a title
+            // channel too — the history entry follows it.
+            let url = self.tabs[idx].url.clone();
+            let title = note.title.clone();
+            self.nav_follow_title(&url, &title);
         }
         self.push_state(false);
     }
@@ -6757,6 +8969,16 @@ impl App {
         let Some(idx) = self.tab_index(tab_id) else {
             return;
         };
+        // 0.41.3: a reveal-pending tab's first page-load
+        // event — Started or Finished, whichever arrives
+        // first — is its reveal point (see
+        // reveal_pending_tab). This runs before every branch
+        // below, including the ones that refuse or swallow
+        // this load, so a failed/refused first navigation
+        // resolves the reveal in this same call instead of
+        // stranding the previous view. (The reveal adds and
+        // removes no tabs, so `idx` stays valid.)
+        self.reveal_pending_tab(tab_id);
         // The download-finish swallow (0.33 WS1; coordinator
         // 0.34), FIRST — before any URL application, exactly
         // where 0.33 checked its marker. A captured download's
@@ -6791,7 +9013,13 @@ impl App {
         // report).
         let is_downloads_load =
             self.tabs[idx].is_downloads && (url == DOWNLOADS_URL || url == "pico://downloads/");
-        if real && !is_allowed_navigation_url(&url) && !is_downloads_load {
+        // 0.41.0: the History page's own load gets the
+        // same exemption (the core allowlist knows the
+        // history spellings since this release, so this
+        // is belt-and-braces symmetry with downloads).
+        let is_history_load =
+            self.tabs[idx].is_history && (url == navcmd::HISTORY_URL || url == "pico://history/");
+        if real && !is_allowed_navigation_url(&url) && !is_downloads_load && !is_history_load {
             // Defense in depth behind the navigation handler: never
             // let state track a document outside the allowlist.
             log::error(&format!(
@@ -7004,6 +9232,12 @@ impl App {
             self.exec_dl_effects(effects);
             self.push_downloads_page(true);
         }
+        // 0.41.0: a history tab's own load finish pushes
+        // the page data (forced, same reasoning as the
+        // downloads arm above).
+        if finished && self.tabs[idx].is_history {
+            self.push_history_page(true);
+        }
         // Heal on load (0.35.1): an internal page (start or
         // downloads) that finished loading re-receives the
         // current theme through the one live channel — a
@@ -7012,7 +9246,9 @@ impl App {
         // INIT was baked with. Unconditional but cheap: the
         // push is two small evals at most (one per internal
         // tab).
-        if finished && (self.tabs[idx].is_start || self.tabs[idx].is_downloads) {
+        if finished
+            && (self.tabs[idx].is_start || self.tabs[idx].is_downloads || self.tabs[idx].is_history)
+        {
             self.push_theme_to_internal_tabs();
         }
         self.push_state(false);
@@ -7298,7 +9534,7 @@ fn process_image_name(pid: u32) -> Option<String> {
 fn fatal_webview(context: &str, err: &str) -> ! {
     log::error(&format!("fatal: {context}: {err}"));
     let msg = format!(
-        "Pico could not start: {context}.\n\n{err}\n\nPico needs the Microsoft Edge WebView2 Runtime (it ships with Windows 11 and recent Windows 10). Details were written to pico.log next to the app data."
+        "Pico could not start: {context}.\n\n{err}\n\nPico needs the Microsoft Edge WebView2 Runtime (it ships with Windows 11 and recent Windows 10). Details were written to pico.log in Pico's data folder (%LOCALAPPDATA%\\Pico)."
     );
     #[cfg(windows)]
     {
@@ -7421,6 +9657,58 @@ fn build_chrome(
 }
 
 pub fn run() {
+    // Data relocation (0.41.0): ALL persistent state lives in
+    // %LOCALAPPDATA%\Pico now — nothing beside the exe. The
+    // legacy migration runs BEFORE the log opens, because
+    // (a) pico.log itself initializes into the NEW home (the
+    // legacy log is carried into it by the migration), and
+    // (b) the copy must land before anything reads state or
+    // creates a WebView. The migration is silent while it
+    // runs; every step is logged immediately after init,
+    // from the outcome records. Source choice: the
+    // beside-exe `data\` tree (the v27–0.40 home) wins when
+    // present; otherwise the Roaming %APPDATA%\Pico tree
+    // (pre-v27 / the v27 fallback home). The beside-exe tree
+    // is removed after a VERIFIED copy; the Roaming tree
+    // stays as the standing backup, as in the v27 move.
+    let exe = pstore::exe_dir();
+    let home_dir = pstore::pico_dir();
+    let legacy_exe = pstore::legacy_exe_data_dir(&exe);
+    // AUDIT 0.41.1 (Front A F4): the source choice is a
+    // fall-through, not an if/else on existence. Through
+    // 0.41.0 a beside-exe `data\` folder that existed but
+    // yielded NO migration (empty, or log-only) shadowed
+    // the Roaming tree forever — the Roaming state and
+    // profile were never even attempted, and nothing was
+    // logged. Now: the beside-exe tree goes first; if it
+    // attempted nothing, the Roaming tree gets its turn;
+    // if both held data and the beside-exe tree won, the
+    // shadowed Roaming tree is named in the log.
+    let mut migration_source: Option<PathBuf> = None;
+    let mut migration = pstore::LegacyMigrationOutcome::default();
+    let mut shadowed_source: Option<PathBuf> = None;
+    if legacy_exe.is_dir() && legacy_exe != home_dir {
+        migration = pstore::migrate_legacy_home(&legacy_exe, &home_dir, true);
+        migration_source = Some(legacy_exe.clone());
+    }
+    {
+        let roaming = pstore::appdata_pico_dir();
+        if roaming.is_dir() && roaming != home_dir && migration_source.as_ref() != Some(&roaming) {
+            if !migration.attempted {
+                migration = pstore::migrate_legacy_home(&roaming, &home_dir, false);
+                migration_source = Some(roaming);
+            } else {
+                shadowed_source = Some(roaming);
+            }
+        }
+    }
+    // A beside-exe WebView2 user-data folder (a
+    // default-context leftover — the current build always
+    // passes its explicit folder, see run_with_server)
+    // migrates into the new WebView2 dir here too, before
+    // any WebView exists. Best-effort; never removes.
+    let (wv_attempted, wv_report) = pstore::migrate_beside_exe_webview(&exe, &home_dir);
+
     log::init();
     log::install_panic_hook();
     log::info(&format!(
@@ -7428,109 +9716,162 @@ pub fn run() {
         std::process::id()
     ));
     log::info(&format!("dpi awareness: {}", crate::dpi::outcome()));
-    // Portable data (AUDIT V27-C): the data directory was
-    // resolved (and probed) when the log opened — pico.log
-    // itself lives there. Say where everything lives, then run
-    // the one-time appdata migration if the planner calls for
-    // it. This MUST precede state loading and any WebView2
-    // context creation (both happen in run_with_server), so a
-    // migrated profile is the one the first window opens with.
+    // Say where everything lives (0.41.0): the AppData home,
+    // and how it was resolved.
     {
         let choice = pstore::data_dir_choice();
-        if choice.portable {
-            log::info(&format!("data: portable {}", choice.dir.display()));
-        } else {
-            log::info(&format!(
-                "data: fallback appdata ({}) {}",
-                choice.reason,
-                choice.dir.display()
-            ));
-            // AUDIT 0.31 (A5-L11): say plainly when the
-            // fallback lives on a network path (a UNC APPDATA
-            // on a roaming profile) — state and profile I/O
-            // then cross the network, which explains slow or
-            // odd startup and must not be a silent surprise.
-            if choice.dir.to_string_lossy().starts_with("\\\\") {
-                log::info(
-                    "data: note — the fallback data directory is on a network (UNC) path; state, log and profile are read/written over the network",
-                );
-            }
-        }
-        let appdata = pstore::appdata_pico_dir();
-        let portable_has_state = pstore::state_path().is_file();
-        if portable_has_state {
-            // AUDIT V29 (A5-1): state present means any pending
-            // marker is stale (a crash between the state copy
-            // and the marker's removal) — retire it, or a later
-            // state loss would mistake the live profile for a
-            // partial copy and resume over it.
-            let _ = std::fs::remove_file(choice.dir.join(pstore::MIGRATION_PENDING_NAME));
-        }
-        // AUDIT V29 (A5-7): the appdata facts are only STATTED
-        // when they can matter. The planner stands down
-        // whenever portable state exists, so evaluating the
-        // appdata arguments eagerly on every startup touched
-        // the appdata tree (a UNC-pointed APPDATA would mean an
-        // SMB touch) for a migration that could not happen.
-        let (appdata_has_state, appdata_has_profile) = if portable_has_state {
-            (false, false)
-        } else {
-            (
-                appdata.join("state.json").is_file(),
-                pstore::appdata_webview_dir().is_dir(),
-            )
-        };
-        let plan = pstore::plan_migration(
-            choice,
-            &appdata,
-            portable_has_state,
-            pstore::webview_data_dir().is_dir(),
-            appdata_has_state,
-            appdata_has_profile,
-        );
-        if let pstore::MigrationPlan::Copy { .. } | pstore::MigrationPlan::CopyStateOnly { .. } =
-            plan
-        {
-            let report = pstore::perform_migration(&plan);
-            // AUDIT 0.34.1 (field addition): the itemized
-            // failures and pure skips log BEFORE the summary
-            // line — relative paths only, never contents,
-            // so the summary's counts are always preceded by
-            // the items that make them up.
-            for detail in &report.details {
-                match &detail.error {
-                    Some(error) => log::error(&format!(
-                        "data: migration item failed: {} {} — {}",
-                        detail.kind, detail.path, error
-                    )),
-                    None => log::info(&format!(
-                        "data: migration item skipped: {} {}",
-                        detail.kind, detail.path
-                    )),
-                }
-            }
-            if report.failed > 0 {
-                // AUDIT V29 (A5-1): an incomplete migration is
-                // logged as one — the plan re-issues next start.
-                log::error(&format!(
-                    "data: migration INCOMPLETE ({} failed, {} skipped; state marker withheld, will retry next start; originals untouched in appdata)",
-                    report.failed, report.skipped
-                ));
-            } else {
-                log::info(&format!(
-                    "data: migrated from appdata (state {}, profile {} files, {} skipped)",
-                    if report.state_copied {
-                        "copied"
-                    } else {
-                        "absent"
-                    },
-                    report.profile_files,
-                    report.skipped
-                ));
-            }
+        log::info(&format!(
+            "data: appdata ({}) {}",
+            choice.reason,
+            choice.dir.display()
+        ));
+        // AUDIT 0.31 (A5-L11): say plainly when the home
+        // lives on a network path (a UNC-pointed profile) —
+        // state and profile I/O then cross the network,
+        // which explains slow or odd startup and must not
+        // be a silent surprise.
+        if choice.dir.to_string_lossy().starts_with("\\\\") {
+            log::info(
+                "data: note — the data directory is on a network (UNC) path; state, log and profile are read/written over the network",
+            );
         }
     }
-
+    if migration.attempted {
+        let source = migration_source
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        let report = &migration.report;
+        // AUDIT 0.34.1 (field addition): the itemized
+        // failures and pure skips log BEFORE the summary
+        // line — relative paths only, never contents, so
+        // the summary's counts are always preceded by the
+        // items that make them up.
+        for detail in &report.details {
+            match &detail.error {
+                Some(error) => log::error(&format!(
+                    "data: migration item failed: {} {} — {}",
+                    detail.kind, detail.path, error
+                )),
+                None => log::info(&format!(
+                    "data: migration item skipped: {} {}",
+                    detail.kind, detail.path
+                )),
+            }
+        }
+        log::info(&format!(
+            "data: migration from {source}: state {}, {} files copied, {} skipped, {} failed",
+            if report.state_copied {
+                "copied"
+            } else {
+                "absent"
+            },
+            report.profile_files,
+            report.skipped,
+            report.failed
+        ));
+        if migration.log_carried {
+            log::info("data: migration carried the legacy pico.log into the new home");
+        }
+        // AUDIT 0.41.1 (Front A F7): a legacy log that
+        // could not be carried is said out loud — through
+        // 0.41.0 the failure was silent even as the source
+        // holding the only copy was removed.
+        if migration.source_had_log && !migration.log_carried {
+            log::error(
+                "data: migration could NOT carry the legacy pico.log — it exists only in the legacy folder",
+            );
+        }
+        if migration.verified {
+            if migration.source_removed {
+                log::info("data: migration verified — legacy folder removed");
+            } else if migration.removal_withheld_for_log {
+                log::error(
+                    "data: migration verified but the legacy folder is KEPT — its pico.log could not be carried, and the folder holds the only copy",
+                );
+            } else if migration.remove_failed {
+                match &migration.remove_leftover {
+                    Some(leftover) => log::error(&format!(
+                        "data: migration verified but the legacy folder could not be fully removed; its remains are at {}",
+                        leftover.display()
+                    )),
+                    None => log::error(
+                        "data: migration verified but the legacy folder could not be removed; it is left in place",
+                    ),
+                }
+            } else {
+                log::info("data: migration verified — legacy folder kept as backup");
+            }
+        } else {
+            // Verification failed (or a copy item failed):
+            // the legacy folder is UNTOUCHED and Pico runs
+            // from the migrated copies; the plan re-issues
+            // next start. Loud, per the 0.41.0 brief.
+            log::error(&format!(
+                "data: migration NOT VERIFIED ({} failed) — legacy folder left untouched at {source}; running from the migrated copies, will retry next start",
+                report.failed
+            ));
+        }
+    }
+    // AUDIT 0.41.1 (Front A F4): a second legacy home
+    // that lost the source choice is named, not silent.
+    if let Some(shadowed) = &shadowed_source {
+        log::info(&format!(
+            "data: note — a second legacy home at {} also holds data; the beside-exe tree was migrated, this one is left in place untouched",
+            shadowed.display()
+        ));
+    }
+    // AUDIT 0.41.1 (Front A F10): if the migration ran
+    // and the new home could not even hold the log (an
+    // unwritable home is exactly the case where every
+    // outcome line above went nowhere), leave the outcome
+    // record somewhere reachable: the legacy source (it
+    // survived any failed migration) and the temp dir.
+    if migration.attempted && !home_dir.join("pico.log").exists() {
+        let record = format!(
+            "Pico {DISPLAY_VERSION}: legacy migration attempted from {} — {} files copied, {} failed, verified: {}. The new data home at {} could not hold the log; this record is the fallback.\n",
+            migration_source
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
+            migration.report.profile_files,
+            migration.report.failed,
+            migration.verified,
+            home_dir.display(),
+        );
+        if let Some(source) = &migration_source {
+            let _ = std::fs::write(source.join("pico-migration-fallback.txt"), &record);
+        }
+        let _ = std::fs::write(
+            std::env::temp_dir().join("pico-migration-fallback.txt"),
+            &record,
+        );
+    }
+    if wv_attempted {
+        for detail in &wv_report.details {
+            match &detail.error {
+                Some(error) => log::error(&format!(
+                    "data: webview migration item failed: {} {} — {}",
+                    detail.kind, detail.path, error
+                )),
+                None => log::info(&format!(
+                    "data: webview migration item skipped: {} {}",
+                    detail.kind, detail.path
+                )),
+            }
+        }
+        if wv_report.failed > 0 {
+            log::error(&format!(
+                "data: beside-exe WebView2 profile migration INCOMPLETE ({} failed, {} skipped; source left in place beside the exe)",
+                wv_report.failed, wv_report.skipped
+            ));
+        } else {
+            log::info(&format!(
+                "data: beside-exe WebView2 profile migrated ({} files, {} skipped; source left in place beside the exe)",
+                wv_report.profile_files, wv_report.skipped
+            ));
+        }
+    }
     match FileServer::start() {
         Ok(server) => run_with_server(server),
         Err(e) => {
@@ -7626,6 +9967,56 @@ fn run_with_server(server: FileServer) {
         ));
     }
 
+    // The bookmarks+history store (0.41.0): its own file
+    // (nav.json in the Pico home), loaded with the state
+    // file's discipline — a missing file is defaults, a
+    // corrupt one is defaults with one log line saying so
+    // (0.41.1: the corrupt bytes are quarantined to
+    // nav.json.corrupt first, so this session's saves
+    // cannot silently overwrite the only copy).
+    let nav_store = match navstore::load_from_checked(&navstore::nav_path(), wall_now_ms()) {
+        navstore::NavLoadOutcome::Loaded(s) => {
+            log::info(&format!(
+                "nav store loaded: {} bookmarks, {} history entries",
+                s.bookmarks.len(),
+                s.history.len()
+            ));
+            *s
+        }
+        navstore::NavLoadOutcome::Missing => {
+            log::info("no nav file yet; empty bookmarks/history in use");
+            NavStore::default()
+        }
+        navstore::NavLoadOutcome::Corrupt(why) => {
+            log::error(&format!(
+                "nav file unusable ({why}); empty bookmarks/history in use, corrupt file quarantined as nav.json.corrupt"
+            ));
+            NavStore::default()
+        }
+    };
+
+    // The favicon cache (0.41.2): `<Pico home>/icons/`,
+    // resolved here exactly like the nav file's home —
+    // core never resolves the home itself. Preloaded for
+    // the loaded store's hosts so the first start /
+    // history renders already carry icons.
+    let mut icons_cache = IconCache::new(pstore::pico_dir().join("icons"));
+    {
+        let urls: Vec<&str> = nav_store
+            .bookmarks
+            .iter()
+            .map(|b| b.url.as_str())
+            .chain(nav_store.history.iter().map(|e| e.url.as_str()))
+            .collect();
+        icons_cache.preload(urls);
+    }
+    let startup_icon_map = icons_cache.uri_map();
+    log::info(&format!(
+        "favicon cache: {} host icons loaded from {}",
+        startup_icon_map.len(),
+        icons_cache.dir().display()
+    ));
+
     let shared: Shared = Arc::new(Mutex::new(SharedData {
         services: Vec::new(),
         other_listeners: 0,
@@ -7634,6 +10025,13 @@ fn run_with_server(server: FileServer) {
         theme: persist.theme.clone(),
         palette: persist.theme_id.clone(),
         stats: stats_book.view(),
+        nav_bookmarks: nav_store.bookmarks.clone(),
+        nav_recent: nav_store.recent(navcmd::RECENT_TILES).to_vec(),
+        history_init: serde_json::json!({
+            "entries": history_entries_json(&nav_store.history, &startup_icon_map),
+        })
+        .to_string(),
+        icon_uris: startup_icon_map,
         // 0.34: the Downloads page's initial data — an
         // empty-but-valid snapshot JSON (the frozen
         // `DlSnapshot` shape, seeded from the persisted
@@ -7667,8 +10065,9 @@ fn run_with_server(server: FileServer) {
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
 
-    // The runtime window icon (AUDIT V24-1): the Pico mark drawn
-    // by scripts/gen_icon.py, handed to tao as raw RGBA at window
+    // The runtime window icon (AUDIT V24-1): the Pico mark
+    // resampled from the master artwork by scripts/gen_icon.py,
+    // handed to tao as raw RGBA at window
     // creation. This is the icon route with ZERO resource risk —
     // it involves no resource section at all — and it is what the
     // taskbar button shows. A malformed asset degrades to the
@@ -7762,6 +10161,15 @@ fn run_with_server(server: FileServer) {
         "profile: persistent, cookies db present={}",
         pico_core::core::media::cookies_db_present(&data_dir)
     ));
+    // 0.41.0: THE explicit WebView2 user-data folder. Every
+    // WebView in the app (the chrome, built by build_chrome,
+    // and every content/internal view, built by
+    // build_content_view) is created on this ONE context —
+    // there is no other WebViewBuilder in the tree — so the
+    // runtime never falls back to a default folder and no
+    // `Pico.exe.WebView2` / `EBWebView` folder can appear
+    // beside the exe. Pinned by a source-scan test in
+    // tests/portable_data.rs.
     let mut web_ctx = WebContext::new(Some(data_dir));
 
     // The chrome is the app's only control surface; if it cannot be
@@ -7864,34 +10272,61 @@ fn run_with_server(server: FileServer) {
         });
     }
 
-    // Downloads (0.32): resolve the downloads folder ONCE, the
-    // same way the data dir is resolved — probed facts in, one
-    // pure decision out (`core::download::resolve_downloads_dir`).
-    // Beside the exe when its Downloads subfolder passes the
-    // write+rename probe; else the user's own Downloads folder
-    // (USERPROFILE\Downloads, when the variable is set); else
-    // beside the exe anyway as the last resort (the manager's
-    // writes then fail per-task, visibly, never silently).
-    // Task state lives under the data dir's `downloads` folder.
-    let downloads_manager = {
-        let exe_dir = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-            .unwrap_or_else(|| PathBuf::from("."));
-        let exe_writable = probe_downloads_dir(&exe_dir);
-        let user_downloads = std::env::var("USERPROFILE")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .map(|home| PathBuf::from(home).join("Downloads"));
-        let used_user_fallback = !exe_writable && user_downloads.is_some();
-        let dir = pico_core::core::download::resolve_downloads_dir(
-            &exe_dir,
-            user_downloads.as_deref(),
-            exe_writable,
+    // Downloads (0.32; relocated 0.41.0): resolve the
+    // downloads folder ONCE, the same way the data dir is
+    // resolved — facts in, one pure decision out
+    // (`core::download::resolve_downloads_dir`). 0.41.0:
+    // the default is the standard Windows Downloads folder
+    // (FOLDERID_Downloads / %USERPROFILE%\Downloads, via
+    // `core::state::user_downloads_dir`); there is no
+    // user-changed downloads-directory setting, so the
+    // custom slot is None; the last resort is a Downloads
+    // folder inside the AppData home — NEVER beside the
+    // exe. Task state lives under the data dir's
+    // `downloads` folder.
+    // Legacy downloads folder (0.41.0 Workstream D, F-A1):
+    // part of the startup migration sequence above — when
+    // a legacy `<exe>\Downloads` folder (where ≤0.40.3
+    // downloads actually landed) exists and differs from
+    // the new default downloads folder, its path is
+    // persisted in the app state so task-file resolution
+    // can fall back to it. The folder and its files are
+    // never moved, copied, or rewritten, and task
+    // records are never rewritten. A fresh install (no
+    // such folder) leaves the field unset forever.
+    {
+        let current_for_legacy = pico_core::core::download::resolve_downloads_dir(
+            None,
+            pstore::user_downloads_dir().as_deref(),
+            &pstore::pico_dir(),
         );
-        if used_user_fallback {
+        if let Some(candidate) =
+            pstore::legacy_downloads_candidate(&pstore::exe_dir(), &current_for_legacy)
+        {
+            let candidate_text = candidate.to_string_lossy().into_owned();
+            if persist.legacy_downloads_dir.as_deref() != Some(candidate_text.as_str()) {
+                persist.legacy_downloads_dir = Some(candidate_text);
+                if let Err(e) = pstore::save(&persist) {
+                    log_save_failure(&e);
+                }
+            }
+        }
+        if let Some(legacy) = &persist.legacy_downloads_dir {
             log::info(&format!(
-                "downloads: folder {} (fallback: user Downloads)",
+                "downloads: legacy folder {legacy} (fallback for pre-0.41 task files)"
+            ));
+        }
+    }
+    let downloads_manager = {
+        let user_downloads = pstore::user_downloads_dir();
+        let dir = pico_core::core::download::resolve_downloads_dir(
+            None,
+            user_downloads.as_deref(),
+            &pstore::pico_dir(),
+        );
+        if user_downloads.is_none() {
+            log::info(&format!(
+                "downloads: folder {} (fallback: AppData home — user Downloads folder unknown)",
                 dir.display()
             ));
         } else {
@@ -7910,6 +10345,14 @@ fn run_with_server(server: FileServer) {
             persist.download_connections,
             persist.downloads_max_concurrent,
             persist.downloads_speed_limit_kbps,
+        );
+        // F-A1: hand the manager the persisted legacy
+        // fallback folder (see the migration block above).
+        manager.set_legacy_downloads_dir(
+            persist
+                .legacy_downloads_dir
+                .as_ref()
+                .map(std::path::PathBuf::from),
         );
         // 0.34: the coordinator owns the manager from here,
         // through the adapter; its settings seed from the
@@ -7967,9 +10410,18 @@ fn run_with_server(server: FileServer) {
         teleport_version: 0,
         palette_panel_open: false,
         context_menu: None,
+        tab_menu: None,
         pending_focus_addr: false,
         live_start_tabs: std::sync::Arc::new(Mutex::new(std::collections::HashSet::new())),
         live_downloads_tabs: std::sync::Arc::new(Mutex::new(std::collections::HashSet::new())),
+        nav: nav_store,
+        icons: icons_cache,
+        live_history_tabs: std::sync::Arc::new(Mutex::new(std::collections::HashSet::new())),
+        suggest_open: false,
+        last_nav_sig: 0,
+        last_hist_page_sig: 0,
+        nav_rev: 0,
+        icon_rev: 0,
         last_layout_sig: String::new(),
         expected_nav: std::sync::Arc::new(Mutex::new(std::collections::HashMap::new())),
         userinfo_adopt: std::sync::Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -7979,6 +10431,10 @@ fn run_with_server(server: FileServer) {
     // coordinator's REAL snapshot (restored tasks included)
     // before any tab can render the page.
     app.push_downloads_page(true);
+    // 0.41.0: the same seeding for the History page's init
+    // data (the shared mirror was built from the loaded
+    // store; this settles the push signature).
+    app.push_history_page(true);
 
     // Startup tabs: open every command-line argument that resolves —
     // files, directories, URLs, bare ports (AUDIT L4: v12 opened
@@ -8104,15 +10560,23 @@ fn run_with_server(server: FileServer) {
                 UserEvent::TitleChanged { tab, title } => {
                     let clean = truncate_chars(title.trim(), 512);
                     if !clean.is_empty() {
+                        let mut follow: Option<(String, String)> = None;
                         if let Some(t) = app.tab_mut(tab) {
                             if !t.is_start && t.title != clean {
-                                t.title = clean;
+                                t.title = clean.clone();
+                                follow = Some((t.url.clone(), clean.clone()));
                             }
+                        }
+                        // 0.41.0: the page's reported title
+                        // settles into its history entry.
+                        if let Some((url, title)) = follow {
+                            app.nav_follow_title(&url, &title);
                         }
                     }
                     app.push_state(false);
                 }
                 UserEvent::PageLoad { tab, finished, url } => app.on_page_load(tab, finished, url),
+                UserEvent::RetireViews { except } => app.retire_views(except),
                 UserEvent::NewWindow { tab, url: raw_url } => {
                     // AUDIT V28 A6-13: the event is keyed by its
                     // source tab like every other URL event — a
@@ -8188,13 +10652,134 @@ fn run_with_server(server: FileServer) {
                     app.close_all_panels();
                 }
                 UserEvent::DownloadsPageShortcut => {
-                    // Ctrl+J from content focus (0.35, WS5):
-                    // open the downloads page through the
-                    // same code the coordinator's
-                    // OpenDownloadsPage effect uses (which
-                    // also performs page_visited).
+                    // Ctrl+J from content focus (0.35, WS5),
+                    // or a managed-page link naming the
+                    // Downloads page (0.41.0 funnel — the
+                    // same event, the same opener): open the
+                    // downloads page through the same code
+                    // the coordinator's OpenDownloadsPage
+                    // effect uses (which also performs
+                    // page_visited).
                     log::info("downloads page opened (ctrl+j)");
                     app.open_downloads_page();
+                }
+                UserEvent::HistoryPageShortcut => {
+                    // Ctrl+H from content focus, or a
+                    // managed-page link naming the History
+                    // page (0.41.0): open the managed page.
+                    log::info("history page opened (shortcut or page link)");
+                    app.open_history_page();
+                }
+                UserEvent::BookmarkShortcut => {
+                    // Ctrl+D from content focus (0.41.0):
+                    // the star's keyboard twin.
+                    app.toggle_active_bookmark();
+                }
+                UserEvent::NavCandidate { tab, nav_id, url } => {
+                    // AUDIT 0.41.3 (A-F2): a navigation's
+                    // committed document started loading —
+                    // queue its (nav_id, url) candidate in
+                    // the tab's PendingVisit. A candidate
+                    // evicted by the bounded queue records
+                    // at once (the lost-verdict doctrine),
+                    // with the tab's settled title (A-F4).
+                    // A candidate for a gone tab has nowhere
+                    // to queue and is dropped silently — the
+                    // tab's close flush already ran.
+                    if let Some(idx) = app.tab_index(tab) {
+                        if let Some(evicted) =
+                            app.tabs[idx].pending_visit.note_candidate(nav_id, &url)
+                        {
+                            app.record_visit_and_title(idx, &evicted);
+                        }
+                    }
+                }
+                UserEvent::NavigationSettled {
+                    tab,
+                    nav_id,
+                    success,
+                    http_status,
+                } => {
+                    // AUDIT 0.41.3 (A-F2): the verdict
+                    // decides the pending history candidate
+                    // carrying ITS OWN nav_id — candidates
+                    // are queued by the ContentLoading
+                    // registration under the navigation's
+                    // id, so a verdict can never be stamped
+                    // onto a different navigation's URL (the
+                    // 0.41.2 stash read its URL from the
+                    // Finished event, whose URL wry derives
+                    // from live Source at dispatch, and the
+                    // supersede interleave could swap it).
+                    // A verdict whose id matches nothing
+                    // (NoMatch — the candidate was already
+                    // flushed or evicted, or the navigation
+                    // never produced a candidate) decides
+                    // nothing, silently.
+                    // 0.41.3: the verdict is ALSO the reveal
+                    // resolution for a navigation refused at
+                    // NavigationStarting — such a navigation
+                    // produces no page-load event, so without
+                    // this a fresh tab refused that way would
+                    // strand the previous view visible under
+                    // its own tab strip entry forever.
+                    app.reveal_pending_tab(tab);
+                    if let Some(idx) = app.tab_index(tab) {
+                        use navstore::VerdictOutcome;
+                        match app.tabs[idx]
+                            .pending_visit
+                            .note_verdict(nav_id, success, http_status)
+                        {
+                            VerdictOutcome::Record(url) => app.record_visit_and_title(idx, &url),
+                            VerdictOutcome::Drop(url) => log::info(&format!(
+                                "nav record skipped (failed navigation): {}",
+                                redact_url(&url)
+                            )),
+                            VerdictOutcome::NoMatch => {}
+                        }
+                    }
+                }
+                UserEvent::FaviconReceived {
+                    tab,
+                    host_key,
+                    bytes,
+                } => {
+                    // 0.41.2: store the icon in the cache
+                    // (core owns the bounds and the file
+                    // discipline) and re-push the nav
+                    // payloads — their signature gates make
+                    // an unchanged icon cost nothing. A
+                    // refusal degrades to the letter tile
+                    // the rows already show.
+                    match app.icons.store_key(&host_key, &bytes) {
+                        icons::StoreVerdict::Stored => {
+                            app.icon_rev += 1;
+                            log::info(&format!(
+                                "favicon cached: {host_key} ({} bytes, tab {tab})",
+                                bytes.len()
+                            ));
+                            app.push_nav_to_start_tabs(false);
+                            app.push_history_page(false);
+                        }
+                        icons::StoreVerdict::AlreadyCached => {}
+                        verdict => log_favicon_store_failure(verdict),
+                    }
+                }
+                UserEvent::MoveTabShortcut { dir } => {
+                    // Ctrl+Shift+PageUp/PageDown from
+                    // content focus (0.41.0): move the
+                    // ACTIVE tab one position.
+                    let active = app.active;
+                    log::info(&format!("tab move shortcut: dir={dir} (ctrl+shift+page)"));
+                    app.move_tab_step(active, dir);
+                }
+                UserEvent::NavAction { tab, body } => {
+                    // The ONLY place start/history-page nav
+                    // bodies are decided (0.41.0): the IPC
+                    // handler forwards the raw body
+                    // undecided; the conjunctive gates + the
+                    // frozen parser decide centrally.
+                    app.on_nav_page_body(tab, &body);
                 }
                 UserEvent::ContextMenu {
                     tab,
@@ -8333,7 +10918,17 @@ fn run_with_server(server: FileServer) {
                     // WinClose command arm (0.32).
                     app.dl.backend().0.pause_all_and_persist();
                     app.capture_geometry();
+                    // 0.41.2: pending visits record before
+                    // the final save, as in the WinClose arm.
+                    // AUDIT 0.41.3: the whole id-keyed
+                    // candidate queue, titles included (A-F4).
+                    for idx in 0..app.tabs.len() {
+                        for url in app.tabs[idx].pending_visit.flush_all() {
+                            app.record_visit_and_title(idx, &url);
+                        }
+                    }
                     app.save_state();
+                    app.save_nav();
                     *control_flow = ControlFlow::Exit;
                 }
                 WindowEvent::Focused(false) => {

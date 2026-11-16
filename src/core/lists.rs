@@ -182,6 +182,14 @@ fn store_cache(dir: &Path, texts: &[String]) {
             f.write_all(text.as_bytes())?;
             f.sync_all()?;
             drop(f);
+            if let Ok(meta) = std::fs::metadata(&target) {
+                let mut perms = meta.permissions();
+                if perms.readonly() {
+                    #[allow(clippy::permissions_set_readonly_false)]
+                    perms.set_readonly(false);
+                    let _ = std::fs::set_permissions(&target, perms);
+                }
+            }
             std::fs::rename(&tmp, &target)
         })();
         if written.is_err() {

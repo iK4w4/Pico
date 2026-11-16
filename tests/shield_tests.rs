@@ -864,6 +864,17 @@ fn host_span_skips_userinfo_and_handles_ipv6() {
 }
 
 #[test]
+fn host_span_non_ascii_authority_with_a_mismatched_host_is_none_not_a_panic() {
+    // AUDIT 0.41.3 (Front C F1): the host is supplied
+    // independently of the URL; here its byte length
+    // lands inside a multi-byte `é` of the authority.
+    // Through 0.41.2 the slicing panicked; the span is
+    // now simply None.
+    use pico_core::core::shield::host_span;
+    assert_eq!(host_span("https://éééééé.example/", "example.com"), None);
+}
+
+#[test]
 fn anchored_rules_judge_the_real_host_not_userinfo() {
     // ||evil.example^ must block when evil.example is the real
     // host even behind a lookalike userinfo, and must NOT block
@@ -1731,4 +1742,31 @@ fn v28_urls_equivalent_ignores_default_port_and_fragment() {
         "https://example.com:8443/a",
         "https://example.com/a"
     ));
+}
+
+// ---------------------------------------------------------------------------
+// 0.41.1 — Front F F2: the generic scan length budget
+// ---------------------------------------------------------------------------
+
+#[test]
+fn generic_scan_reads_only_the_capped_prefix() {
+    // A generic rule's needle inside the cap still fires
+    // on a very long URL; the same needle past the cap
+    // no longer does (the documented trade); a
+    // host-anchored rule is unaffected by URL length.
+    let e = engine("/needle-banner.js\n||ads.example.com^");
+    let page = "https://www.example.org/";
+    let pad = "a".repeat(20 * 1024);
+    let near = format!("https://cdn.example.net/needle-banner.js?x={pad}");
+    assert!(blocks(&e, &near, page, ResourceType::Script));
+    let far = format!("https://cdn.example.net/p/{pad}/needle-banner.js");
+    assert!(
+        !blocks(&e, &far, page, ResourceType::Script),
+        "a needle past the generic cap is out of scan range"
+    );
+    let anchored = format!("https://ads.example.com/{pad}/x.js");
+    assert!(
+        blocks(&e, &anchored, page, ResourceType::Script),
+        "host-anchored matching still sees the full URL"
+    );
 }

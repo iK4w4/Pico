@@ -42,6 +42,21 @@ fn titles_extract_and_normalize() {
 }
 
 #[test]
+fn title_after_an_unclosed_quote_candidate_still_found() {
+    // AUDIT 0.41.3 (Front D D-5): the first <title
+    // candidate's attribute quote never closes, so its
+    // tag-close scan runs out — through 0.41.2 that
+    // ended the whole search and the valid title later
+    // in the document was missed.
+    assert_eq!(
+        parse_title("<title data-x=\"unclosed><title>Real</title>").as_deref(),
+        Some("Real")
+    );
+    // A lone unclosed-quote candidate still yields none.
+    assert_eq!(parse_title("<title data-x=\"unclosed>never"), None);
+}
+
+#[test]
 fn titles_skip_comments_and_lookalike_tags() {
     assert_eq!(
         parse_title("<!-- <title>Fake</title> --><title>Real</title>").as_deref(),
@@ -54,6 +69,21 @@ fn titles_skip_comments_and_lookalike_tags() {
     assert_eq!(
         parse_title("<titles>Not</titles><title>Y</title>").as_deref(),
         Some("Y")
+    );
+    assert_eq!(
+        parse_title("<svg><title/></svg><title>Real App</title>").as_deref(),
+        Some("Real App")
+    );
+    assert_eq!(
+        parse_title("<svg><title /></svg><title data-expr=\"a > b\">Attr App</title>").as_deref(),
+        Some("Attr App")
+    );
+    assert_eq!(parse_title("<svg><title/></svg>"), None);
+    // A `/` ending an unquoted attribute value is value text,
+    // not the self-closing flag: the tag has a real body.
+    assert_eq!(
+        parse_title("<title data-x=1/>Spec Title</title>").as_deref(),
+        Some("Spec Title")
     );
 }
 

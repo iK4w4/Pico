@@ -43,6 +43,7 @@ if (!dir) {
 const chromeHtml = readFileSync(`${dir}/chrome.html`, "utf8");
 const startHtml = readFileSync(`${dir}/start.html`, "utf8");
 const downloadsHtml = readFileSync(`${dir}/downloads.html`, "utf8");
+const historyHtml = readFileSync(`${dir}/history.html`, "utf8");
 
 let failures = 0;
 function check(name, cond, extra = "") {
@@ -81,8 +82,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check("skeleton: NO savings band in the chrome (0.30: start page only)",
     doc.getElementById("stat-shield") === null &&
     doc.getElementById("stats-grid") === null);
-  check("skeleton: version badge is 0.40.2",
-    doc.getElementById("ver").textContent === "0.40.2",
+  check("skeleton: version badge is 0.41.3",
+    doc.getElementById("ver").textContent === "0.41.3",
     doc.getElementById("ver").textContent);
   check("skeleton: brand byline present",
     doc.getElementById("brand-by").textContent.includes("@iK4w4"),
@@ -139,7 +140,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     paletteOpen: false,
     liteOn: false,
     focusAddr: false,
-    version: "0.40.2",
+    version: "0.41.3",
   });
 
   const tabs = doc.querySelectorAll("#tabstrip .tab");
@@ -224,7 +225,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check("snapshot: theme applied",
     doc.documentElement.getAttribute("data-theme") === "dark");
   check("snapshot: version badge stays 0.32.1 (display version)",
-    doc.getElementById("ver").textContent === "0.40.2",
+    doc.getElementById("ver").textContent === "0.41.3",
     doc.getElementById("ver").textContent);
   check("snapshot: services badge shows count",
     doc.getElementById("svc-badge").textContent.includes("3"),
@@ -246,7 +247,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     tabs: [], active: 0, theme: "dark", address: "", canBack: false,
     canForward: false, maximized: false, services: 0, otherListeners: 0,
     downloads: [], downloadsOpen: false, downloadsActive: 0, downloadsDefaultConn: 8, activeError: "",
-    blockedTotal: 0, blockedTab: 0, shieldOn: false, version: "0.40.2",
+    blockedTotal: 0, blockedTab: 0, shieldOn: false, version: "0.41.3",
   });
   check("shield: aria-pressed follows shieldOn=false",
     shieldBtn.getAttribute("aria-pressed") === "false",
@@ -337,7 +338,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     active: 1, theme: "light", address: "http://localhost:5173/",
     canBack: false, canForward: false, maximized: false, services: 1,
     otherListeners: 0, downloads: [], downloadsOpen: false, downloadsActive: 0, downloadsDefaultConn: 8, activeError: "",
-    blockedTotal: 0, blockedTab: 0, shieldOn: true, version: "0.40.2",
+    blockedTotal: 0, blockedTab: 0, shieldOn: true, version: "0.41.3",
     liteOn: false, liteBlocked: 0, teleport: null,
   };
   window.__pico({ ...baseSnap });
@@ -617,7 +618,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     active: 1, theme: "dark", address: "http://localhost:5173/",
     canBack: false, canForward: false, maximized: false, services: 1,
     otherListeners: 0, downloads: [], downloadsOpen: false, downloadsActive: 0, downloadsDefaultConn: 8, activeError: "",
-    blockedTotal: 0, blockedTab: 0, shieldOn: true, version: "0.40.2",
+    blockedTotal: 0, blockedTab: 0, shieldOn: true, version: "0.41.3",
     liteOn: false, liteBlocked: 0, teleport: null,
     palette: "forest", themes: THEMES16, paletteOpen: false,
   };
@@ -627,7 +628,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     doc.documentElement.getAttribute("data-palette"));
   const navIds = [...doc.querySelectorAll("#navbar button, #navbar input")]
     .map((el) => el.id).filter(Boolean);
-  const want = ["back", "fwd", "reload", "home", "openfile", "addr", "shield", "lite", "downloads", "teleport", "palette", "theme"];
+  // 0.41.0: bookmark-star joins the order inside the
+  // address well, right after the input it belongs to.
+  const want = ["back", "fwd", "reload", "home", "openfile", "addr", "bookmark-star", "shield", "lite", "downloads", "teleport", "palette", "theme"];
   check("v27 clusters: navbar controls stand in cluster order",
     JSON.stringify(navIds) === JSON.stringify(want), navIds.join(","));
   const palBtn = doc.getElementById("palette");
@@ -728,7 +731,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     active: 1, theme: "dark", address: "",
     canBack: false, canForward: false, maximized: false, services: 0,
     otherListeners: 0, downloads: [], downloadsOpen: false, downloadsActive: 0, downloadsDefaultConn: 8, activeError: "",
-    blockedTotal: 0, blockedTab: 0, shieldOn: true, version: "0.40.2",
+    blockedTotal: 0, blockedTab: 0, shieldOn: true, version: "0.41.3",
     liteOn: false, liteBlocked: 0, teleport: null, focusAddr: false,
     ...over,
   });
@@ -793,7 +796,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     tabs: TABS3, active: 1, theme: "light", address: "http://one.example/",
     canBack: false, canForward: false, maximized: false, services: 0,
     otherListeners: 0, downloads: [], downloadsOpen: false, downloadsActive: 0, downloadsDefaultConn: 8, activeError: "",
-    blockedTotal: 0, blockedTab: 0, shieldOn: true, version: "0.40.2",
+    blockedTotal: 0, blockedTab: 0, shieldOn: true, version: "0.41.3",
     liteOn: false, liteBlocked: 0, focusAddr: false,
     paletteOpen: false, teleportOpen: false, teleport: null,
     ...over,
@@ -1007,8 +1010,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check("start: chip glyphs are inline SVG (no <img>)",
     doc.querySelectorAll(".byline .chip svg").length === 2 &&
     doc.querySelectorAll(".byline img").length === 0);
-  check("start: footer reads 'Pico 0.40.2 · by @iK4w4'",
-    doc.querySelector(".footer").textContent.includes("Pico 0.40.2 · by @iK4w4"));
+  check("start: footer reads 'Pico 0.41.3 · by @iK4w4'",
+    doc.querySelector(".footer").textContent.includes("Pico 0.41.3 · by @iK4w4"));
   // Clicking a chip must target its action URL as the fallback
   // (the Rust nav handler turns that into a NEW tab — the start
   // tab never navigates). Capture the click before jsdom follows.
@@ -2208,7 +2211,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     active: 1, theme: "light", address: "http://localhost:5173/",
     canBack: false, canForward: false, maximized: false, services: 0,
     otherListeners: 0, activeError: "",
-    blockedTotal: 0, blockedTab: 0, shieldOn: true, version: "0.40.2",
+    blockedTotal: 0, blockedTab: 0, shieldOn: true, version: "0.41.3",
     liteOn: false, liteBlocked: 0, focusAddr: false,
     palette: "forest", themes: [], paletteOpen: false,
     teleportOpen: false, teleport: null,
@@ -2602,7 +2605,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     active: 1, theme: "light", address: "http://localhost:5173/",
     canBack: false, canForward: false, maximized: false, services: 0,
     otherListeners: 0, activeError: "",
-    blockedTotal: 0, blockedTab: 0, shieldOn: true, version: "0.40.2",
+    blockedTotal: 0, blockedTab: 0, shieldOn: true, version: "0.41.3",
     liteOn: false, liteBlocked: 0, focusAddr: false,
     palette: "forest", themes: [], paletteOpen: false,
     teleportOpen: false, teleport: null,
@@ -2752,7 +2755,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   });
 
   check("0.34.1 downloads page: version marker reads 0.35.1",
-    doc.getElementById("dl-ver").textContent === "0.40.2",
+    doc.getElementById("dl-ver").textContent === "0.41.3",
     doc.getElementById("dl-ver").textContent);
   check("0.34 downloads page: the fixture renders five rows in order",
     rows().length === 5 &&
@@ -3027,7 +3030,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     active: 1, theme: "light", address: "http://localhost:5173/",
     canBack: false, canForward: false, maximized: false, services: 0,
     otherListeners: 0, activeError: "", blockedTotal: 0, blockedTab: 0,
-    shieldOn: true, version: "0.40.2", liteOn: false, liteBlocked: 0,
+    shieldOn: true, version: "0.41.3", liteOn: false, liteBlocked: 0,
     focusAddr: false, palette: "forest", themes: [], paletteOpen: false,
     teleportOpen: false, teleport: null,
     downloadsOpen: true, downloads: pairSnap(PAIR_TASKS),
@@ -3081,7 +3084,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     active: 1, theme: "light", address: "http://localhost:5173/",
     canBack: false, canForward: false, maximized: false, services: 0,
     otherListeners: 0, activeError: "", blockedTotal: 0, blockedTab: 0,
-    shieldOn: true, version: "0.40.2", liteOn: false, liteBlocked: 0,
+    shieldOn: true, version: "0.41.3", liteOn: false, liteBlocked: 0,
     focusAddr: false, palette: "forest", themes: [], paletteOpen: false,
     teleportOpen: false, teleport: null,
     downloadsOpen: false,
@@ -3112,7 +3115,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     active: 1, theme: "light", address: "http://localhost:5173/",
     canBack: false, canForward: false, maximized: false, services: 0,
     otherListeners: 0, activeError: "", blockedTotal: 0, blockedTab: 0,
-    shieldOn: true, version: "0.40.2", liteOn: false, liteBlocked: 0,
+    shieldOn: true, version: "0.41.3", liteOn: false, liteBlocked: 0,
     focusAddr: false, palette: "forest", themes: [], paletteOpen: false,
     teleportOpen: false, teleport: null,
     downloadsOpen: true,
@@ -3389,7 +3392,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     active: 1, theme: "light", address: "http://localhost:5173/",
     canBack: false, canForward: false, maximized: false, services: 0,
     otherListeners: 0, activeError: "",
-    blockedTotal: 0, blockedTab: 0, shieldOn: true, version: "0.40.2",
+    blockedTotal: 0, blockedTab: 0, shieldOn: true, version: "0.41.3",
     liteOn: false, liteBlocked: 0, focusAddr: false,
     palette: "forest", themes: [], paletteOpen: false,
     teleportOpen: false, teleport: null,
@@ -3464,8 +3467,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   // --- 0.34.2 behavior pins on the fixed data shapes ---
   {
     // G1: the page shows the byte detail AND the countdown
-    // as separate lines (no duplication, no lost detail);
-    // the popover's single detail slot shows the countdown.
+    // as separate lines (no duplication, no lost detail).
+    // 0.41.3 (D-4): the popover tells the SAME story now —
+    // progress line PLUS its own retry line. The old
+    // popover check below pinned the countdown REPLACING
+    // the progress line; that divergence was the bug, so
+    // the pin changed with the fix.
     const retryTask = cTask({
       id: 31, status: "failed", error: "Connection reset",
       detail_text: "25 MB of 85 MB · Failed",
@@ -3487,8 +3494,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const cdoc = cwin.document;
     cwin.__pico({ ...cBase, downloadsOpen: true, downloads: cSnap([retryTask]) });
     const crow = cdoc.querySelector("#dl-list .dl-row");
-    check("0.34.2 G1: popover detail slot prefers the retry countdown",
-      !!crow && crow.querySelector(".dl-prog-text").textContent === "Retrying in 12 · attempt 1 of 3",
+    check("0.34.2 G1 (0.41.3 D-4): popover progress line keeps the byte progress, countdown on its own line",
+      !!crow && crow.querySelector(".dl-prog-text").textContent === "25 MB of 85 MB · Failed" &&
+      !!crow.querySelector(".dl-retry") &&
+      crow.querySelector(".dl-retry").textContent === "Retrying in 12 · attempt 1 of 3",
       crow ? crow.querySelector(".dl-prog-text").textContent : "no row");
     cwin.close();
   }
@@ -3715,7 +3724,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     active: 1, theme: "light", address: "http://localhost:5173/",
     canBack: false, canForward: false, maximized: false, services: 0,
     otherListeners: 0, activeError: "",
-    blockedTotal: 0, blockedTab: 0, shieldOn: true, version: "0.40.2",
+    blockedTotal: 0, blockedTab: 0, shieldOn: true, version: "0.41.3",
     liteOn: false, liteBlocked: 0, focusAddr: false,
     palette: "forest", themes: [], paletteOpen: false,
     teleportOpen: false, teleport: null,
@@ -3797,13 +3806,19 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check("0.35 popover: a 0.33-shaped task renders its detail_text verbatim",
     progOf(59) === "45 MB of 100 MB · 1.2 MB/s · 45 s left", progOf(59));
 
-  // Failed + retry_pending: the countdown owns line 3.
+  // Failed + retry_pending (0.41.3 D-4): the progress
+  // line keeps the progress and the countdown rides its
+  // own retry line — the pre-0.41.3 pin had the countdown
+  // REPLACING line 3 on the popover only; that divergence
+  // was the bug, so the pin changed with the fix.
   push({ downloadsOpen: true, downloads: snap35([T35({
     id: 60, status: "failed", downloaded: 60000000, total: 200000000, percent: 30,
     error: "HTTP 404", retry_pending: true, retry_text: "Retrying in 12 · attempt 1 of 3",
   })]) });
-  check("0.35 popover: failed + retry_pending shows the countdown in line 3, not progress",
-    progOf(60) === "Retrying in 12 · attempt 1 of 3" &&
+  check("0.35 popover (0.41.3 D-4): failed + retry_pending shows progress AND a separate retry line",
+    progOf(60) === "60 MB of 200 MB · 30%" &&
+    !!rowOf(60).querySelector(".dl-retry") &&
+    rowOf(60).querySelector(".dl-retry").textContent === "Retrying in 12 · attempt 1 of 3" &&
     rowOf(60).querySelector(".dl-error").textContent === "HTTP 404",
     progOf(60));
 
@@ -3867,6 +3882,726 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check("0.35 page: Clear completed hides when no task is done",
     pDoc.getElementById("dl-clear-completed").hidden === true);
   pWin.close();
+}
+
+// ------------------------------------------------------------------
+// 0.41.0 chrome: the bookmark star + the suggestions
+// dropdown. The star mirrors the snapshot's `bookmarked`;
+// clicking it (or Ctrl+D) posts the nav verb
+// bookmark-toggle over the chrome transport (envelope
+// included); Ctrl+H posts the history_page command.
+// Typing asks core with suggestions-query; the answer
+// push paints ONE dropdown — bookmarks first, history
+// next, the raw input as the final "go" row — with
+// keyboard selection, Enter acceptance and Esc
+// close/restore.
+// ------------------------------------------------------------------
+{
+  const sent = [];
+  const dom = new JSDOM(chromeHtml, {
+    runScripts: "dangerously",
+    url: "https://pico.chrome/",
+    beforeParse(window) {
+      window.ipc = { postMessage: (m) => sent.push(JSON.parse(m)) };
+    },
+  });
+  const { window } = dom;
+  const doc = window.document;
+  const baseSnap = {
+    tabs: [{ id: 1, title: "Docs", url: "https://example.com/docs", loading: false, start: false, failed: false }],
+    active: 1, theme: "light", palette: "forest", themes: [], paletteOpen: false, teleportOpen: false,
+    address: "https://example.com/docs",
+    canBack: false, canForward: false, services: 0,
+    downloads: [], downloadsOpen: false, activeError: "",
+    blockedTotal: 0, blockedTab: 0, shieldOn: true, version: "0.41.3",
+    liteOn: false, liteBlocked: 0, teleport: null, bookmarked: false,
+  };
+  window.__pico({ ...baseSnap });
+  const navMsgs = (a) => sent.filter((m) => m.kind === "nav" && m.action === a);
+  const star = doc.getElementById("bookmark-star");
+  check("0.41 star: the star button sits in the address well",
+    !!star && !!star.closest("#addr-wrap"));
+  check("0.41 star: unbookmarked snapshot leaves it unpressed",
+    star.getAttribute("aria-pressed") === "false");
+  window.__pico({ ...baseSnap, bookmarked: true });
+  check("0.41 star: bookmarked snapshot fills it (aria-pressed)",
+    star.getAttribute("aria-pressed") === "true");
+  const togglesBefore = navMsgs("bookmark-toggle").length;
+  star.click();
+  check("0.41 star: click posts exactly one bookmark-toggle nav body",
+    navMsgs("bookmark-toggle").length === togglesBefore + 1 &&
+    navMsgs("bookmark-toggle")[togglesBefore].v === 1 &&
+    typeof navMsgs("bookmark-toggle")[togglesBefore].boot === "string",
+    JSON.stringify(sent.filter((m) => m.kind === "nav")));
+  doc.dispatchEvent(new window.KeyboardEvent("keydown", { key: "d", ctrlKey: true, bubbles: true }));
+  check("0.41 star: Ctrl+D posts bookmark-toggle too",
+    navMsgs("bookmark-toggle").length === togglesBefore + 2);
+  doc.dispatchEvent(new window.KeyboardEvent("keydown", { key: "h", ctrlKey: true, bubbles: true }));
+  check("0.41 chrome: Ctrl+H posts the history_page command",
+    sent.filter((m) => m.t === "history_page").length === 1,
+    JSON.stringify(sent.map((m) => m.t)));
+
+  // Suggestions: type, wait out the debounce, answer.
+  const addr = doc.getElementById("addr");
+  addr.focus();
+  addr.value = "examp";
+  addr.dispatchEvent(new window.Event("input", { bubbles: true }));
+  await sleep(160);
+  check("0.41 suggest: typing posts suggestions-query with the text",
+    navMsgs("suggestions-query").length === 1 &&
+    navMsgs("suggestions-query")[0].query === "examp",
+    JSON.stringify(sent.filter((m) => m.kind === "nav")));
+  window.__picoNavSuggestions({
+    query: "examp",
+    items: [
+      { url: "https://example.com/docs", title: "Example Docs", kind: "bookmark" },
+      { url: "https://example.org/beta", title: "Beta Page", kind: "history" },
+    ],
+  });
+  const suggest = doc.getElementById("suggest");
+  const rows = () => [...doc.querySelectorAll("#suggest-list .sug-row")];
+  check("0.41 suggest: the dropdown opens with bookmark + history + go rows",
+    suggest.classList.contains("on") && rows().length === 3 &&
+    rows()[0].dataset.kind === "bookmark" && rows()[1].dataset.kind === "history" &&
+    rows()[2].classList.contains("go"),
+    `rows=${rows().length}`);
+  check("0.41 suggest: the go row names the raw input",
+    rows()[2].textContent.includes("Go to examp"), rows()[2].textContent);
+  check("0.41 suggest: a stale answer is dropped",
+    (() => {
+      window.__picoNavSuggestions({ query: "other", items: [{ url: "https://x.example/", title: "X", kind: "history" }] });
+      return rows().length === 3 && rows()[0].dataset.kind === "bookmark";
+    })());
+  addr.dispatchEvent(new window.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+  check("0.41 suggest: ArrowDown selects the first row",
+    rows()[0].classList.contains("sel"));
+  addr.dispatchEvent(new window.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+  addr.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  const navs = sent.filter((m) => m.t === "navigate");
+  check("0.41 suggest: Enter accepts the selected row's URL",
+    navs.length === 1 && navs[0].text === "https://example.org/beta",
+    JSON.stringify(navs));
+  check("0.41 suggest: acceptance closes the dropdown",
+    !suggest.classList.contains("on"));
+  // Reopen, then Escape closes and restores the draft.
+  addr.focus();
+  addr.value = "beta";
+  addr.dispatchEvent(new window.Event("input", { bubbles: true }));
+  await sleep(160);
+  window.__picoNavSuggestions({
+    query: "beta",
+    items: [{ url: "https://example.org/beta", title: "Beta Page", kind: "history" }],
+  });
+  check("0.41 suggest: the dropdown reopens for a new query",
+    suggest.classList.contains("on") && rows().length === 2);
+  // 0.41.2 favicons: a row carrying a PNG data-URI icon
+  // paints an img over its kind glyph inside the same
+  // slot; a missing or bogus icon field keeps the glyph.
+  window.__picoNavSuggestions({
+    query: "beta",
+    items: [
+      { url: "https://example.org/beta", title: "Beta Page", kind: "history", icon: "data:image/png;base64,iVBORw0KGgo=" },
+      { url: "https://example.com/docs", title: "Example Docs", kind: "bookmark", icon: "https://evil.example/icon.png" },
+      { url: "https://example.net/x", title: "X Page", kind: "history", icon: 42 },
+    ],
+  });
+  check("0.41.2 suggest: a data-URI icon paints an img in the row's slot",
+    !!rows()[0].querySelector("img.sug-img") &&
+    rows()[0].querySelector("img.sug-img").getAttribute("src") === "data:image/png;base64,iVBORw0KGgo=",
+    rows()[0].innerHTML);
+  check("0.41.2 suggest: bogus icon fields fall back to the kind glyph",
+    !rows()[1].querySelector("img.sug-img") && !!rows()[1].querySelector(".sug-kind svg") &&
+    !rows()[2].querySelector("img.sug-img") && !!rows()[2].querySelector(".sug-kind svg"));
+  check("0.41.2 suggest: the go row never carries an icon",
+    rows().length === 4 && !rows()[3].querySelector("img.sug-img"));
+  addr.value = "beta edited";
+  addr.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  check("0.41 suggest: Escape closes, restores the draft, and tells the shell",
+    !suggest.classList.contains("on") && addr.value === "beta" &&
+    sent.filter((m) => m.t === "suggest_close").length >= 1,
+    `value=${addr.value}`);
+
+  // 0.41.1 (Front B F7): rows painted for a query the
+  // box has already typed past cannot be accepted
+  // during the debounce window.
+  addr.focus();
+  addr.value = "docs";
+  addr.dispatchEvent(new window.Event("input", { bubbles: true }));
+  await sleep(160);
+  window.__picoNavSuggestions({
+    query: "docs",
+    items: [{ url: "https://example.com/docs", title: "Example Docs", kind: "bookmark" }],
+  });
+  const navCountBefore = sent.filter((m) => m.t === "navigate").length;
+  addr.value = "docs2";
+  addr.dispatchEvent(new window.Event("input", { bubbles: true }));
+  rows()[0].dispatchEvent(new window.MouseEvent("mousedown", { bubbles: true }));
+  check("0.41.1 suggest: a stale row cannot be accepted mid-debounce",
+    sent.filter((m) => m.t === "navigate").length === navCountBefore &&
+    suggest.classList.contains("on"));
+  // 0.41.1 (Front B F6): Escape retires the pending
+  // debounce too — no query is sent for the edited text
+  // and the dropdown stays closed.
+  const queriesBefore = navMsgs("suggestions-query").length;
+  addr.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  await sleep(160);
+  check("0.41.1 suggest: Escape retires the pending query — the dropdown stays closed",
+    navMsgs("suggestions-query").length === queriesBefore &&
+    !suggest.classList.contains("on"));
+  window.close();
+}
+
+// ------------------------------------------------------------------
+// 0.41.0 start page: the Bookmarks section (fixture INIT
+// carries two bookmarks) and the Recent history tiles.
+// Cards open through the EXISTING service action; the ×
+// posts the nav verb bookmark-remove; the section
+// renders ONLY while bookmarks exist.
+// ------------------------------------------------------------------
+{
+  const sent = [];
+  const dom = new JSDOM(startHtml, {
+    runScripts: "dangerously",
+    url: "https://pico.start/",
+    beforeParse(window) {
+      window.ipc = { postMessage: (m) => sent.push(JSON.parse(m)) };
+    },
+  });
+  const { window } = dom;
+  const doc = window.document;
+  const navMsgs = (a) => sent.filter((m) => m.kind === "nav" && m.action === a);
+  const actMsgs = (a) => sent.filter((m) => m.kind === "action" && m.action === a);
+  check("0.41 start: the page asks for the bookmark list on load",
+    navMsgs("bookmarks-list").length === 1,
+    JSON.stringify(sent.filter((m) => m.kind === "nav")));
+  const bmCards = doc.querySelectorAll("#bookmarks .card");
+  check("0.41 start: bookmarks section renders while bookmarks exist",
+    doc.getElementById("bookmarks-head").hidden === false && bmCards.length === 2,
+    `cards=${bmCards.length}`);
+  check("0.41 start: a bookmark card shows title, host and initial tile",
+    bmCards[0].textContent.includes("Example Docs") &&
+    bmCards[0].textContent.includes("example.com") &&
+    bmCards[0].querySelector(".port").textContent === "E",
+    bmCards[0].textContent);
+  bmCards[0].click();
+  check("0.41 start: a bookmark card click emits the service action for its URL",
+    actMsgs("service").length === 1 && actMsgs("service")[0].url === "https://example.com/docs",
+    JSON.stringify(actMsgs("service")));
+  doc.querySelectorAll("#bookmarks .bm-x")[1].click();
+  check("0.41 start: a card's × posts bookmark-remove with its URL",
+    navMsgs("bookmark-remove").length === 1 &&
+    navMsgs("bookmark-remove")[0].url === "http://localhost:5173",
+    JSON.stringify(navMsgs("bookmark-remove")));
+  // 0.41.2 favicons: the fixture's first bookmark
+  // carries a data-URI icon — it paints an img over the
+  // letter inside the card's fixed tile; the second
+  // bookmark has none and keeps its letter.
+  check("0.41.2 start: a bookmark icon paints an img over the letter tile",
+    !!bmCards[0].querySelector("img.fav-img") &&
+    bmCards[0].querySelector("img.fav-img").getAttribute("src").indexOf("data:image/png;base64,") === 0 &&
+    bmCards[0].querySelector(".port").textContent === "E",
+    bmCards[0].innerHTML);
+  check("0.41.2 start: a bookmark without an icon keeps the letter tile",
+    !bmCards[1].querySelector("img.fav-img") &&
+    bmCards[1].querySelector(".port").textContent === "F",
+    bmCards[1].innerHTML);
+  window.__picoSetBookmarks([
+    { url: "https://example.org/beta", title: "Beta Page", addedAt: 1730000300000, icon: "not-a-data-uri" },
+    { url: "https://example.com/docs", title: "Example Docs", addedAt: 1730000400000, icon: "data:image/png;base64,iVBORw0KGgo=" },
+  ]);
+  const bmCards2 = doc.querySelectorAll("#bookmarks .card");
+  check("0.41.2 start: a bogus icon field falls back to the letter tile",
+    bmCards2.length === 2 && !bmCards2[0].querySelector("img.fav-img") &&
+    bmCards2[0].querySelector(".port").textContent === "B" &&
+    !!bmCards2[1].querySelector("img.fav-img"),
+    bmCards2.length ? bmCards2[0].innerHTML : "no cards");
+  window.__picoSetBookmarks([]);
+  check("0.41 start: an empty push hides the whole bookmarks section",
+    doc.getElementById("bookmarks-head").hidden === true &&
+    doc.querySelectorAll("#bookmarks .card").length === 0);
+  const tiles = doc.querySelectorAll("#recent .recent");
+  check("0.41 start: recent history renders compact tiles",
+    tiles.length === 2 && tiles[0].textContent.includes("Beta Page") &&
+    tiles[0].textContent.includes("example.org"),
+    `tiles=${tiles.length}`);
+  check("0.41.2 start: a recent tile with an icon paints an img; without, the letter stays",
+    !tiles[0].querySelector("img.fav-img") &&
+    tiles[0].querySelector(".tile").textContent === "B" &&
+    !!tiles[1].querySelector("img.fav-img") &&
+    tiles[1].querySelector(".tile").textContent === "E",
+    tiles[1].innerHTML);
+  tiles[0].querySelector(".recent-main").click();
+  check("0.41 start: a recent tile click emits the service action for its URL",
+    actMsgs("service").length === 2 && actMsgs("service")[1].url === "https://example.org/beta",
+    JSON.stringify(actMsgs("service")));
+  check("0.41 start: the History link names the managed page",
+    doc.getElementById("history-link").getAttribute("href") === "pico://history");
+  window.close();
+}
+
+// ------------------------------------------------------------------
+// 0.41.0 history page: rows from the fixture INIT, the
+// search round-trip (local filter + the history-search
+// verb + the query-tagged answer), per-row remove, the
+// two-step Clear, and the empty state.
+// ------------------------------------------------------------------
+{
+  const sent = [];
+  const dom = new JSDOM(historyHtml, {
+    runScripts: "dangerously",
+    url: "https://pico.history/",
+    beforeParse(window) {
+      window.ipc = { postMessage: (m) => sent.push(JSON.parse(m)) };
+    },
+  });
+  const { window } = dom;
+  const doc = window.document;
+  const navMsgs = (a) => sent.filter((m) => m.kind === "nav" && m.action === a);
+  const rows = () => doc.querySelectorAll("#hist-list .hist-row");
+  check("0.41 history: the page asks for the list on load",
+    navMsgs("history-list").length === 1,
+    JSON.stringify(sent.filter((m) => m.kind === "nav")));
+  check("0.41 history: fixture entries render as rows with title, URL and visits",
+    rows().length === 2 &&
+    rows()[0].textContent.includes("Beta Page") &&
+    rows()[0].textContent.includes("https://example.org/beta") &&
+    rows()[0].textContent.includes("3 visits") &&
+    rows()[1].textContent.includes("1 visit"),
+    rows().length ? rows()[0].textContent : "no rows");
+  check("0.41.2 history: the entry with an icon paints an img in its fixed slot",
+    !!rows()[1].querySelector(".hist-fav") && !!rows()[1].querySelector("img.fav-img") &&
+    rows()[1].querySelector("img.fav-img").getAttribute("src").indexOf("data:image/png;base64,") === 0,
+    rows()[1].innerHTML);
+  check("0.41.2 history: the entry without an icon keeps its letter slot",
+    !!rows()[0].querySelector(".hist-fav") && !rows()[0].querySelector("img.fav-img") &&
+    rows()[0].querySelector(".hist-fav").textContent === "B",
+    rows()[0].innerHTML);
+  check("0.41 history: count line and version read 0.41.3",
+    doc.getElementById("hist-count-line").textContent.includes("2 pages") &&
+    doc.getElementById("hist-ver").textContent === "0.41.3" &&
+    doc.querySelector(".footer").textContent.includes("Pico 0.41.3 · by @iK4w4"));
+  check("0.41 history: theme hook present like its sibling page",
+    typeof window.__picoTheme === "function" &&
+    typeof window.__picoSetHistory === "function");
+  const search = doc.getElementById("hist-search");
+  search.value = "beta";
+  search.dispatchEvent(new window.Event("input", { bubbles: true }));
+  check("0.41 history: typing filters the rows locally at once",
+    rows().length === 1 && rows()[0].textContent.includes("Beta Page"));
+  await sleep(260);
+  check("0.41 history: the search posts history-search with the query",
+    navMsgs("history-search").length === 1 &&
+    navMsgs("history-search")[0].query === "beta",
+    JSON.stringify(navMsgs("history-search")));
+  window.__picoSetHistory({
+    entries: [{ url: "https://example.org/beta", title: "Beta Page", lastVisited: 1730000200000, visits: 3 }],
+    query: "beta",
+  });
+  check("0.41 history: the query-tagged answer keeps the filtered rows",
+    rows().length === 1);
+  search.value = "";
+  search.dispatchEvent(new window.Event("input", { bubbles: true }));
+  check("0.41 history: clearing the search restores the full list",
+    rows().length === 2);
+  window.__picoSetHistory({
+    entries: [{ url: "https://example.org/beta", title: "Beta Page", lastVisited: 1730000200000, visits: 3, icon: 42 }],
+  });
+  check("0.41.2 history: a bogus icon field falls back to the letter",
+    rows().length === 1 && !rows()[0].querySelector("img.fav-img") &&
+    rows()[0].querySelector(".hist-fav").textContent === "B",
+    rows().length ? rows()[0].innerHTML : "no rows");
+  rows()[0].querySelector(".hist-x").click();
+  check("0.41 history: a row's × posts history-remove with its URL",
+    navMsgs("history-remove").length === 1 &&
+    navMsgs("history-remove")[0].url === "https://example.org/beta",
+    JSON.stringify(navMsgs("history-remove")));
+  const clearBtn = doc.getElementById("hist-clear");
+  clearBtn.click();
+  check("0.41 history: the first Clear click only arms",
+    navMsgs("history-clear").length === 0 && clearBtn.classList.contains("armed"));
+  clearBtn.click();
+  check("0.41 history: the second Clear click posts history-clear",
+    navMsgs("history-clear").length === 1);
+  window.__picoSetHistory({ entries: [] });
+  check("0.41 history: an empty push shows the empty state and hides Clear",
+    doc.getElementById("hist-empty").hidden === false &&
+    doc.getElementById("hist-clear").hidden === true &&
+    rows().length === 0);
+  window.close();
+}
+
+// ------------------------------------------------------------------
+// 0.41.0 Workstream C: movable tabs. The strip renders
+// the SNAPSHOT's order (order is app state); a reordered
+// snapshot moves the DOM nodes and the ACTIVE tab stays
+// active. Drag is pointer-based with a threshold: a
+// plain press+click still just activates; past the
+// threshold the drop indicator paints and pointerup
+// posts ONE `move` tab body naming the tab right of the
+// indicator as `before` (0.41.3: jsdom geometry is
+// all-zero, so every midpoint is 0 and a rightward drag
+// lands at the END — before:null; the neighbour-resolved
+// cases are in the 0.41.3 block below, and the landing
+// math itself is pinned in Rust). Escape cancels a drag. The
+// keyboard chord posts move-step for the active tab.
+// A right-click posts tab_menu_open; the snapshot's
+// tabContextMenu paints #tabmenu and its picks post the
+// tab verbs for the right-clicked tab.
+// ------------------------------------------------------------------
+{
+  const sent = [];
+  const dom = new JSDOM(chromeHtml, {
+    runScripts: "dangerously",
+    url: "https://pico.chrome/",
+    beforeParse(window) {
+      window.ipc = { postMessage: (m) => sent.push(JSON.parse(m)) };
+    },
+  });
+  const { window } = dom;
+  const doc = window.document;
+  const T = (id, title) => ({ id, title, url: `https://example.com/${id}`, loading: false, start: false, failed: false });
+  const baseSnap = {
+    tabs: [T(1, "One"), T(2, "Two"), T(3, "Three")],
+    active: 2, theme: "light", palette: "forest", themes: [], paletteOpen: false, teleportOpen: false,
+    address: "https://example.com/2",
+    canBack: false, canForward: false, services: 0,
+    downloads: [], downloadsOpen: false, activeError: "",
+    blockedTotal: 0, blockedTab: 0, shieldOn: true, version: "0.41.3",
+    liteOn: false, liteBlocked: 0, teleport: null, bookmarked: false,
+    tabContextMenu: null, focusAddr: false,
+  };
+  window.__pico({ ...baseSnap });
+  const stripOrder = () => [...doc.querySelectorAll("#tabstrip .tab")].map((el) => el.dataset.tabId).join(",");
+  const tabEl = (id) => doc.querySelector(`#tabstrip .tab[data-tab-id="${id}"]`);
+  const tabMsgs = (a) => sent.filter((m) => m.kind === "tab" && m.action === a);
+  const switchMsgs = (id) => sent.filter((m) => m.t === "switch_tab" && m.tab === id);
+  /* buttons models a real press: 1 while the button is
+     held (down/move), 0 on release. (0.41.1: the chrome's
+     ghost-drag guard reads buttons on pointermove; a
+     buttons-less synthetic move models a button-free
+     hover, not a drag.) */
+  const ptr = (type, x) => new window.MouseEvent(type, { bubbles: true, button: 0, buttons: type === "pointerup" ? 0 : 1, clientX: x, clientY: 20 });
+
+  check("0.41C strip: tabs render in snapshot order", stripOrder() === "1,2,3", stripOrder());
+  window.__pico({ ...baseSnap, tabs: [T(2, "Two"), T(3, "Three"), T(1, "One")] });
+  check("0.41C strip: a reordered snapshot reorders the DOM nodes",
+    stripOrder() === "2,3,1", stripOrder());
+  check("0.41C strip: the active tab stays active across the reorder",
+    tabEl(2).getAttribute("aria-selected") === "true" &&
+    tabEl(1).getAttribute("aria-selected") === "false");
+
+  // Drag tab 1 (zero jsdom geometry => the end gap, 3).
+  const el1 = tabEl(1);
+  el1.dispatchEvent(ptr("pointerdown", 0));
+  el1.dispatchEvent(ptr("pointermove", 3));
+  check("0.41C drag: below the threshold nothing is a drag yet",
+    !el1.classList.contains("dragging") && !doc.getElementById("tab-drop").classList.contains("on"));
+  el1.dispatchEvent(ptr("pointermove", 10));
+  check("0.41C drag: past the threshold the tab dims and the gap indicator paints",
+    el1.classList.contains("dragging") && doc.getElementById("tab-drop").classList.contains("on"));
+  el1.dispatchEvent(ptr("pointerup", 10));
+  // 0.41.3: the body names the neighbour (`before`), not
+  // the bare gap (`to`) — all-zero jsdom geometry puts
+  // the drop at the end of the strip, so before is null
+  // and no `to` field rides along.
+  check("0.41C drag: the drop posts exactly one move body with tab + before (end = null)",
+    tabMsgs("move").length === 1 && tabMsgs("move")[0].tab === 1 &&
+    tabMsgs("move")[0].before === null && !("to" in tabMsgs("move")[0]),
+    JSON.stringify(tabMsgs("move")));
+  check("0.41C drag: the indicator clears on drop",
+    !doc.getElementById("tab-drop").classList.contains("on"));
+  el1.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  check("0.41C drag: the drop's tail click does NOT activate the tab",
+    switchMsgs(1).length === 0);
+  el1.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  check("0.41C drag: the next plain click activates again",
+    switchMsgs(1).length === 1);
+
+  // A plain press (no threshold) is just a click.
+  const el3 = tabEl(3);
+  el3.dispatchEvent(ptr("pointerdown", 0));
+  el3.dispatchEvent(ptr("pointerup", 1));
+  el3.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  check("0.41C drag: a plain press posts no move and the click activates",
+    tabMsgs("move").length === 1 && switchMsgs(3).length === 1);
+
+  // Escape cancels an in-flight drag: no body on release.
+  const el2 = tabEl(2);
+  el2.dispatchEvent(ptr("pointerdown", 0));
+  el2.dispatchEvent(ptr("pointermove", 10));
+  doc.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  el2.dispatchEvent(ptr("pointerup", 10));
+  check("0.41C drag: Escape cancels — the release posts nothing",
+    tabMsgs("move").length === 1 && !el2.classList.contains("dragging"));
+
+  // 0.41.1 (Front C F5): a press released outside the
+  // window leaves no ghost drag — a button-free move
+  // retires the armed press and a later move starts
+  // nothing.
+  const elG = tabEl(3);
+  elG.dispatchEvent(ptr("pointerdown", 0));
+  elG.dispatchEvent(new window.MouseEvent("pointermove", { bubbles: true, button: 0, buttons: 0, clientX: 4, clientY: 20 }));
+  elG.dispatchEvent(ptr("pointermove", 12));
+  check("0.41.1 drag: a button-free move retires an armed press (no ghost drag)",
+    !elG.classList.contains("dragging") && tabMsgs("move").length === 1);
+  elG.dispatchEvent(ptr("pointerup", 12));
+
+  // 0.41.1 (Front C S2): Escape cancels a press BEFORE
+  // the threshold too, not only an active drag.
+  const elE = tabEl(3);
+  elE.dispatchEvent(ptr("pointerdown", 0));
+  elE.dispatchEvent(ptr("pointermove", 3));
+  doc.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  elE.dispatchEvent(ptr("pointermove", 12));
+  check("0.41.1 drag: Escape cancels a sub-threshold press",
+    !elE.classList.contains("dragging") && tabMsgs("move").length === 1);
+  elE.dispatchEvent(ptr("pointerup", 12));
+
+  // Keyboard move: Ctrl+Shift+PageDown/PageUp on the active tab.
+  doc.dispatchEvent(new window.KeyboardEvent("keydown", { key: "PageDown", ctrlKey: true, shiftKey: true, bubbles: true }));
+  doc.dispatchEvent(new window.KeyboardEvent("keydown", { key: "PageUp", ctrlKey: true, shiftKey: true, bubbles: true }));
+  check("0.41C keys: Ctrl+Shift+PageDown/PageUp post move-step ±1 for the active tab",
+    tabMsgs("move-step").length === 2 &&
+    tabMsgs("move-step")[0].tab === 2 && tabMsgs("move-step")[0].dir === 1 &&
+    tabMsgs("move-step")[1].tab === 2 && tabMsgs("move-step")[1].dir === -1,
+    JSON.stringify(tabMsgs("move-step")));
+  doc.dispatchEvent(new window.KeyboardEvent("keydown", { key: "PageDown", ctrlKey: true, bubbles: true }));
+  check("0.41C keys: Ctrl+PageDown without Shift is not a tab move",
+    tabMsgs("move-step").length === 2);
+
+  // Tab context menu: right-click reports, snapshot paints, picks post.
+  el3.dispatchEvent(new window.MouseEvent("contextmenu", { bubbles: true, clientX: 120, clientY: 40 }));
+  const opens = sent.filter((m) => m.t === "tab_menu_open");
+  check("0.41C menu: a right-click posts tab_menu_open with the tab and point",
+    opens.length === 1 && opens[0].tab === 3 && opens[0].x === 120 && opens[0].y === 40,
+    JSON.stringify(opens));
+  window.__pico({
+    ...baseSnap,
+    tabContextMenu: {
+      x: 120, y: 40,
+      items: [
+        { id: "move_left", label: "Move Left", shortcut: null, enabled: true, sep: false },
+        { id: "move_right", label: "Move Right", shortcut: null, enabled: false, sep: false },
+        { id: "", label: "", shortcut: null, enabled: false, sep: true },
+        { id: "open_new_pico", label: "Open in New Pico", shortcut: null, enabled: true, sep: false },
+      ],
+    },
+  });
+  const menu = doc.getElementById("tabmenu");
+  const rows = () => [...menu.querySelectorAll(".ctx-row")];
+  check("0.41C menu: the snapshot paints the card with its rows + separator",
+    menu.classList.contains("on") && rows().length === 3 &&
+    menu.querySelectorAll(".ctx-sep").length === 1 &&
+    rows()[0].textContent.includes("Move Left") &&
+    rows()[2].textContent.includes("Open in New Pico"),
+    menu.textContent);
+  check("0.41C menu: a disabled row is painted off", rows()[1].classList.contains("off"));
+  rows()[2].click();
+  check("0.41C menu: the open pick posts open-in-new-pico for the right-clicked tab",
+    tabMsgs("open-in-new-pico").length === 1 && tabMsgs("open-in-new-pico")[0].tab === 3,
+    JSON.stringify(tabMsgs("open-in-new-pico")));
+  window.__pico({ ...baseSnap, tabContextMenu: null });
+  check("0.41C menu: a null snapshot field hides the card",
+    !menu.classList.contains("on"));
+  window.close();
+}
+
+// ------------------------------------------------------------------
+// 0.41.3 JS fixes (Front B B-3/S-1, Front D D-1/D-3/D-4):
+// (1) a drag drop posts `before` — the id of the tab the
+// user SAW immediately right of the drop indicator (null
+// at the end of the strip), never the bare gap; (2) a
+// snapshot that removes the dragged tab mid-drag retires
+// the drag (no stranded indicator, no move on release);
+// (3) DlRows coerces a task id to a number, so a string
+// id carrying a quote cannot break out of data-dl-id;
+// (4) the popover and page renderers share one row story
+// (indeterminate wash, progress + retry line, error on
+// any status); (5) the downloads page's refresh editor
+// keeps focus + caret across a data push.
+// ------------------------------------------------------------------
+{
+  const sent = [];
+  const dom = new JSDOM(chromeHtml, {
+    runScripts: "dangerously",
+    url: "https://pico.chrome/",
+    beforeParse(window) {
+      window.ipc = { postMessage: (m) => sent.push(JSON.parse(m)) };
+    },
+  });
+  const { window } = dom;
+  const doc = window.document;
+  const T = (id, title) => ({ id, title, url: `https://example.com/${id}`, loading: false, start: false, failed: false });
+  const baseSnap = {
+    tabs: [T(1, "One"), T(2, "Two"), T(3, "Three")],
+    active: 2, theme: "light", palette: "forest", themes: [], paletteOpen: false, teleportOpen: false,
+    address: "https://example.com/2",
+    canBack: false, canForward: false, services: 0,
+    downloads: [], downloadsOpen: false, activeError: "",
+    blockedTotal: 0, blockedTab: 0, shieldOn: true, version: "0.41.3",
+    liteOn: false, liteBlocked: 0, teleport: null, bookmarked: false,
+    tabContextMenu: null, focusAddr: false,
+  };
+  window.__pico({ ...baseSnap });
+  const tabEl = (id) => doc.querySelector(`#tabstrip .tab[data-tab-id="${id}"]`);
+  const tabMsgs = (a) => sent.filter((m) => m.kind === "tab" && m.action === a);
+  const ptr = (type, x) => new window.MouseEvent(type, { bubbles: true, button: 0, buttons: type === "pointerup" ? 0 : 1, clientX: x, clientY: 20 });
+  /* Real geometry for once: three 100px tabs side by side
+     (jsdom's own rects are all zero — see the 0.41C block). */
+  const rect = (left, width) => () => ({ left, width, right: left + width, top: 0, bottom: 40, height: 40, x: left, y: 0 });
+  tabEl(1).getBoundingClientRect = rect(0, 100);
+  tabEl(2).getBoundingClientRect = rect(100, 100);
+  tabEl(3).getBoundingClientRect = rect(200, 100);
+  doc.getElementById("tabstrip").getBoundingClientRect = rect(0, 300);
+
+  // (1) Mid-strip drop: drag tab 1 to x=160 — past tab 2's
+  // midpoint (150), short of tab 3's (250) — so the
+  // indicator stands immediately LEFT of tab 3.
+  const el1 = tabEl(1);
+  el1.dispatchEvent(ptr("pointerdown", 10));
+  el1.dispatchEvent(ptr("pointermove", 160));
+  check("0.41.3 drag: the indicator paints for the mid-strip drag",
+    doc.getElementById("tab-drop").classList.contains("on"));
+  el1.dispatchEvent(ptr("pointerup", 160));
+  check("0.41.3 drag: a mid-strip drop names the tab right of the indicator (before: 3), no gap field",
+    tabMsgs("move").length === 1 && tabMsgs("move")[0].tab === 1 &&
+    tabMsgs("move")[0].before === 3 && !("to" in tabMsgs("move")[0]),
+    JSON.stringify(tabMsgs("move")));
+  // (1) End drop: past the last tab's midpoint, the
+  // indicator is at the end of the strip — before is null.
+  const el2 = tabEl(2);
+  el2.dispatchEvent(ptr("pointerdown", 110));
+  el2.dispatchEvent(ptr("pointermove", 290));
+  el2.dispatchEvent(ptr("pointerup", 290));
+  check("0.41.3 drag: an end drop emits before: null",
+    tabMsgs("move").length === 2 && tabMsgs("move")[1].tab === 2 &&
+    tabMsgs("move")[1].before === null && !("to" in tabMsgs("move")[1]),
+    JSON.stringify(tabMsgs("move")));
+
+  // (2) The dragged tab is removed by a snapshot mid-drag:
+  // the drag retires with it.
+  const el3 = tabEl(3);
+  el3.dispatchEvent(ptr("pointerdown", 210));
+  el3.dispatchEvent(ptr("pointermove", 120));
+  check("0.41.3 drag: fixture drag of tab 3 is live (indicator on, tab dimmed)",
+    el3.classList.contains("dragging") && doc.getElementById("tab-drop").classList.contains("on"));
+  window.__pico({ ...baseSnap, tabs: [T(1, "One"), T(2, "Two")] });
+  check("0.41.3 drag: removing the dragged tab clears the indicator and the drag state",
+    !doc.getElementById("tab-drop").classList.contains("on") && !el3.classList.contains("dragging"));
+  el3.dispatchEvent(ptr("pointerup", 120));
+  check("0.41.3 drag: the retired drag posts no move on release",
+    tabMsgs("move").length === 2, JSON.stringify(tabMsgs("move")));
+  window.close();
+}
+{
+  const dom = new JSDOM(chromeHtml, {
+    runScripts: "dangerously",
+    url: "https://pico.chrome/",
+    beforeParse(window) {
+      window.ipc = { postMessage: () => {} };
+    },
+  });
+  const { window } = dom;
+  const doc = window.document;
+  const D = window.DlRows;
+  const scratch = (html) => { const d = doc.createElement("div"); d.innerHTML = html; return d; };
+  const base = {
+    name: "f.bin", host: "h.example", url: "https://h.example/f.bin",
+    connections: 8, error: null, hint: null, retry_text: null,
+    retry_pending: false, refreshing: false, sha256: null,
+    added_ms: 1730000000000, size_text: "", detail_text: "",
+    speed_bps: null, eta_secs: null,
+  };
+
+  // (3) A string id carrying a quote: coerced to 0, so
+  // nothing breaks out of the data-dl-id attribute.
+  const evil = { ...base, id: '7"><img src=x onerror="window.__pwned=1">', status: "paused", total: 100, downloaded: 10, percent: 10 };
+  check("0.41.3 dlrows: normalizeTask coerces ids (string number kept, fraction truncated, quote id → 0)",
+    D.normalizeTask({ id: "7" }).id === 7 && D.normalizeTask({ id: 7.9 }).id === 7 &&
+    D.normalizeTask(evil).id === 0,
+    String(D.normalizeTask(evil).id));
+  for (const surface of ["popover", "page"]) {
+    const host = scratch(D.renderTaskList({ tasks: [evil] }, surface));
+    check(`0.41.3 dlrows (${surface}): a quote-carrying string id renders no injected element and a numeric data-dl-id`,
+      host.querySelector("img") === null && !window.__pwned &&
+      host.firstElementChild.getAttribute("data-dl-id") === "0" &&
+      [...host.querySelectorAll("[data-dl-id]")].every((el) => /^\d+$/.test(el.getAttribute("data-dl-id"))),
+      host.innerHTML.slice(0, 160));
+  }
+
+  // (4a) Paused + unknown percent: the indeterminate wash
+  // on BOTH surfaces (the page used to paint a 0% bar).
+  const pausedUnknown = { ...base, id: 41, status: "paused", total: null, downloaded: 5000, percent: null };
+  const popA = scratch(D.renderTaskList({ tasks: [pausedUnknown] }, "popover"));
+  const pageA = scratch(D.renderTaskList({ tasks: [pausedUnknown] }, "page"));
+  check("0.41.3 dlrows (a): paused + unknown percent paints the indeterminate wash on BOTH surfaces",
+    popA.querySelector(".dl-fill").classList.contains("indet") &&
+    pageA.querySelector(".dlp-fill").classList.contains("indet") &&
+    pageA.querySelector(".dlp-fill").style.width === "100%",
+    pageA.innerHTML.slice(0, 200));
+  // (4b) Failed + retry pending: progress line PLUS a
+  // separate retry line on BOTH surfaces (the popover
+  // used to replace the progress with the countdown).
+  const retryTask = { ...base, id: 42, status: "failed", total: 200000000, downloaded: 60000000, percent: 30, error: "HTTP 404", retry_pending: true, retry_text: "Retrying in 12 · attempt 1 of 3" };
+  const popB = scratch(D.renderTaskList({ tasks: [retryTask] }, "popover"));
+  const pageB = scratch(D.renderTaskList({ tasks: [retryTask] }, "page"));
+  check("0.41.3 dlrows (b): failed + retry pending shows progress PLUS the retry line on BOTH surfaces",
+    popB.querySelector(".dl-prog-text").textContent === "60 MB of 200 MB · 30%" &&
+    pageB.querySelector(".dlp-detail").textContent === "60 MB of 200 MB · 30%" &&
+    popB.querySelector(".dl-retry").textContent === "Retrying in 12 · attempt 1 of 3" &&
+    pageB.querySelector(".dlp-retry").textContent === "Retrying in 12 · attempt 1 of 3",
+    popB.innerHTML.slice(0, 200));
+  // (4c) An error riding a downloading task: shown on
+  // BOTH surfaces (the page used to gate it to
+  // failed/paused/queued only).
+  const errTask = { ...base, id: 43, status: "downloading", total: 1000, downloaded: 500, percent: 50, error: "HTTP 500" };
+  const popC = scratch(D.renderTaskList({ tasks: [errTask] }, "popover"));
+  const pageC = scratch(D.renderTaskList({ tasks: [errTask] }, "page"));
+  check("0.41.3 dlrows (c): an error riding a downloading task prints on BOTH surfaces",
+    popC.querySelector(".dl-error").textContent === "HTTP 500" &&
+    !!pageC.querySelector(".dlp-error") &&
+    pageC.querySelector(".dlp-error").textContent === "HTTP 500",
+    pageC.innerHTML.slice(0, 200));
+  window.close();
+}
+{
+  const sent = [];
+  const dom = new JSDOM(downloadsHtml, {
+    runScripts: "dangerously",
+    url: "https://pico.downloads/",
+    beforeParse(window) {
+      window.ipc = { postMessage: (m) => sent.push(JSON.parse(m)) };
+    },
+  });
+  const { window } = dom;
+  const doc = window.document;
+  doc.execCommand = () => true;
+  const SETTINGS = { default_connections: 8, max_concurrent: 3, speed_limit_kbps: 0 };
+  const failed = { id: 13, name: "file.rar", host: "dl.example", url: "https://dl.example/file.rar?token=abc", status: "failed", total: 1000, downloaded: 300, percent: 30, size_text: "1 KB", detail_text: "300 B of 1 KB", connections: 8, error: "HTTP 403", hint: null, retry_text: null, retry_pending: false, refreshing: false, sha256: null, added_ms: 1730000000000, speed_bps: null, eta_secs: null };
+  const live = { id: 11, name: "big.zip", host: "dl.example", url: "https://dl.example/big.zip", status: "downloading", total: 10000, downloaded: 4000, percent: 40, size_text: "10 KB", detail_text: "4 KB of 10 KB", connections: 8, error: null, hint: null, retry_text: null, retry_pending: false, refreshing: false, sha256: null, added_ms: 1730000000000, speed_bps: null, eta_secs: null };
+  const pay = (tasks) => ({ theme: "light", palette: "forest", tasks, active_count: 1, failed_unseen: 1, settings: SETTINGS, notice: null });
+  window.__picoSetDownloads(pay([live, failed]));
+  const list = doc.getElementById("dl-page-list");
+  const rowOf = (id) => list.querySelector(`[data-dl-id="${id}"]`);
+  const refreshBtn = [...rowOf(13).querySelectorAll("button")].find((b) => b.textContent === "Refresh link…");
+  refreshBtn.click();
+  const input = rowOf(13).querySelector(".dl-refresh-input");
+  check("0.41.3 downloads page: fixture opens the refresh editor", !!input);
+  input.focus();
+  input.setSelectionRange(4, 9);
+  check("0.41.3 downloads page: fixture input holds focus + caret",
+    doc.activeElement === input && input.selectionStart === 4 && input.selectionEnd === 9,
+    `${input.selectionStart}..${input.selectionEnd}`);
+  // A progress tick on the OTHER download rebuilds the
+  // whole list — focus and caret must survive it.
+  window.__picoSetDownloads(pay([{ ...live, percent: 55, downloaded: 5500 }, failed]));
+  const kept = rowOf(13).querySelector(".dl-refresh-input");
+  check("0.41.3 downloads page: the refresh input keeps focus across a push",
+    !!kept && doc.activeElement === kept);
+  check("0.41.3 downloads page: the refresh input keeps its caret across a push",
+    !!kept && kept.selectionStart === 4 && kept.selectionEnd === 9,
+    kept ? `${kept.selectionStart}..${kept.selectionEnd}` : "editor lost");
+  window.close();
 }
 
 console.log(failures === 0 ? "\nDOM TEST: all checks passed" : `\nDOM TEST: ${failures} FAILURE(S)`);

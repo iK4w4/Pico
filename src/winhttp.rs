@@ -247,8 +247,19 @@ fn resolve_redirect(current: &str, location: &str) -> Option<String> {
     // `FTP://…`-style target fell through to the relative
     // path glue and produced a mangled same-host URL
     // (AUDIT 0.32.1, P1-16).
-    if let Some((scheme, _)) = location.split_once("://") {
-        if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https") {
+    let head = location.split(['/', '?', '#']).next().unwrap_or("");
+    if let Some((scheme, _)) = head.split_once(':') {
+        let valid_scheme = !scheme.is_empty()
+            && scheme.as_bytes()[0].is_ascii_alphabetic()
+            && scheme
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'));
+        if !valid_scheme {
+            return None;
+        }
+        if (scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
+            && location[scheme.len()..].starts_with("://")
+        {
             return Some(location.to_string());
         }
         return None;
@@ -662,7 +673,7 @@ fn open_request(
 #[cfg(windows)]
 fn open_session() -> Result<WinHttpHandle, FetchError> {
     use windows_sys::Win32::Networking::WinHttp::*;
-    let ua_w = wide("Pico/0.40.2");
+    let ua_w = wide("Pico/0.41.3");
     // SAFETY: the agent string buffer outlives the call; null
     // proxy parameters are the documented "default proxy"
     // values, matching the sibling binding.
@@ -1157,7 +1168,38 @@ pub fn fetch_range(
 
 #[cfg(test)]
 mod tests {
-    use super::{origin_form, scoped_referer, split_url};
+    use super::{origin_form, resolve_redirect, scoped_referer, split_url};
+
+    #[test]
+    fn resolve_redirect_preserves_query_urls_and_rejects_non_http_schemes() {
+        let base = "https://site.example/dir/start?old=1";
+        assert_eq!(
+            resolve_redirect(base, "/dl/file.zip?ref=https://site.example/page").as_deref(),
+            Some("https://site.example/dl/file.zip?ref=https://site.example/page")
+        );
+        assert_eq!(
+            resolve_redirect(base, "sub/file.zip?mirror=https://cdn.example/x").as_deref(),
+            Some("https://site.example/dir/sub/file.zip?mirror=https://cdn.example/x")
+        );
+        assert_eq!(
+            resolve_redirect(base, "//cdn.example/file.zip?u=https://site.example/").as_deref(),
+            Some("https://cdn.example/file.zip?u=https://site.example/")
+        );
+        assert_eq!(
+            resolve_redirect(base, "HTTPS://cdn.example/file.zip").as_deref(),
+            Some("HTTPS://cdn.example/file.zip")
+        );
+        for bad in [
+            "FTP://files.example/f.zip",
+            "blob:https://site.example/123",
+            "data:application/octet-stream,abc",
+            "mailto:ops@site.example",
+            "javascript:alert(1)",
+            "http:/missing-slash.example/f.zip",
+        ] {
+            assert_eq!(resolve_redirect(base, bad), None, "must reject {bad}");
+        }
+    }
 
     #[test]
     fn split_url_refuses_raw_controls_and_spaces() {
