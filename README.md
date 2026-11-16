@@ -2,7 +2,7 @@
   <img src="pico-icon.png" width="120" alt="Pico icon">
 </p>
 
-<h1 align="center">Pico - a Tiny Browser</h1>
+<h1 align="center">Pico</h1>
 
 <p align="center">
   A tiny, neumorphic Windows browser for local development — and a download manager.<br>
