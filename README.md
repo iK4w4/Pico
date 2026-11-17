@@ -16,6 +16,7 @@
   <img src="https://img.shields.io/badge/built_with-Rust-007ec6" alt="Built with">
   <img src="https://img.shields.io/badge/download_size-~1.9_MB-brightgreen" alt="Download size">
   <img src="https://img.shields.io/badge/license-MIT-333" alt="License">
+  <a href="https://github.com/iK4w4/Pico/actions/workflows/ci.yml"><img src="https://github.com/iK4w4/Pico/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
 </p>
 
 <p align="center">
