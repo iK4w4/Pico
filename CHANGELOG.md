@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Older releases (0.31–0.40) predate this file; their history is in
 SECURITY.md and the version notes in `src/core/mod.rs`.
 
+## [0.41.4] - 2026-11-17
+
+- Maintenance release: rebuilt from the exact tree in this repo, so
+  the release, the tag and the source finally match file for file
+- BUILD_NOTES.md (the full build log the code comments cite) is now
+  included in the repo
+- No behavior changes since 0.41.3
+
 ## [0.41.3] - 2026-11-16
 
 - Black-frame fix: tab switch/open/close no longer presents an

@@ -31,8 +31,8 @@ Get `Pico.exe` from the [Releases](https://github.com/iK4w4/Pico/releases)
 page and run it. It needs the Microsoft Edge WebView2 Runtime, which
 ships with Windows 11 and recent Windows 10.
 
-- Size: 1,935,360 bytes
-- SHA-256: f1a393c1be54274443fe81dfc09d455f5f1351e465d532848719d7780f2c5788
+- Size: 1,935,872 bytes
+- SHA-256: e46179c487be51b9bd5595ccbe7f985307a0775d594db87577349dff9ce53636
 
 ## Screenshots
 
