@@ -36,7 +36,7 @@ Chrome).
 
 The `Pico.exe` attached to the 0.41.4 release is 1,935,872
 bytes with SHA-256
-`e46179c487be51b9bd5595ccbe7f985307a0775d594db87577349dff9ce53636`.
+`9f18b880632c8b1989d67e409c9e73737e90ede96ca603f293bb4e957539629b`.
 If your copy's hash differs, it is not the file published
 from this tree.
 

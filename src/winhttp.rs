@@ -673,7 +673,7 @@ fn open_request(
 #[cfg(windows)]
 fn open_session() -> Result<WinHttpHandle, FetchError> {
     use windows_sys::Win32::Networking::WinHttp::*;
-    let ua_w = wide("Pico/0.41.3");
+    let ua_w = wide("Pico/0.41.4");
     // SAFETY: the agent string buffer outlives the call; null
     // proxy parameters are the documented "default proxy"
     // values, matching the sibling binding.
