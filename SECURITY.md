@@ -1,6 +1,6 @@
 # Pico — Security Model
 
-This document describes the **public build** of Pico 0.41.4 —
+This document describes the **public build** of Pico 0.41.5 —
 the one built from this source tree. The `Pico.exe` attached
 to this repository's releases is built from this tree.
 
@@ -34,9 +34,9 @@ Chrome).
 
 ## Verifying the release download
 
-The `Pico.exe` attached to the 0.41.4 release is 1,935,872
+The `Pico.exe` attached to the 0.41.5 release is 1,935,360
 bytes with SHA-256
-`9f18b880632c8b1989d67e409c9e73737e90ede96ca603f293bb4e957539629b`.
+`20741f2ed130c40cfd2259904a9a0b7df047780a4f309b539993243666a75d22`.
 If your copy's hash differs, it is not the file published
 from this tree.
 
@@ -291,7 +291,7 @@ product token removed. Several sign-in flows — notably
 Google's — reject or degrade the Edge token; this is
 a compatibility choice, disclosed here rather than
 hidden. Pico's own requests (the filter-list download
-and the download engine) identify as `Pico/0.41.4`.
+and the download engine) identify as `Pico/0.41.5`.
 
 ## Phone Teleport
 

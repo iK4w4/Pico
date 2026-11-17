@@ -1,5 +1,12 @@
 # Pico — Build Notes
 
+## 0.41.5 (2026-11-17)
+
+Maintenance release. The DOM test suite's static version pins were
+still pointing at the previous release and are now swept to the
+current one, and the Workstream D heading below carries the (WS-D)
+label the code cites. No behavior changes since 0.41.4.
+
 ## 0.41.4 (2026-11-17)
 
 Maintenance release, rebuilt from the exact tree in this repo so the

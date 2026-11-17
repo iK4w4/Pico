@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Older releases (0.31–0.40) predate this file; their history is in
 SECURITY.md and the version notes in `src/core/mod.rs`.
 
+## [0.41.5] - 2026-11-17
+
+- Maintenance release: the DOM test suite's version pins now match
+  the shipped pages, and BUILD_NOTES carries the (WS-D) workstream
+  label the code cites. No behavior changes since 0.41.4.
+
 ## [0.41.4] - 2026-11-17
 
 - Maintenance release: rebuilt from the exact tree in this repo, so

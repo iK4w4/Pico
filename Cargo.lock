@@ -1957,7 +1957,7 @@ dependencies = [
 
 [[package]]
 name = "pico"
-version = "0.41.4"
+version = "0.41.5"
 dependencies = [
  "notify",
  "rfd",

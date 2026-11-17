@@ -82,8 +82,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check("skeleton: NO savings band in the chrome (0.30: start page only)",
     doc.getElementById("stat-shield") === null &&
     doc.getElementById("stats-grid") === null);
-  check("skeleton: version badge is 0.41.4",
-    doc.getElementById("ver").textContent === "0.41.4",
+  check("skeleton: version badge is 0.41.5",
+    doc.getElementById("ver").textContent === "0.41.5",
     doc.getElementById("ver").textContent);
   check("skeleton: brand byline present",
     doc.getElementById("brand-by").textContent.includes("@iK4w4"),
@@ -1010,8 +1010,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check("start: chip glyphs are inline SVG (no <img>)",
     doc.querySelectorAll(".byline .chip svg").length === 2 &&
     doc.querySelectorAll(".byline img").length === 0);
-  check("start: footer reads 'Pico 0.41.4 · by @iK4w4'",
-    doc.querySelector(".footer").textContent.includes("Pico 0.41.4 · by @iK4w4"));
+  check("start: footer reads 'Pico 0.41.5 · by @iK4w4'",
+    doc.querySelector(".footer").textContent.includes("Pico 0.41.5 · by @iK4w4"));
   // Clicking a chip must target its action URL as the fallback
   // (the Rust nav handler turns that into a NEW tab — the start
   // tab never navigates). Capture the click before jsdom follows.
@@ -2754,8 +2754,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     active_count: 2, failed_unseen: 1, settings: SETTINGS, notice: null, ...over,
   });
 
-  check("0.34.1 downloads page: version marker reads 0.41.4",
-    doc.getElementById("dl-ver").textContent === "0.41.4",
+  check("0.34.1 downloads page: version marker reads 0.41.5",
+    doc.getElementById("dl-ver").textContent === "0.41.5",
     doc.getElementById("dl-ver").textContent);
   check("0.34 downloads page: the fixture renders five rows in order",
     rows().length === 5 &&
@@ -4176,10 +4176,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     !!rows()[0].querySelector(".hist-fav") && !rows()[0].querySelector("img.fav-img") &&
     rows()[0].querySelector(".hist-fav").textContent === "B",
     rows()[0].innerHTML);
-  check("0.41 history: count line and version read 0.41.4",
+  check("0.41 history: count line and version read 0.41.5",
     doc.getElementById("hist-count-line").textContent.includes("2 pages") &&
-    doc.getElementById("hist-ver").textContent === "0.41.4" &&
-    doc.querySelector(".footer").textContent.includes("Pico 0.41.4 · by @iK4w4"));
+    doc.getElementById("hist-ver").textContent === "0.41.5" &&
+    doc.querySelector(".footer").textContent.includes("Pico 0.41.5 · by @iK4w4"));
   check("0.41 history: theme hook present like its sibling page",
     typeof window.__picoTheme === "function" &&
     typeof window.__picoSetHistory === "function");

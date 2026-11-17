@@ -1,8 +1,8 @@
 [package]
 name = "pico"
-version = "0.41.4"
+version = "0.41.5"
 edition = "2021"
-description = "Pico 0.41.4 by @iK4w4 \u2014 a tiny neumorphic Windows browser for local development (Rust + tao/wry WebView2): auto-detected localhost services, a download manager (multi-connection downloads, pause/resume across restarts, a live-speed popover and a full downloads page), a three-layer Shield (filter lists downloaded on first run from EasyList / EasyPrivacy / uBlock Origin and cached in %LOCALAPPDATA%\\Pico), Lite mode with chosen-video semantics, a start-page savings band, sixteen palette themes, and AppData data since 0.41.0 (state, log, lists and profile in %LOCALAPPDATA%\\Pico; nothing beside the exe, an old data\\ folder is migrated on first run). Ships with NO embedded manifest (zero RT_MANIFEST, gate-verified); the only resource is an icon-only .rsrc compiled by llvm-rc from the checked-in .ico (resampled from the master artwork)."
+description = "Pico 0.41.5 by @iK4w4 \u2014 a tiny neumorphic Windows browser for local development (Rust + tao/wry WebView2): auto-detected localhost services, a download manager (multi-connection downloads, pause/resume across restarts, a live-speed popover and a full downloads page), a three-layer Shield (filter lists downloaded on first run from EasyList / EasyPrivacy / uBlock Origin and cached in %LOCALAPPDATA%\\Pico), Lite mode with chosen-video semantics, a start-page savings band, sixteen palette themes, and AppData data since 0.41.0 (state, log, lists and profile in %LOCALAPPDATA%\\Pico; nothing beside the exe, an old data\\ folder is migrated on first run). Ships with NO embedded manifest (zero RT_MANIFEST, gate-verified); the only resource is an icon-only .rsrc compiled by llvm-rc from the checked-in .ico (resampled from the master artwork)."
 license = "MIT"
 
 [lib]

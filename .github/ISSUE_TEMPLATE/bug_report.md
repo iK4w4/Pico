@@ -18,7 +18,7 @@ labels: bug
 
 
 **Your setup**
-- Pico version (shown on the start page, e.g. 0.41.4):
+- Pico version (shown on the start page, e.g. 0.41.5):
 - Windows version (e.g. Windows 11):
 
 **Anything from pico.log?**
