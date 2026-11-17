@@ -924,7 +924,7 @@ to a new Pico window from a right-click menu.
   right/bottom edges (ctx_menu_pos clamping is
   unit-tested; the live HWND paint is not).
 
-## Workstream D — Audit Fixes
+## Workstream D (WS-D) — Audit Fixes
 
 The fix phase for the Workstream D audit sweep
 (`~/workspace/pico-0410/audit-findings.md`: the whole
